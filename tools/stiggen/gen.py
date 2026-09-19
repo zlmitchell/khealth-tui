@@ -126,9 +126,15 @@ class Resolver:
         return None
 
 
-def clean(params):
+def clean(params, product=""):
+    """Drop private keys, stringify values and apply PARAM@PRODUCT overrides
+    (ssg does the same when it renders a template for one product)."""
     out = {}
-    for k, v in params.items():
+    suffix = "@" + product.upper()
+    overrides = {k[:-len(suffix)]: v for k, v in params.items() if suffix and k.endswith(suffix)}
+    merged = {k: v for k, v in params.items() if "@" not in k}
+    merged.update(overrides)
+    for k, v in merged.items():
         if k.startswith("_"):
             continue
         if isinstance(v, (str, int, float, bool)):
@@ -217,7 +223,7 @@ def main():
                     params = {k.upper(): v for k, v in tv.items()}
                     chk["note"] = "preprocess: %s" % e
                 chk["template"] = t["name"]
-                chk["params"] = clean(params)
+                chk["params"] = clean(params, a.product)
                 # resolve XCCDF variables the template consumes
                 resolved = {}
                 if t["name"] == "sysctl" and not chk["params"].get("SYSCTLVAL"):
@@ -231,6 +237,11 @@ def main():
                     v = resolver.value(vn, selections)
                     if v is not None:
                         resolved[vn] = v
+                if t["name"] == "audit_rules_watch" and str(chk["params"].get("PATH_IS_VARIABLE", "")).lower() == "true":
+                    v = resolver.value(chk["params"]["PATH"], selections)
+                    if v is not None:
+                        resolved[chk["params"]["PATH"]] = v
+                        chk["params"]["PATH"] = v
                 for pk in VARIABLE_PARAMS:
                     vn = chk["params"].get(pk)
                     if isinstance(vn, str) and vn and vn in vars_idx:

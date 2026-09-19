@@ -69,6 +69,7 @@ const (
 	ovConfirm
 	ovRevisions
 	ovInspect
+	ovPodLogs
 )
 
 // row is one selectable/scrollable line of a tab.
@@ -143,6 +144,7 @@ type App struct {
 	revCursor     int
 	actionRunning bool
 
+	logs        *logView
 	inspect     []inspectLevel
 	inspectSeq  int
 	crdCounts   []k8s.CRDInfo
@@ -740,6 +742,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case inspectMsg:
 		a.handleInspectMsg(m)
 		return a, nil
+	case logMsg:
+		return a, a.handleLogMsg(m)
 	case crdCountMsg:
 		a.crdCounting = false
 		if m.seq == a.seq {
@@ -818,6 +822,14 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.cursor[a.tab], a.scroll[a.tab] = 0, 0
 		return a, nil
 	}
+	if a.tab == tabWorkloads && a.snap != nil && key == "L" {
+		ns, pod, siblings, ok := a.podForLogs()
+		if !ok {
+			a.setStatus("select a pod, or a Deployment/DaemonSet/StatefulSet/Job with running pods, to tail logs")
+			return a, nil
+		}
+		return a, a.openPodLogs(ns, pod, siblings)
+	}
 	if a.tab == tabWorkloads && a.snap != nil {
 		switch key {
 		case "p":
@@ -858,6 +870,7 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key {
 	case "q":
+		a.closePodLogs()
 		return a, tea.Quit
 	case "tab", "]":
 		a.tab = (a.tab + 1) % tabCount
@@ -1064,6 +1077,8 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleActionOverlayKey(key)
 	case ovInspect:
 		return a.handleInspectKey(key)
+	case ovPodLogs:
+		return a.handleLogKey(key)
 	case ovNamespace:
 		switch key {
 		case "esc":
@@ -1575,6 +1590,8 @@ func (a *App) renderOverlay() string {
 		title, lines = a.renderActionOverlay()
 	case ovInspect:
 		title, lines = a.renderInspect()
+	case ovPodLogs:
+		title, lines = a.renderPodLogs()
 	case ovDetail:
 		title = a.detailTitle
 		visible := h - 4
@@ -1626,6 +1643,8 @@ func helpLines() []string {
 		"  Nodes      conditions + live CPU/mem/disk/load from SSH (or metrics-server), certs, services",
 		"  Inspect    controllers (deploy/ds/sts/job/cronjob) then pods not owned by one; p = all pods; t = rollout restart;",
 		"             enter opens the Object sub-tab: owner/child/secret/configmap/PVC/SA references, enter again drills down, esc back",
+		"             L = tail logs of the selected pod (or the controller's first pod): [ ] switch container, { } switch pod,",
+		"                 p previous instance, f follow on/off, w wrap, r reload, / not needed - lines stream live",
 		"             Resources sub-tab: every API type (built-in + CRDs) with instance counts; enter lists instances, enter again inspects one",
 		"  etcd       members, health, db size/quota/fragmentation, fsync latency, config source, snapshots/backups",
 		"  Storage    StorageClasses, CSI drivers, PVs/PVCs and node filesystems",

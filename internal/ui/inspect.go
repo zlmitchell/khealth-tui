@@ -227,7 +227,7 @@ func (a *App) renderInspect() (string, []string) {
 	if len(top.refs) == 0 {
 		lines = append(lines, styleDim.Render("References: none found"))
 	} else {
-		lines = append(lines, styleTitle.Render(fmt.Sprintf("References (%d)", len(top.refs)))+styleDim.Render("  j/k select, then scroll the YAML · enter opens · esc back · J/K or PgUp/PgDn page the YAML"))
+		lines = append(lines, styleTitle.Render(fmt.Sprintf("References (%d)", len(top.refs)))+styleDim.Render("  j/k select, then scroll the YAML · enter opens · esc back · J/K or PgUp/PgDn page the YAML - L logs when a pod is selected"))
 		var rows [][]string
 		for _, r := range top.refs {
 			via := r.Via

@@ -202,6 +202,32 @@ func TestFrameNeverExceedsScreen(t *testing.T) {
 	}
 }
 
+func TestPodLogsViewer(t *testing.T) {
+	a := testApp()
+	a.tab = tabWorkloads
+	// select the Deployment row: L should resolve to a pod via the selector
+	a.snap.Deployments[0].Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}
+	a.snap.Pods[0].Labels = map[string]string{"app": "web"}
+	a.cursor[tabWorkloads] = 0
+	ns, pod, sib, ok := a.podForLogs()
+	if !ok || ns != "default" || pod != "app-1" || len(sib) != 1 {
+		t.Fatalf("podForLogs: %v %s/%s %v", ok, ns, pod, sib)
+	}
+	lv := &logView{ns: ns, pod: pod, containers: []string{"c"}, lines: []string{"2024 level=error boom", "ok line"}, follow: true}
+	a.logs = lv
+	a.overlay = ovPodLogs
+	v := ansi.Strip(a.View())
+	if !strings.Contains(v, "Logs default/app-1") || !strings.Contains(v, "boom") {
+		t.Errorf("log viewer not rendered")
+	}
+	a.handleLogKey("w")
+	_ = a.View()
+	a.handleLogKey("esc")
+	if a.overlay != ovNone || a.logs != nil {
+		t.Errorf("esc should close the viewer")
+	}
+}
+
 func TestKeyHandling(t *testing.T) {
 	a := testApp()
 	a.handleKey(tea.KeyMsg{Type: tea.KeyTab})
