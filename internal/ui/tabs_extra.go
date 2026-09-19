@@ -1041,18 +1041,21 @@ func (a *App) helmContent() content {
 		} else if a.helm == nil {
 			latest = styleDim.Render("off: --helm-updates")
 		}
-		vals := ""
 		if r.ValuesYAML != "" {
-			vals = fmt.Sprintf("%d lines", strings.Count(r.ValuesYAML, "\n")+1)
+			st += styleDim.Render(fmt.Sprintf(" (%d value lines)", strings.Count(r.ValuesYAML, "\n")+1))
 		}
 		name := r.Name
 		if r.Bundled {
 			name += styleDim.Render(" (rke2)")
 		}
-		rows = append(rows, []string{r.Namespace, name, r.Chart, r.Version, r.AppVersion, fmt.Sprintf("%d/%d", r.Revision, len(r.History)), st, age(r.Updated), vals, latest})
+		origin := r.Origin
+		if origin == "" {
+			origin = styleDim.Render("unknown (not recorded by helm)")
+		}
+		rows = append(rows, []string{r.Namespace, name, r.Chart, r.Version, r.AppVersion, fmt.Sprintf("%d/%d", r.Revision, len(r.History)), st, age(r.Updated), origin, latest})
 		ids = append(ids, r.Namespace+"/"+r.Name)
 	}
-	h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "RELEASE", max: 36}, {title: "CHART", max: 36}, {title: "VERSION"}, {title: "APP"}, {title: "REV/HIST", right: true}, {title: "STATUS"}, {title: "UPDATED", right: true}, {title: "VALUES"}, {title: "LATEST"}}, rows)
+	h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "RELEASE", max: 30}, {title: "CHART", max: 30}, {title: "VERSION"}, {title: "APP"}, {title: "REV/HIST", right: true}, {title: "STATUS"}, {title: "UPDATED", right: true}, {title: "ORIGIN", max: 44}, {title: "LATEST"}}, rows)
 	hsegs := []seg{{0, styleOK, "deployed"}, {0, styleCrit, "failed"}, {0, styleWarn, "other"}, {0, styleInfo, "outdated"}}
 	for _, r := range s.HelmReleases {
 		switch strings.ToLower(r.Status) {
@@ -1093,6 +1096,24 @@ func (a *App) helmDetail(id string) (string, []string) {
 		}
 		if l, ok := a.helmLatest[r.Chart]; ok && l.Version != "" {
 			out = append(out, kv("latest available", l.Version+" ("+l.Source+")"))
+		}
+		out = append(out, "", styleTitle.Render("Origin")+styleDim.Render("  helm does not record the repository a chart was pulled from; this is the evidence in the release's Chart.yaml"))
+		if r.ChartRepo != "" {
+			out = append(out, kv("rke2 HelmChart", r.ChartRepo))
+		}
+		if r.Home != "" {
+			out = append(out, kv("home", r.Home))
+		}
+		for _, src := range r.Sources {
+			out = append(out, kv("source", src))
+		}
+		for _, d := range r.DepRepos {
+			out = append(out, kv("dependency repo", d))
+		}
+		for _, k := range sortedKeys(r.Annotations) {
+			if strings.HasPrefix(k, "catalog.cattle.io/") || strings.HasPrefix(k, "artifacthub.io/") || strings.HasPrefix(k, "meta.helm.sh/") {
+				out = append(out, kv(k, trunc(strings.ReplaceAll(r.Annotations[k], "\n", " "), a.width-30)))
+			}
 		}
 		if len(r.History) > 0 {
 			out = append(out, "", styleTitle.Render("History")+styleDim.Render("  (b on the Helm tab rolls back)"))

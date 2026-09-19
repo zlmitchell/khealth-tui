@@ -476,6 +476,36 @@ func (a *App) storageContent() content {
 	}
 	add("", styleTitle.Render("PersistentVolumeClaims")+styleDim.Render("  (namespace filter applies; "+usedNote+")"))
 	rows = nil
+	// which claims are mounted by a running pod, and what backs each PV
+	mountedBy := map[string]string{}
+	for i := range s.Pods {
+		p := &s.Pods[i]
+		if p.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		for _, v := range p.Spec.Volumes {
+			if v.PersistentVolumeClaim != nil {
+				mountedBy[p.Namespace+"/"+v.PersistentVolumeClaim.ClaimName] = p.Spec.NodeName
+			}
+		}
+	}
+	pvKind := map[string]string{}
+	for i := range s.PVs {
+		pv := &s.PVs[i]
+		src := pv.Spec.PersistentVolumeSource
+		switch {
+		case src.CSI != nil:
+			pvKind[pv.Name] = "csi:" + src.CSI.Driver
+		case src.HostPath != nil:
+			pvKind[pv.Name] = "hostPath"
+		case src.Local != nil:
+			pvKind[pv.Name] = "local"
+		case src.NFS != nil:
+			pvKind[pv.Name] = "nfs"
+		default:
+			pvKind[pv.Name] = "other"
+		}
+	}
 	for i := range s.PVCs {
 		p := &s.PVCs[i]
 		if !a.inNamespace(p.Namespace) {
@@ -502,16 +532,36 @@ func (a *App) storageContent() content {
 		}
 		used := styleDim.Render("-")
 		mounted := ""
-		if u, ok := usage[p.Namespace+"/"+p.Name]; ok {
+		key := p.Namespace + "/" + p.Name
+		kind := pvKind[p.Spec.VolumeName]
+		if u, ok := usage[key]; ok {
 			used = gauge(u.UsedPct(), 10, thr.DiskWarnPct, thr.DiskCritPct) + styleDim.Render(" "+humanBytes(float64(u.Used))+"/"+humanBytes(float64(u.Capacity)))
 			mounted = u.Node
+			if u.Capacity == 0 {
+				used = styleDim.Render(humanBytes(float64(u.Used)) + " used (no capacity known)")
+			}
+		} else {
+			switch {
+			case p.Status.Phase != corev1.ClaimBound:
+				used = styleDim.Render("not bound")
+			case mountedBy[key] == "" && (kind == "hostPath" || kind == "local"):
+				used = styleDim.Render("du on next full cycle (R)")
+			case mountedBy[key] == "":
+				used = styleDim.Render("not mounted by a running pod")
+			case kind == "hostPath" || kind == "local":
+				used = styleDim.Render("du on next full cycle (R)")
+			case strings.HasPrefix(kind, "csi:"):
+				used = styleDim.Render("mounted on " + mountedBy[key] + ", driver reported no stats yet")
+			default:
+				used = styleDim.Render("no stats")
+			}
 		}
-		rows = append(rows, []string{p.Namespace, p.Name, st, used, mounted, p.Spec.VolumeName, capacity, sc, age(p.CreationTimestamp.Time)})
+		rows = append(rows, []string{p.Namespace, p.Name, st, used, mounted, kind, p.Spec.VolumeName, capacity, sc, age(p.CreationTimestamp.Time)})
 	}
 	if len(rows) == 0 {
 		add(styleDim.Render("  none"))
 	} else {
-		h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "NAME", max: 36}, {title: "STATUS"}, {title: "USED"}, {title: "NODE", max: 20}, {title: "VOLUME", max: 36}, {title: "CAPACITY"}, {title: "CLASS"}, {title: "AGE"}}, rows)
+		h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "NAME", max: 36}, {title: "STATUS"}, {title: "USED"}, {title: "NODE", max: 20}, {title: "BACKEND", max: 22}, {title: "VOLUME", max: 30}, {title: "CAPACITY"}, {title: "CLASS"}, {title: "AGE"}}, rows)
 		add(h)
 		add(lines...)
 	}

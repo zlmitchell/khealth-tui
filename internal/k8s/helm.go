@@ -32,6 +32,15 @@ type HelmRelease struct {
 	Storage     string // secret | configmap
 	Bundled     bool   // installed by rke2/k3s HelmChart controller
 	History     []HelmRevision
+
+	// Origin evidence from Chart.yaml (Helm does not store the repo a chart
+	// was pulled from; these are the closest hints).
+	Home        string
+	Sources     []string
+	Annotations map[string]string
+	DepRepos    []string // dependencies[].repository
+	ChartRepo   string   // rke2 HelmChart CR spec.repo / spec.chart when bundled
+	Origin      string   // best-effort summary for display
 }
 
 // HelmRevision is one entry of a release's history (newest first).
@@ -56,9 +65,16 @@ type helmReleaseJSON struct {
 	} `json:"info"`
 	Chart struct {
 		Metadata struct {
-			Name       string `json:"name"`
-			Version    string `json:"version"`
-			AppVersion string `json:"appVersion"`
+			Name         string            `json:"name"`
+			Version      string            `json:"version"`
+			AppVersion   string            `json:"appVersion"`
+			Home         string            `json:"home"`
+			Sources      []string          `json:"sources"`
+			Annotations  map[string]string `json:"annotations"`
+			Dependencies []struct {
+				Name       string `json:"name"`
+				Repository string `json:"repository"`
+			} `json:"dependencies"`
 		} `json:"metadata"`
 	} `json:"chart"`
 	Config map[string]any `json:"config"`
@@ -105,14 +121,23 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 		}
 	}
 	// releases installed by the rke2/k3s HelmChart controller carry the CR name
-	bundled := map[string]bool{}
+	bundled := map[string]string{}
 	if l, err := c.Dyn.Resource(helmChartGVR).List(ctx, metav1.ListOptions{}); err == nil {
 		for _, it := range l.Items {
 			ns, _, _ := unstructured.NestedString(it.Object, "spec", "targetNamespace")
 			if ns == "" {
 				ns = it.GetNamespace()
 			}
-			bundled[ns+"/"+it.GetName()] = true
+			repo, _, _ := unstructured.NestedString(it.Object, "spec", "repo")
+			chart, _, _ := unstructured.NestedString(it.Object, "spec", "chart")
+			src := chart
+			if repo != "" {
+				src = repo + " " + chart
+			}
+			if src == "" {
+				src = "HelmChart CR (chartContent)"
+			}
+			bundled[ns+"/"+it.GetName()] = src
 		}
 	}
 	out := make([]HelmRelease, 0, len(latest))
@@ -120,11 +145,34 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 		h := history[key]
 		sort.Slice(h, func(i, j int) bool { return h[i].Revision > h[j].Revision })
 		r.History = h
-		r.Bundled = bundled[key]
+		if src, ok := bundled[key]; ok {
+			r.Bundled = true
+			r.ChartRepo = src
+		}
+		r.Origin = helmOrigin(&r)
 		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Namespace+out[i].Name < out[j].Namespace+out[j].Name })
 	return out, nil
+}
+
+// helmOrigin summarises where a chart most likely came from.
+func helmOrigin(r *HelmRelease) string {
+	switch {
+	case r.ChartRepo != "":
+		return "rke2 HelmChart: " + r.ChartRepo
+	case r.Annotations["catalog.cattle.io/certified"] != "" || r.Annotations["catalog.cattle.io/release-name"] != "":
+		return "Rancher catalog (" + r.Annotations["catalog.cattle.io/certified"] + ")"
+	case r.Annotations["artifacthub.io/links"] != "" || r.Annotations["artifacthub.io/changes"] != "":
+		return "Artifact Hub-published chart; home " + r.Home
+	case r.Home != "":
+		return r.Home
+	case len(r.Sources) > 0:
+		return r.Sources[0]
+	case len(r.DepRepos) > 0:
+		return "deps from " + r.DepRepos[0]
+	}
+	return ""
 }
 
 // decodeHelmRelease decodes the "release" payload: base64(gzip(json)).
@@ -163,6 +211,18 @@ func decodeHelmRelease(data []byte) (HelmRelease, error) {
 		AppVersion:  rj.Chart.Metadata.AppVersion,
 		Updated:     rj.Info.LastDeployed,
 		Description: rj.Info.Description,
+		Home:        rj.Chart.Metadata.Home,
+		Sources:     rj.Chart.Metadata.Sources,
+		Annotations: rj.Chart.Metadata.Annotations,
+	}
+	seen := map[string]bool{}
+	for _, d := range rj.Chart.Metadata.Dependencies {
+		r := d.Repository
+		if r == "" || strings.HasPrefix(r, "file://") || strings.HasPrefix(r, "@") || seen[r] {
+			continue
+		}
+		seen[r] = true
+		rel.DepRepos = append(rel.DepRepos, r)
 	}
 	if len(rj.Config) > 0 {
 		if y, err := yaml.Marshal(rj.Config); err == nil {

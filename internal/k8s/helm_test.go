@@ -11,7 +11,7 @@ import (
 )
 
 func TestDecodeHelmRelease(t *testing.T) {
-	js := `{"name":"nginx","namespace":"web","version":3,"info":{"status":"deployed","last_deployed":"2024-09-18T10:00:00Z","description":"Upgrade complete"},"chart":{"metadata":{"name":"nginx","version":"15.0.1","appVersion":"1.25"}},"config":{"replicaCount":2,"service":{"type":"LoadBalancer"}}}`
+	js := `{"name":"nginx","namespace":"web","version":3,"info":{"status":"deployed","last_deployed":"2024-09-18T10:00:00Z","description":"Upgrade complete"},"chart":{"metadata":{"name":"nginx","version":"15.0.1","appVersion":"1.25","home":"https://bitnami.com","sources":["https://github.com/bitnami/charts"],"dependencies":[{"name":"common","repository":"oci://registry-1.docker.io/bitnamicharts"}]}},"config":{"replicaCount":2,"service":{"type":"LoadBalancer"}}}`
 	var gz bytes.Buffer
 	w := gzip.NewWriter(&gz)
 	w.Write([]byte(js))
@@ -26,6 +26,12 @@ func TestDecodeHelmRelease(t *testing.T) {
 	}
 	if rel.ValuesYAML == "" || !bytes.Contains([]byte(rel.ValuesYAML), []byte("replicaCount: 2")) {
 		t.Errorf("values: %q", rel.ValuesYAML)
+	}
+	if rel.Home != "https://bitnami.com" || len(rel.Sources) != 1 || len(rel.DepRepos) != 1 || rel.DepRepos[0] != "oci://registry-1.docker.io/bitnamicharts" {
+		t.Errorf("origin fields: %+v", rel)
+	}
+	if o := helmOrigin(&rel); o != "https://bitnami.com" {
+		t.Errorf("origin = %q", o)
 	}
 	if _, err := decodeHelmRelease(nil); err == nil {
 		t.Errorf("expected error on empty payload")
