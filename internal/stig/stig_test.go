@@ -1,6 +1,7 @@
 package stig
 
 import (
+	"math"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -232,5 +233,47 @@ func TestRancherRules(t *testing.T) {
 		if r := find(rs, id); r == nil || r.Status != Unknown {
 			t.Errorf("%s without RBAC: got %+v want UNKNOWN", id, r)
 		}
+	}
+}
+
+func TestScores(t *testing.T) {
+	rs := []Result{
+		{ID: "V-242390", Cat: "I", Status: Pass},
+		{ID: "V-242382", Cat: "II", Status: Fail},
+		{ID: "V-242443", Cat: "II", Status: Manual},
+		{ID: "CIS-1.2.14", Cat: "II", Status: Pass},
+		{ID: "V-258230", Cat: "I", Group: "os", Ref: "DISA RHEL 9 STIG V2R9", Status: Fail, PerNode: map[string]Status{"a": Fail, "b": Pass}},
+		{ID: "V-257797", Cat: "II", Group: "os", Ref: "DISA RHEL 9 STIG V2R9", Status: Pass, PerNode: map[string]Status{"a": Pass, "b": Pass}},
+		{ID: "V-257944", Cat: "II", Group: "os", Ref: "DISA RHEL 9 STIG V2R9", Status: NA, PerNode: map[string]Status{"a": NA, "b": NA}},
+	}
+	byKey := map[string]Score{}
+	for _, s := range Scores(rs, true) {
+		byKey[s.Benchmark+"|"+s.Node] = s
+	}
+	k8s := byKey["DISA Kubernetes STIG V2R6 (01 Apr 2026)|"]
+	if k8s.Open != 1 || k8s.NotAFinding != 1 || k8s.NotReviewed != 1 || k8s.CatOpen[1] != 1 || k8s.CatTotal[0] != 1 {
+		t.Errorf("kubernetes scorecard: %+v", k8s)
+	}
+	if p := k8s.Percent(); p != 50 {
+		t.Errorf("kubernetes score %.1f want 50", p)
+	}
+	cis := byKey["CIS Kubernetes Benchmark v2.0.1 (Jun 2026) / rke2 CIS self-assessment v1.12|"]
+	if cis.NotAFinding != 1 || cis.Percent() != 100 {
+		t.Errorf("cis scorecard: %+v", cis)
+	}
+	all := byKey["DISA RHEL 9 STIG V2R9|"]
+	if all.Open != 1 || all.NotAFinding != 1 || all.NotApplicable != 1 || all.Percent() != 50 {
+		t.Errorf("rhel combined: %+v", all)
+	}
+	a := byKey["DISA RHEL 9 STIG V2R9|a"]
+	b := byKey["DISA RHEL 9 STIG V2R9|b"]
+	if a.Percent() != 50 || a.CatOpen[0] != 1 || b.Percent() != 100 || b.Open != 0 {
+		t.Errorf("per node: a=%+v b=%+v", a, b)
+	}
+	if s := (Score{}); !math.IsNaN(s.Percent()) {
+		t.Errorf("empty scorecard must be NaN")
+	}
+	if ShortBenchmark("DISA RHEL 9 STIG V2R9 (01 Jul 2026)") != "RHEL 9 STIG V2R9" {
+		t.Errorf("ShortBenchmark")
 	}
 }

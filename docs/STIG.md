@@ -80,6 +80,12 @@ SSH node facts ────┘        │
                                    └─ otherwise                      -> MANUAL, with the STIG check text
 ```
 
+`stig.Scores` turns results into SCC / OpenSCAP-style scorecards
+(`score.go`): per benchmark, and per node for the OS STIG rules, using the
+XCCDF default model (equal weights; score = Not a Finding / (Not a Finding
++ Open); N/A and Not Reviewed excluded) with open-per-CAT counts. MANUAL and
+UNKNOWN map to Not Reviewed.
+
 Result IDs are the DISA vulnerability IDs (`V-242390`), CIS section numbers
 (`CIS-1.2.14`), or `RKE2-*` / `OS-*` for prerequisites that no document
 numbers. `Result.Ref` names the document for OS rules; the others are matched

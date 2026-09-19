@@ -375,6 +375,9 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 			continue
 		}
 		opts := nodeinfo.Options{Heavy: heavy, LogLines: a.cfg.Logs.Lines, LogSince: a.cfg.Logs.Since, PVPaths: pvPaths}
+		if snap.VSphereConf != nil {
+			opts.VCenters = snap.VSphereConf.VCenters
+		}
 		// OS STIG facts are collected only when asked for (S on the OS STIG
 		// sub-tab): sysctl -a, package lists, find scans and config dumps are
 		// the most expensive part of the probe and never run unrequested. The
@@ -1761,6 +1764,7 @@ func helpLines() []string {
 		"  Logs       enter  node lines, enter again = full line + explanation; a = include info lines",
 		"  Events     enter  open the involved object in the inspector",
 		"  Security   ←/→    Rules / Node hardening / OS STIG        enter  rule detail, fix and the STIG's own check procedure",
+		"             scorecards per benchmark (and per node): score = not a finding / (not a finding + open), as SCC / OpenSCAP report",
 		"             a      hide passing rules                      m      hide MANUAL rules",
 		"             S      OS STIG sub-tab only: run the DISA OS STIG collection on the nodes (sysctl -a, packages, audit rules,",
 		"                    file sweep, config dumps; a few seconds per node). Never runs on its own - not at launch, not on r/R.",

@@ -1366,8 +1366,11 @@ func (a *App) securityContent() content {
 	hdr := []string{
 		styleTitle.Render("STIG / CIS checks") + "  " + stacked(40, ssegs) + "  " + legend(ssegs) + "  " + kv("automated pass rate", gauge(score, 10, 200, 200)),
 		benchmarkLine(),
-		styleDim.Render("IDs are a best-effort mapping to those releases; confirm against the STIG version you are audited on. 'a' hides passing rules, 'm' hides manual ones; enter shows detail + fix. OS STIG rules are under Node hardening."),
 	}
+	for _, sc := range stig.Scores(clusterRes, false) {
+		hdr = append(hdr, scoreLine(sc, 0))
+	}
+	hdr = append(hdr, styleDim.Render("score = Not a Finding / (Not a Finding + Open), the XCCDF default model SCC and OpenSCAP report (N/A and Not Reviewed excluded). IDs are a best-effort mapping; confirm against the release you are audited on. 'a' hides passing, 'm' hides manual; enter shows detail + fix."))
 	var rows [][]string
 	var ids []string
 	for i, r := range a.stigRes {
@@ -1413,7 +1416,11 @@ func (a *App) hardeningContent() content {
 		if !ni.STIGProbed {
 			osCell = styleDim.Render("not collected (S on OS STIG)")
 		} else if len(counts) > 0 {
+			sc := stig.Score{Open: counts[stig.Fail], NotAFinding: counts[stig.Pass]}
 			txt := stig.OSSummaryText(counts)
+			if p := sc.Percent(); !math.IsNaN(p) {
+				txt = fmt.Sprintf("score %.1f%%  %s", p, txt)
+			}
 			switch {
 			case counts[stig.Fail] > 0:
 				osCell = styleCrit.Render(txt)
@@ -1486,8 +1493,23 @@ func (a *App) osStigContent() content {
 	hdr := []string{
 		styleTitle.Render("DISA OS STIG rules") + "  " + stacked(40, ssegs) + "  " + legend(ssegs) + "  " + kv("automated pass rate", gauge(score, 10, 200, 200)),
 		a.osBenchmarkLine(),
-		styleDim.Render("evaluated from node facts: ComplianceAsCode templates plus native checks for the rest; MANUAL rows need a decision (authorised lists, documented exceptions) and carry the STIG check text in their detail (enter). 'a' hides passing, 'm' hides manual, '/' filters."),
 	}
+	scores := stig.Scores(osRes, true)
+	shown := 0
+	for _, sc := range scores {
+		if sc.Node == "" {
+			hdr = append(hdr, scoreLine(sc, 0))
+			continue
+		}
+		if shown < 8 {
+			hdr = append(hdr, scoreLine(sc, 4))
+		}
+		shown++
+	}
+	if shown > 8 {
+		hdr = append(hdr, styleDim.Render(fmt.Sprintf("    ... %d more nodes: per-node scores are in the Node hardening OS STIG column", shown-8)))
+	}
+	hdr = append(hdr, styleDim.Render("score = Not a Finding / (Not a Finding + Open) as SCC / OpenSCAP report it (N/A and Not Reviewed excluded). MANUAL = Not Reviewed: needs a decision, evidence and the STIG check text in the detail (enter). 'a' hides passing, 'm' hides manual, '/' filters."))
 	if !a.sshEnabled {
 		hdr = append(hdr, styleWarn.Render("SSH collection is off - these facts come from the nodes."))
 	}
@@ -1593,6 +1615,35 @@ func hardeningCell(it nodeinfo.HardeningItem) string {
 		txt += sep + styleDim.Render(it.Boot)
 	}
 	return txt
+}
+
+// scoreLine renders one SCC-style scorecard line: benchmark (or node),
+// score gauge, Open / Not a Finding / N/A / Not Reviewed and the open count
+// per severity.
+func scoreLine(sc stig.Score, indent int) string {
+	label := styleBold.Render(stig.ShortBenchmark(sc.Benchmark))
+	if sc.Node != "" {
+		label = styleBold.Render(sc.Node) + styleDim.Render(" ("+stig.ShortBenchmark(sc.Benchmark)+")")
+	}
+	pct := sc.Percent()
+	scoreTxt := styleDim.Render("no scored rules")
+	if !math.IsNaN(pct) {
+		st := styleOK
+		switch {
+		case pct < 70:
+			st = styleCrit
+		case pct < 90:
+			st = styleWarn
+		}
+		scoreTxt = st.Render(fmt.Sprintf("score %5.1f%%", pct)) + " " + gauge(pct, 12, 90, 70)
+	}
+	cats := fmt.Sprintf("CAT I %d/%d  CAT II %d/%d  CAT III %d/%d open", sc.CatOpen[0], sc.CatTotal[0], sc.CatOpen[1], sc.CatTotal[1], sc.CatOpen[2], sc.CatTotal[2])
+	if sc.CatOpen[0] > 0 {
+		cats = styleCrit.Render(fmt.Sprintf("CAT I %d/%d", sc.CatOpen[0], sc.CatTotal[0])) + fmt.Sprintf("  CAT II %d/%d  CAT III %d/%d open", sc.CatOpen[1], sc.CatTotal[1], sc.CatOpen[2], sc.CatTotal[2])
+	}
+	return strings.Repeat(" ", indent) + label + "  " + scoreTxt + "  " +
+		styleCrit.Render(fmt.Sprintf("open %d", sc.Open)) + "  " + styleOK.Render(fmt.Sprintf("not a finding %d", sc.NotAFinding)) + "  " +
+		styleDim.Render(fmt.Sprintf("n/a %d", sc.NotApplicable)) + "  " + styleWarn.Render(fmt.Sprintf("not reviewed %d", sc.NotReviewed)) + "  " + styleDim.Render(cats)
 }
 
 func benchmarkLine() string {

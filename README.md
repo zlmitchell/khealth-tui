@@ -68,7 +68,28 @@ khealth --no-ssh                          # API-only view
 khealth --bastion jump@bastion.example.com --insecure-host-key
 khealth --helm-updates=false              # skip the chart update check (on by default from your `helm repo` list and helm.repos)
 khealth --ssh-user admin --ask-pass       # prompt for a password used when keys fail (and for sudo)
+khealth --bootstrap-kubeconfig 10.0.0.11 --ssh-user admin   # no kubeconfig yet: build one over SSH (below)
 ```
+
+### No kubeconfig, but SSH to the nodes
+
+`--bootstrap-kubeconfig <server>[,<server>...]` fetches the admin kubeconfig
+(`rke2.yaml` / `k3s.yaml` / `admin.conf`) from the first reachable server node
+and rewrites `server: https://127.0.0.1:6443` to an endpoint the apiserver
+certificate is actually valid for. Candidates come from the serving
+certificate's SANs, ranked from the operator's side: a DNS name that resolves
+to a VIP / load-balancer address first, then a bare VIP, then the node's own
+name or address, and the SSH host as a last resort (with a warning and the
+`tls-san:` line to add). Each candidate is verified against `/version` before
+it is written. The cluster, user and context are named after the cluster
+(`--bootstrap-name`, else the first label of the endpoint's DNS name, else
+the node hostname without its index) instead of rke2's `default`, so several
+bootstrapped files merge cleanly for context switching. The file goes to
+`~/.kube/khealth-<name>.yaml` (`--bootstrap-out` to change; an existing file
+is kept as `.bak`) and the TUI starts with it. When the configured kubeconfig
+does not load and `ssh.hosts` lists nodes, khealth offers the same thing
+interactively. `tls-san` entries in `config.yaml` that the certificate does
+not carry yet are reported: rke2 only reissues the certificate on restart.
 
 `khealth --init-config` writes the annotated example config to
 `~/.config/k8s-health-tui/config.yaml` (`%AppData%/k8s-health-tui/config.yaml`
@@ -199,6 +220,16 @@ benchmark numbering:
 | CIS Kubernetes Benchmark | v2.0.1 (Jun 2026) / rke2 self-assessment v1.12 | `CIS-x.y.z` |
 | DISA RHEL STIG | 8 V2R8, 9 V2R9, 10 V1R2 (01 Jul 2026) | per node, matched from `/etc/os-release` |
 | DISA Ubuntu LTS STIG | 22.04 V2R9, 24.04 V1R6 | per node, matched from `/etc/os-release` (20.04 is out of standard support and not covered) |
+
+**Scores.** Both Security sub-tabs show an SCC / OpenSCAP-style scorecard
+per benchmark (and per node on the OS STIG sub-tab): score = Not a Finding
+÷ (Not a Finding + Open) - the XCCDF default scoring model DISA content
+uses, where every rule has equal weight and Not Applicable / Not Reviewed
+rules are excluded from the denominator - plus the Open / Not a Finding /
+N/A / Not Reviewed counts and open-per-CAT (I/II/III), so the numbers line
+up with what SCC prints for the same STIG. MANUAL results are Not
+Reviewed: they lower nothing, but the count is shown so nobody mistakes a
+partially reviewed 100% for a complete one.
 
 **Running the OS STIG.** The OS STIG collection is heavier than the normal
 probes (`sysctl -a`, package lists, `auditctl -l`, `sshd -T`, a `find` sweep
