@@ -229,7 +229,17 @@ func TestPodLogsViewer(t *testing.T) {
 		t.Errorf("T twice should show the full timestamp")
 	}
 	a.handleLogKey("w")
-	_ = a.View()
+	lv.lines = append(lv.lines, `2024-09-18T10:00:01Z {"level":"info","msg":"`+strings.Repeat("x", 300)+`","k":1}`)
+	v = a.View()
+	if !strings.Contains(v, "[") {
+		t.Errorf("wrapped lines should keep colouring")
+	}
+	for _, l := range strings.Split(v, "
+") {
+		if ansi.StringWidth(l) > a.width {
+			t.Errorf("wrapped log line wider than screen")
+		}
+	}
 	a.handleLogKey("esc")
 	if a.overlay != ovNone || a.logs != nil {
 		t.Errorf("esc should close the viewer")

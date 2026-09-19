@@ -227,13 +227,20 @@ func (a *App) logVisibleLines() []string {
 			return highlightLog(frag)
 		}
 		if lv.wrap {
-			// wrap the plain text first so escape sequences are never split
-			frags := wrap(rest, w-len(prefixPlain(prefix)))
+			// colour the whole line (so JSON/logfmt detection sees it intact),
+			// then wrap with an escape-sequence-aware wrapper
+			indent := strings.Repeat(" ", ansiWidth(prefix))
+			width := w - ansiWidth(prefix)
+			if width < 20 {
+				width = 20
+			}
+			frags := strings.Split(ansi.Wrap(hl(rest), width, ""), "
+")
 			for i, fr := range frags {
 				if i == 0 {
-					out = append(out, prefix+hl(fr))
+					out = append(out, prefix+fr)
 				} else {
-					out = append(out, strings.Repeat(" ", len(prefixPlain(prefix)))+hl(fr))
+					out = append(out, indent+fr)
 				}
 			}
 		} else {
