@@ -30,7 +30,7 @@ It uses two sources:
 | 7 | Addons | CNI (daemonsets + `/etc/cni/net.d` + rke2 `cni:`), CSI, CoreDNS/ingress/metrics-server/…, **Rancher management** (server URL, cluster-agent, fleet-agent, provisioned vs imported, `rancher-system-agent` per node, join topology via `server:`), **registries.yaml** vs containerd `certs.d`, registries actually used by pods, rke2 bundled HelmCharts + HelmChartConfig overrides |
 | 8 | Helm | releases decoded from `sh.helm.release.v1` secrets (chart, version, status, revision, history); Enter: **values applied** + history; update check against the `index.yaml` of your `helm repo` list (credentials included) and `helm.repos`; `u` upgrades to the newest known version, `b` rolls back to a chosen revision (runs the `helm` CLI after a confirmation, `--read-only` disables) |
 | 9 | Images | per node: image count/size, running containers, **unused images**, airgap tarballs (`/var/lib/rancher/rke2/agent/images/*.tar[.zst\|.gz]`, `.txt`) and which tarball images are running / which running images are not in any tarball |
-| 0 | Security | sub-tabs `Rules` / `Node hardening` / `OS STIG`; reference releases shown in the header; **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap); `OS STIG` lists every rule of the DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG matched per node, evaluated from node facts (ComplianceAsCode templates + native checks; decision-only rules MANUAL with evidence) |
+| 0 | Security | sub-tabs `Rules` / `Node hardening` / `OS STIG`; reference releases shown in the header; **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap); `OS STIG` lists every rule of the DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG matched per node, evaluated from node facts (ComplianceAsCode templates + native checks; decision-only rules MANUAL with evidence) - **on demand only: nothing is collected until you press `S` on that sub-tab** |
 | = | RKE2 | **control-plane isolation** (taints, user pods on servers, requests vs allocatable, whether apiserver/etcd static pods carry `control-plane-resource-requests`);  `config.yaml`(.d) per node, data-dir, `server/manifests` (user vs bundled, HelmChartConfig contents), static pod manifests, audit/PSS policies, config drift between nodes |
 | - | Logs | journal of rke2-server/agent, kubelet, containerd, rancher-system-agent **classified** into normal-startup noise / warnings / errors with explanations (token mismatch, CA mismatch, cluster-id mismatch, NOSPACE, PLEG, pull failures, protect-kernel-defaults, …); persistent startup noise is escalated |
 
@@ -199,6 +199,17 @@ benchmark numbering:
 | CIS Kubernetes Benchmark | v2.0.1 (Jun 2026) / rke2 self-assessment v1.12 | `CIS-x.y.z` |
 | DISA RHEL STIG | 8 V2R8, 9 V2R9, 10 V1R2 (01 Jul 2026) | per node, matched from `/etc/os-release` |
 | DISA Ubuntu LTS STIG | 22.04 V2R9, 24.04 V1R6 | per node, matched from `/etc/os-release` (20.04 is out of standard support and not covered) |
+
+**Running the OS STIG.** The OS STIG collection is heavier than the normal
+probes (`sysctl -a`, package lists, `auditctl -l`, `sshd -T`, a `find` sweep
+over the local filesystems and ~60 config-file dumps - a few seconds of CPU
+per node), so it never runs on its own: not at launch, not on `r`/`R`, not
+when SSH is re-enabled. Go to **Security → OS STIG** and press **`S`**; the
+status line shows how many nodes are being collected, the rows appear as
+each node answers, and the header shows how old the facts are. Later
+refresh cycles carry the facts forward; press `S` again to re-collect (for
+example after remediation). Until then the sub-tab is empty and the Node
+hardening column reads "not collected".
 
 The OS STIGs are evaluated in full: every rule of the matched release is
 listed on the `OS STIG` sub-tab. Checks come from [ComplianceAsCode](https://github.com/ComplianceAsCode/content)
