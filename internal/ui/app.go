@@ -45,20 +45,20 @@ const (
 	tabCount
 )
 
-var tabNames = [...]string{"Overview", "Nodes", "Workloads", "etcd", "Storage", "Events", "Addons", "Helm", "Images", "Security", "Logs", "RKE2", "CRDs"}
+var tabNames = [...]string{"Overview", "Nodes", "Inspect", "etcd", "Storage", "Events", "Addons", "Helm", "Images", "Security", "Logs", "RKE2", "CRDs"}
 var tabKeys = [...]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "c"}
 
 // subTabs are second-level views of a tab (h/l switch). "Inspect" renders
 // the object inspector in the body instead of an overlay.
 var subTabs = map[tab][]string{
-	tabWorkloads: {"Controllers", "Pods", "Inspect"},
-	tabCRDs:      {"Definitions", "Inspect"},
-	tabEvents:    {"Events", "Inspect"},
+	tabWorkloads: {"Controllers", "Pods", "Object"},
+	tabCRDs:      {"Definitions", "Object"},
+	tabEvents:    {"Events", "Object"},
 	tabLogs:      {"Nodes", "Lines"},
 	tabSecurity:  {"Rules", "Node hardening"},
 }
 
-const subInspect = "Inspect"
+const subInspect = "Object"
 
 type overlayKind int
 
@@ -1362,8 +1362,8 @@ func helpLines() []string {
 		styleBold.Render("Tabs"),
 		"  Overview   cluster summary, API health, ranked findings",
 		"  Nodes      conditions + live CPU/mem/disk/load from SSH (or metrics-server), certs, services",
-		"  Workloads  controllers (deploy/ds/sts/job/cronjob) then pods not owned by one; p = all pods; t = rollout restart;",
-		"             enter opens the object inspector: owner/child/secret/configmap/PVC/SA references, enter again drills down, esc back",
+		"  Inspect    controllers (deploy/ds/sts/job/cronjob) then pods not owned by one; p = all pods; t = rollout restart;",
+		"             enter opens the Object sub-tab: owner/child/secret/configmap/PVC/SA references, enter again drills down, esc back",
 		"  CRDs       every CustomResourceDefinition with instance counts; enter lists instances, enter again inspects one",
 		"  etcd       members, health, db size/quota/fragmentation, fsync latency, config source, snapshots/backups",
 		"  Storage    StorageClasses, CSI drivers, PVs/PVCs and node filesystems",

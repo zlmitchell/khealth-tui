@@ -117,7 +117,7 @@ func TestRenderAllTabsAndDetails(t *testing.T) {
 	if !a.inInspect() || len(a.inspect) != 1 {
 		t.Fatalf("expected Inspect sub-tab, sub=%q levels=%d", a.subName(), len(a.inspect))
 	}
-	if v := ansi.Strip(a.View()); !strings.Contains(v, "Inspect (1)") || !strings.Contains(v, "References") {
+	if v := ansi.Strip(a.View()); !strings.Contains(v, "Object (1)") || !strings.Contains(v, "References") {
 		t.Errorf("inspector body not rendered")
 	}
 	a.handleKey(tea.KeyMsg{Type: tea.KeyEsc})

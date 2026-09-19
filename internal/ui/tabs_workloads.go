@@ -214,7 +214,7 @@ func (a *App) workloadsContent() content {
 	if a.problemOnly {
 		mode = "problems only (a toggles)"
 	}
-	hdr = append(hdr, styleTitle.Render("Workloads")+"  "+kv("items", fmt.Sprint(total))+"  "+kv("unhealthy", colorCount(unhealthy, "", styleCrit))+"  "+styleDim.Render(mode)+"  "+styleKey.Render("enter")+styleDim.Render(" inspect + references  ")+styleKey.Render("t")+styleDim.Render(" rollout restart  ")+styleKey.Render("l")+styleDim.Render(" pods / inspect sub-tabs"))
+	hdr = append(hdr, styleTitle.Render("Inspect: workloads")+"  "+kv("items", fmt.Sprint(total))+"  "+kv("unhealthy", colorCount(unhealthy, "", styleCrit))+"  "+styleDim.Render(mode)+"  "+styleKey.Render("enter")+styleDim.Render(" inspect + references  ")+styleKey.Render("t")+styleDim.Render(" rollout restart  ")+styleKey.Render("l")+styleDim.Render(" pods / object sub-tabs"))
 	hdr = append(hdr, a.podsSummaryLine())
 	h, lines := renderTable(a.width, []column{{title: "KIND"}, {title: "NAMESPACE", max: 24}, {title: "NAME", max: 48}, {title: "READY", right: true}, {title: "STATUS", max: 30}, {title: "AGE", right: true}, {title: "IMAGES / DETAILS"}}, rows)
 	hdr = append(hdr, h)
