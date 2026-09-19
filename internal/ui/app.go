@@ -698,9 +698,15 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if a.inInspect() {
 		switch key {
-		case "esc", "backspace", "j", "k", "down", "up", "enter", "J", "K", "pgdown", "pgup", " ", "ctrl+d", "ctrl+u", "g", "G", "home", "end":
+		case "esc", "backspace", "q", "j", "k", "down", "up", "enter", "J", "K", "pgdown", "pgup", " ", "ctrl+d", "ctrl+u", "g", "G", "home", "end":
+			// q steps back out of the inspector like esc; it only quits from a top-level view
 			return a.handleInspectKey(key)
 		}
+	}
+	if key == "q" && a.tab == tabLogs && a.logsNode != "" {
+		a.logsNode = ""
+		a.cursor[a.tab], a.scroll[a.tab] = 0, 0
+		return a, nil
 	}
 	if a.tab == tabWorkloads && a.snap != nil {
 		switch key {

@@ -120,9 +120,9 @@ func TestRenderAllTabsAndDetails(t *testing.T) {
 	if v := ansi.Strip(a.View()); !strings.Contains(v, "Object (1)") || !strings.Contains(v, "References") {
 		t.Errorf("inspector body not rendered")
 	}
-	a.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
-	if a.inInspect() || a.subName() != "Controllers" {
-		t.Errorf("esc should return to Controllers, got %q", a.subName())
+	_, cmd := a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cmd != nil || a.inInspect() || a.subName() != "Controllers" {
+		t.Errorf("q in the inspector should step back, not quit: sub=%q cmd=%v", a.subName(), cmd != nil)
 	}
 	a.setSub(1)
 	if a.subName() != "Pods" || !a.wlPods {
