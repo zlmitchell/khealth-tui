@@ -461,6 +461,9 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 		info.TLSSAN = append(info.TLSSAN, YAMLList(cf.Content, "tls-san")...)
 	}
 	for _, cf := range info.ConfigFiles {
+		if !strings.HasSuffix(cf.Path, ".yaml") && !strings.HasSuffix(cf.Path, ".yml") {
+			continue // kubeadm-flags.env / systemd drop-ins are not key: value files
+		}
 		for _, l := range strings.Split(cf.Content, "\n") {
 			if strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t") || strings.HasPrefix(l, "-") {
 				continue

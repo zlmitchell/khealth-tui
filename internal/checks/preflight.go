@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"k8s-health-tui/internal/config"
+	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/nodeinfo"
 )
 
@@ -23,11 +24,15 @@ import (
 func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, string, string, string, string)) {
 	p := &ni.Preflight
 	thr := in.Cfg.Thresholds
+	v := distro.For(ni.Dist)
+	if (ni.Dist == "" || ni.Dist == "unknown") && in.Snap != nil {
+		v = distro.For(in.Snap.Distribution)
+	}
 	dataDir := ni.DataDir
 	if dataDir == "" {
-		dataDir = "/var/lib/rancher"
+		dataDir = v.DataDir
 	}
-	isRancher := ni.Dist == "rke2" || ni.Dist == "k3s"
+	isRancher := distro.IsRancher(v.Name)
 	// rke2/k3s run the kubelet as a child of their own unit
 	kubeletUp := false
 	for _, s := range []string{"kubelet", "rke2-server", "rke2-agent", "k3s", "k3s-agent"} {
@@ -59,9 +64,9 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				add(SevInfo, "node", name, fmt.Sprintf("swap in use (%s of %s): the kubelet runs with failSwapOn=false (%s default) so it tolerates it, but the kernel swaps system daemons and STIG images usually expect swap off", human(float64(ni.SwapTotal-ni.SwapFree)), human(float64(ni.SwapTotal)), ni.Dist), "swapoff -a and drop the fstab entry unless memorySwap.swapBehavior=LimitedSwap is intended")
 			}
 		case kubeletUp:
-			add(SevCrit, "node", name, fmt.Sprintf("swap active (%s on %s): the running kubelet started before it was enabled and refuses to start with swap on - it will not come back after the next restart or reboot", human(float64(total)*1024), strings.Join(devs, ",")), "swapoff -a and remove the swap line from /etc/fstab (or kubelet-arg fail-swap-on=false)")
+			add(SevCrit, "node", name, fmt.Sprintf("swap active (%s on %s): the running kubelet started before it was enabled and refuses to start with swap on - it will not come back after the next restart or reboot", human(float64(total)*1024), strings.Join(devs, ",")), "swapoff -a and remove the swap line from /etc/fstab (or "+v.KubeletArg("fail-swap-on=false", "failSwapOn: false")+")")
 		default:
-			add(SevCrit, "node", name, fmt.Sprintf("swap active (%s on %s) and the kubelet is not running: kubelet fails with 'running with swap on is not supported'", human(float64(total)*1024), strings.Join(devs, ",")), "swapoff -a; remove the swap line from /etc/fstab; restart rke2")
+			add(SevCrit, "node", name, fmt.Sprintf("swap active (%s on %s) and the kubelet is not running: kubelet fails with 'running with swap on is not supported'", human(float64(total)*1024), strings.Join(devs, ",")), "swapoff -a; remove the swap line from /etc/fstab; "+v.Restart(ni.ControlPlane))
 		}
 	} else if p.Probed && len(p.FstabSwap) > 0 {
 		add(SevWarn, "node", name, "swap is off now but /etc/fstab still lists it: it comes back at the next reboot and the kubelet will not start", "comment out the swap line in /etc/fstab: "+firstLine(p.FstabSwap[0]))
@@ -80,28 +85,34 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				covered = true
 			}
 		}
+		rulesFile := v.FapolicydFile
+		if i := strings.LastIndex(rulesFile, "/"); i >= 0 {
+			rulesFile = rulesFile[i+1:]
+		}
 		switch {
 		case fa.Permissive == "1":
 			add(SevInfo, "security", name, "fapolicyd runs permissive (logs only, does not block)", "")
+		case !isRancher:
+			// packaged kubelet/containerd are in the RPM trust db; only real denials matter
 		case len(fa.K8sRules) == 0:
-			add(SevCrit, "node", name, "fapolicyd is enforcing but no rules.d rule allows rke2/k3s paths: containerd-shim/runc under "+dataDir+" are denied ('operation not permitted') and pods stay ContainerCreating", "write /etc/fapolicyd/rules.d/80-rke2.rules (allow perm=any all : dir="+dataDir+"/ plus /opt/cni/ /run/k3s/ /var/lib/kubelet/), then fagenrules --load && systemctl restart fapolicyd")
+			add(SevCrit, "node", name, "fapolicyd is enforcing but no rules.d rule allows the "+v.Name+" paths: containerd-shim/runc under "+dataDir+" are denied ('operation not permitted') and pods stay ContainerCreating", "write "+v.FapolicydFile+" with 'allow perm=any all : dir=<dir>' for "+strings.Join(v.FapolicydDirs, " ")+", then fagenrules --load && systemctl restart fapolicyd")
 		case !covered:
-			add(SevCrit, "node", name, "fapolicyd rules allow /var/lib/rancher but data-dir is "+dataDir+": the rke2 binaries and container runtimes there are denied", "add 'allow perm=any all : dir="+dataDir+"/' to /etc/fapolicyd/rules.d/80-rke2.rules; fagenrules --load; systemctl restart fapolicyd")
+			add(SevCrit, "node", name, "fapolicyd rules allow /var/lib/rancher but data-dir is "+dataDir+": "+v.Binaries+" there are denied", "add 'allow perm=any all : dir="+dataDir+"/' to "+v.FapolicydFile+"; fagenrules --load; systemctl restart fapolicyd")
 		case fa.CompiledK8s == 0:
-			add(SevCrit, "node", name, "fapolicyd rules.d has the rke2 rules but compiled.rules does not: fagenrules --load never ran, the daemon enforces the old rule set", "fagenrules --load && systemctl restart fapolicyd")
+			add(SevCrit, "node", name, "fapolicyd rules.d has the "+v.Name+" rules but compiled.rules does not: fagenrules --load never ran, the daemon enforces the old rule set", "fagenrules --load && systemctl restart fapolicyd")
 		default:
 			if fa.DenyFile != "" && len(ruleFiles) > 0 {
 				sort.Strings(ruleFiles)
 				if ruleFiles[0] >= fa.DenyFile {
-					add(SevCrit, "node", name, fmt.Sprintf("fapolicyd rule order: %s sorts after the catch-all deny in %s, so the rke2 allow rules never match", ruleFiles[0], fa.DenyFile), "rename the rke2 rules file to a lower number than "+fa.DenyFile+" (e.g. 80-rke2.rules); fagenrules --load; restart fapolicyd")
+					add(SevCrit, "node", name, fmt.Sprintf("fapolicyd rule order: %s sorts after the catch-all deny in %s, so the %s allow rules never match", ruleFiles[0], fa.DenyFile, v.Name), "rename the rules file to a lower number than "+fa.DenyFile+" (e.g. "+rulesFile+"); fagenrules --load; restart fapolicyd")
 				}
 			}
 			if fa.RulesdMtime > fa.CompiledMtime && fa.CompiledMtime > 0 {
 				add(SevWarn, "node", name, "fapolicyd rules.d changed after compiled.rules was generated: the running rule set is stale", "fagenrules --load && systemctl restart fapolicyd")
 			}
 		}
-		// storage drivers execute host binaries the rke2 rules do not cover
-		if fa.Permissive != "1" && len(fa.K8sRules) > 0 {
+		// storage drivers execute host binaries the distribution's rules do not cover
+		if fa.Permissive != "1" && (len(fa.K8sRules) > 0 || !isRancher) {
 			for _, d := range p.CSI.HostDirs {
 				if d == "/var/lib/longhorn" && contains(p.CSI.HostDirs, "/var/lib/longhorn/engine-binaries") {
 					continue
@@ -110,7 +121,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 					continue
 				}
 				who := csiOwner(d)
-				add(SevCrit, "storage", name, fmt.Sprintf("fapolicyd allows the rke2 paths but not %s: %s executes from there and gets 'operation not permitted'", d, who), "add 'allow perm=any all : dir="+strings.TrimSuffix(d, "/")+"/' to /etc/fapolicyd/rules.d/81-csi.rules (before the deny file); fagenrules --load; systemctl restart fapolicyd")
+				add(SevCrit, "storage", name, fmt.Sprintf("fapolicyd has no allow rule for %s: %s executes from there and gets 'operation not permitted'", d, who), "add 'allow perm=any all : dir="+strings.TrimSuffix(d, "/")+"/' to /etc/fapolicyd/rules.d/81-csi.rules (before the deny file); fagenrules --load; systemctl restart fapolicyd")
 			}
 		}
 		if p.DeniesProbed {
@@ -132,9 +143,9 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				if !top.Last.IsZero() {
 					ago = " (last " + roundDur(in.Now.Sub(top.Last)) + " ago)"
 				}
-				add(SevCrit, "node", name, fmt.Sprintf("fapolicyd denied %d executions of rke2/k8s binaries today, e.g. %s -> %s%s", k8sCount, top.Exe, top.Path, ago), "ausearch -m FANOTIFY -ts today -i; fix the allow rules (see the rke2 rules file) and fagenrules --load")
+				add(SevCrit, "node", name, fmt.Sprintf("fapolicyd denied %d executions of %s/CSI binaries today, e.g. %s -> %s%s", k8sCount, v.Name, top.Exe, top.Path, ago), "ausearch -m FANOTIFY -ts today -i; add the path to "+v.FapolicydFile+" and fagenrules --load")
 			} else if other > 0 {
-				add(SevInfo, "security", name, fmt.Sprintf("fapolicyd denied %d executions today (none under rke2 paths)", other), "ausearch -m FANOTIFY -ts today -i")
+				add(SevInfo, "security", name, fmt.Sprintf("fapolicyd denied %d executions today (none under %s paths)", other, v.Name), "ausearch -m FANOTIFY -ts today -i")
 			}
 		}
 	}
@@ -201,7 +212,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				continue
 			}
 			sev := SevCrit
-			what := "rke2 binaries and container runtimes under " + path + " cannot execute"
+			what := v.Binaries + " under " + path + " cannot execute"
 			if path == "/var/lib/kubelet" {
 				sev = SevWarn
 				what = "pod volumes under /var/lib/kubelet cannot hold executables (init scripts, helper binaries)"
@@ -304,7 +315,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		}
 		// etcd user (rke2 CIS/STIG profile): a system account, nologin, no password
 		if strings.Contains(ni.Settings["profile"], "cis") && ni.ControlPlane && !ni.EtcdUser {
-			add(SevCrit, "security", name, "profile: cis is set but there is no etcd user on the host: rke2-server refuses to start (CIS pre-flight)", "useradd -r -c 'etcd user' -s /sbin/nologin -M etcd -U")
+			add(SevCrit, "security", name, "profile: cis is set but there is no etcd user on the host: "+v.Server+" refuses to start (CIS pre-flight)", "useradd -r -c 'etcd user' -s /sbin/nologin -M etcd -U")
 		}
 		if e := p.Account("etcd"); e != nil {
 			var bad []string
@@ -356,7 +367,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 					}
 				}
 				if len(uncovered) > 0 {
-					add(SevWarn, "node", name, fmt.Sprintf("NO_PROXY does not cover node IPs %s: supervisor/kubelet/etcd traffic to them goes through the proxy", truncList(uncovered, 4)), "add the node subnet to NO_PROXY in "+uniq(files)[0]+" and restart rke2")
+					add(SevWarn, "node", name, fmt.Sprintf("NO_PROXY does not cover node IPs %s: supervisor/kubelet/etcd traffic to them goes through the proxy", truncList(uncovered, 4)), "add the node subnet to NO_PROXY in "+uniq(files)[0]+" and "+v.Restart(ni.ControlPlane))
 				}
 			}
 		}
@@ -468,12 +479,12 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 	}
 
 	// ---- sysctls that stop routing / kubelet ----
-	if v, ok := ni.Sysctl["net.ipv4.ip_forward"]; ok && v == "0" {
-		add(SevCrit, "node", name, "net.ipv4.ip_forward=0: pod traffic is not routed through this node (Wicked/NetworkManager or a sysctl.d drop-in reset it)", "sysctl -w net.ipv4.ip_forward=1 and persist it in /etc/sysctl.d/90-rke2.conf")
+	if fwd, ok := ni.Sysctl["net.ipv4.ip_forward"]; ok && fwd == "0" {
+		add(SevCrit, "node", name, "net.ipv4.ip_forward=0: pod traffic is not routed through this node (Wicked/NetworkManager or a sysctl.d drop-in reset it)", "sysctl -w net.ipv4.ip_forward=1 and persist it in /etc/sysctl.d/90-"+v.Name+".conf")
 	}
 	if v := ni.Sysctl["fs.inotify.max_user_instances"]; v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n < 8192 {
-			add(SevInfo, "node", name, fmt.Sprintf("fs.inotify.max_user_instances=%d (RKE2 recommends 8192 for nodes with many pods or log watchers)", n), "echo 'fs.inotify.max_user_instances = 8192' > /etc/sysctl.d/99-inotify.conf; sysctl --system")
+			add(SevInfo, "node", name, fmt.Sprintf("fs.inotify.max_user_instances=%d (8192 recommended for nodes with many pods or log watchers)", n), "echo 'fs.inotify.max_user_instances = 8192' > /etc/sysctl.d/99-inotify.conf; sysctl --system")
 		}
 	}
 
@@ -486,7 +497,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 	if p.Probed {
 		for _, f := range p.RegFiles {
 			if f.Missing {
-				add(SevCrit, "images", name, fmt.Sprintf("registries.yaml configs %s: %s %s does not exist, TLS to that registry fails", f.Key, f.Kind, f.Path), "restore the file or fix the path in registries.yaml, then restart "+ni.Dist)
+				add(SevCrit, "images", name, fmt.Sprintf("registries.yaml configs %s: %s %s does not exist, TLS to that registry fails", f.Key, f.Kind, f.Path), "restore the file or fix the path in "+v.Registries+", then "+v.RegistryReload)
 			}
 		}
 		mismatches, badKeys := registryKeyMismatches(ni.Registries)
@@ -494,7 +505,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 			if badKeys[r.Host] {
 				continue // the key names no endpoint; the mismatch finding below explains it
 			}
-			if msg, hint, sev, ok := regVerdict(r); ok {
+			if msg, hint, sev, ok := regVerdict(r, v); ok {
 				add(sev, "images", name, msg, hint)
 			}
 		}
@@ -630,7 +641,7 @@ func provisioningUsers(p *nodeinfo.Preflight) []string {
 }
 
 // regVerdict interprets one curl probe of a registry endpoint.
-func regVerdict(r nodeinfo.RegProbe) (msg, hint string, sev Severity, ok bool) {
+func regVerdict(r nodeinfo.RegProbe, v distro.Vocab) (msg, hint string, sev Severity, ok bool) {
 	where := r.Host
 	if r.Skipped != "" {
 		return "", "", SevInfo, false
@@ -648,7 +659,7 @@ func regVerdict(r nodeinfo.RegProbe) (msg, hint string, sev Severity, ok bool) {
 		}
 		hint = "check the endpoint in registries.yaml, DNS/proxy from the node, and the registry"
 		if r.Exit == 60 {
-			hint = "set ca_file (the registry CA) under configs in registries.yaml, or insecure_skip_verify: true"
+			hint = "set ca_file (the registry CA) under configs in " + v.Registries + ", or insecure_skip_verify: true"
 		}
 		return fmt.Sprintf("registry %s unreachable from the node: %s (%s)", where, reason, r.URL), hint, SevWarn, true
 	}
@@ -662,9 +673,9 @@ func regVerdict(r nodeinfo.RegProbe) (msg, hint string, sev Severity, ok bool) {
 	case r.Code == 401 && r.TokenCode == 200:
 		return "", "", 0, false
 	case r.Code == 401 && r.Auth:
-		return fmt.Sprintf("registry %s rejects %s (HTTP 401): image pulls from it fail once the local cache misses", where, authNote), "rotate the username/password (robot token) in registries.yaml on every node and restart rke2; check the configs key matches the endpoint host:port", SevCrit, true
+		return fmt.Sprintf("registry %s rejects %s (HTTP 401): image pulls from it fail once the local cache misses", where, authNote), "rotate the username/password (robot token) in " + v.Registries + " on every node and " + v.RegistryReload + "; check the configs key matches the endpoint host:port", SevCrit, true
 	case r.Code == 401:
-		return fmt.Sprintf("registry %s requires authentication and %s (HTTP 401)", where, authNote), "add a configs entry with auth.username/password for " + where + " in registries.yaml", SevWarn, true
+		return fmt.Sprintf("registry %s requires authentication and %s (HTTP 401)", where, authNote), "add a configs entry with auth.username/password for " + where + " in " + v.Registries, SevWarn, true
 	case r.Code == 403:
 		return fmt.Sprintf("registry %s refuses the request (HTTP 403): the account lacks pull permission or the node IP is denied", where), "check the robot account's project permissions / registry ACLs", SevWarn, true
 	case r.Code == 404:
@@ -759,7 +770,7 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 		return rows
 	}
 	if p.Fapolicyd.Present {
-		v := fmt.Sprintf("rules.d %d files, %d rke2 rules, compiled mentions %d", len(p.Fapolicyd.RulesFiles), len(p.Fapolicyd.K8sRules), p.Fapolicyd.CompiledK8s)
+		v := fmt.Sprintf("rules.d %d files, %d %s rules, compiled mentions %d", len(p.Fapolicyd.RulesFiles), len(p.Fapolicyd.K8sRules), distro.For(ni.Dist).Name, p.Fapolicyd.CompiledK8s)
 		st := "ok"
 		if p.Units["fapolicyd.service"].Active && (len(p.Fapolicyd.K8sRules) == 0 || p.Fapolicyd.CompiledK8s == 0) {
 			st = "crit"
@@ -818,7 +829,7 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 	}
 	dataDir := ni.DataDir
 	if dataDir == "" {
-		dataDir = "/var/lib/rancher"
+		dataDir = distro.For(ni.Dist).DataDir
 	}
 	for _, path := range []string{dataDir, "/opt/cni", "/var/lib/kubelet"} {
 		if m := p.MountOpt(path); m != nil {
@@ -944,7 +955,7 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 		st := "ok"
 		if r.Skipped == "airgap" {
 			v, st = "not probed: node has airgap image tarballs, no egress attempted ("+r.URL+")", "dim"
-		} else if _, _, sev, bad := regVerdict(r); bad {
+		} else if _, _, sev, bad := regVerdict(r, distro.For(ni.Dist)); bad {
 			st = "warn"
 			if sev == SevCrit {
 				st = "crit"

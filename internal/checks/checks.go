@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"k8s-health-tui/internal/config"
+	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/helmcheck"
 	"k8s-health-tui/internal/k8s"
@@ -104,6 +105,7 @@ func Evaluate(in Input) []Finding {
 	}
 
 	// ---- nodes (API) ----
+	cv := distro.For(s.Distribution) // wording for hints: units, config files, commands
 	versions := map[string]int{}
 	for i := range s.Nodes {
 		versions[s.Nodes[i].Status.NodeInfo.KubeletVersion]++
@@ -115,7 +117,7 @@ func Evaluate(in Input) []Finding {
 	for i := range s.Nodes {
 		n := &s.Nodes[i]
 		if st, msg := k8s.NodeCondition(n, corev1.NodeReady); st != corev1.ConditionTrue {
-			add(SevCrit, "node", n.Name, "not Ready: "+firstLine(msg), "check kubelet / rke2 service and the Logs tab")
+			add(SevCrit, "node", n.Name, "not Ready: "+firstLine(msg), "check the "+cv.Server+" unit / kubelet and the Logs tab")
 		}
 		for _, ct := range []corev1.NodeConditionType{corev1.NodeMemoryPressure, corev1.NodeDiskPressure, corev1.NodePIDPressure} {
 			if st, msg := k8s.NodeCondition(n, ct); st == corev1.ConditionTrue {
@@ -168,10 +170,10 @@ func Evaluate(in Input) []Finding {
 			if iso.Protected {
 				sev = SevInfo // scheduled deliberately with tolerations
 			}
-			add(sev, "node", iso.Node, fmt.Sprintf("%d user workload pod(s) on control-plane node: %s", len(iso.UserPods), truncList(iso.UserPods, 3)), "rke2: node-taint: [CriticalAddonsOnly=true:NoExecute] on servers; move workloads to agents")
+			add(sev, "node", iso.Node, fmt.Sprintf("%d user workload pod(s) on control-plane node: %s", len(iso.UserPods), truncList(iso.UserPods, 3)), cv.NodeTaint+"; move workloads to worker nodes")
 		}
 		if !iso.Protected {
-			add(SevWarn, "node", iso.Node, "control-plane node has no NoSchedule/NoExecute taint", "rke2 config.yaml on servers: node-taint: [\"CriticalAddonsOnly=true:NoExecute\"]")
+			add(SevWarn, "node", iso.Node, "control-plane node has no NoSchedule/NoExecute taint", cv.NodeTaint)
 		}
 		unset := []string{}
 		for _, comp := range []string{"kube-apiserver", "etcd", "kube-controller-manager", "kube-scheduler"} {
@@ -200,6 +202,10 @@ func Evaluate(in Input) []Finding {
 	for name, ni := range in.Nodes {
 		if ni == nil {
 			continue
+		}
+		nv := distro.For(ni.Dist)
+		if ni.Dist == "" || ni.Dist == "unknown" {
+			nv = cv
 		}
 		if ni.Err != nil {
 			add(SevWarn, "ssh", name, "collection failed: "+ni.Err.Error(), "check ssh.user/key, sudo, host key, and node address")
@@ -253,7 +259,7 @@ func Evaluate(in Input) []Finding {
 			left := c.NotAfter.Sub(in.Now)
 			switch {
 			case left <= 0:
-				add(SevCrit, "node", name, "certificate expired: "+c.Path, "rke2: restart rotates client certs; kubeadm certs renew all")
+				add(SevCrit, "node", name, "certificate expired: "+c.Path, nv.CertRenew)
 			case left < thr.CertExpiryWarn:
 				add(SevWarn, "node", name, fmt.Sprintf("certificate expires in %dd: %s", int(left.Hours()/24), c.Path), "")
 			}
@@ -268,7 +274,7 @@ func Evaluate(in Input) []Finding {
 		}
 		// registries.yaml present but containerd has no mirror hosts -> not applied
 		if len(ni.RegistryMirrors) > 0 && len(ni.ContainerdHosts) == 0 {
-			add(SevWarn, "addons", name, "registries.yaml defines mirrors but containerd has no certs.d hosts configured", "restart rke2 to regenerate containerd config, or check the YAML")
+			add(SevWarn, "addons", name, "registries.yaml defines mirrors but containerd has no certs.d hosts configured", nv.RegistryReload+", or check the YAML")
 		}
 		if ni.Heavy {
 			unused, bytes := ni.UnusedImages()
@@ -746,7 +752,7 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 	case snapshotsDisabled:
 		add(SevWarn, "etcd", "backups", "rke2 etcd snapshots are disabled (etcd-disable-snapshots: true)", "enable scheduled snapshots or ensure an external backup")
 	case !backupMechanism && (len(in.Etcd) > 0 || rke2):
-		add(SevWarn, "etcd", "backups", "no etcd backup mechanism detected (no snapshots, timers, crons or CronJobs)", "rke2: snapshots are on by default - check the snapshot dir; upstream: set etcd.backup_dirs")
+		add(SevWarn, "etcd", "backups", "no etcd backup mechanism detected (no snapshots, timers, crons or CronJobs)", distro.For(s.Distribution).EtcdBackups+"; khealth looks for snapshot files, systemd timers, crons and CronJobs")
 	default:
 		latest := latestLocal
 		src := "local on " + latestLocalNode

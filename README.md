@@ -43,6 +43,17 @@ sparklines inline. History is kept in memory for the session (90 samples).
 
 **Cloud provider & CSI** (Addons tab, findings under `cloud`/`storage`): which cloud-controller-manager runs (vSphere CPI, AWS, Azure, OpenStack, Harvester, or only rke2's embedded stub) and whether it initialised every node (`uninitialized` taint, providerID scheme - an `rke2://` providerID on a vSphere/AWS cluster means the stub won and the CSI cannot map the node), kubelet `--cloud-provider` vs the installed CPI, both controllers running at once; per CSI driver (vSphere, Trident, EBS/EFS, Azure, Cinder, Longhorn, NFS/SMB, Ceph, Harvester): controller and node-plugin health with crash reasons, nodes missing the CSINode registration, StorageClasses/PVs, attach/mount/provision failure events of the last hour, `TridentBackend` state (offline/failed), the vSphere CPI `vsphere.conf` (vCenters, datacenters, credentials secret present). Node side: AWS IMDSv2 reachable, vSphere `disk.EnableUUID` (wwn disks), vCenter SDK reachable from each node, Trident host prerequisites by backend type (iscsid, `find_multipaths no`, `mount.nfs`), cloud-init unit results, `status.json`/`result.json`/`cloud-init.log` errors. Accounts: the cloud-init provisioning user (Rancher's) must not carry a password under STIG aging and must keep NOPASSWD sudo and keys; the `etcd` user must be a system account (nologin, no password) owning the etcd data dir.
 
+**Distributions**: rke2, k3s and kubeadm/upstream (kubeadm detected from the
+`kubeadm-config` ConfigMap or the `kube-apiserver-<node>` static pods; EKS,
+GKE, AKS, RKE1, OpenShift, MicroK8s, k0s and Talos are named). Every hint and
+tab reads in the distribution's own words through [internal/distro](internal/distro/distro.go):
+units, config files, data dirs, restart / certificate-renewal / cloud-provider
+/ kubelet-setting commands. On kubeadm the Config tab shows the
+`ClusterConfiguration`, the cluster `kubelet-config`, and per node the
+KubeletConfiguration (`/var/lib/kubelet/config.yaml`, `kubeadm-flags.env`,
+systemd drop-ins), static pod manifests and drift of the kubelet settings
+across nodes.
+
 **Node hardening** (per node, over SSH): SELinux runtime vs `/etc/selinux/config`, AppArmor, FIPS (`/proc/sys/crypto/fips_enabled` vs `fips=1` in grub / Ubuntu Pro), fapolicyd, auditd (+ rule count), firewalld/ufw (runtime vs unit-file / `ufw.conf`), Secure Boot, kernel lockdown, crypto policy, pending reboot. Runtime/boot mismatches are findings. The node detail (Enter on Nodes) opens with a dashboard of gauges and this table.
 
 Keys: `Tab`/`Shift+Tab` (or `[`/`]`, number keys) switch tabs, `←`/`→` or `h`/`l` switch sub-tabs inside a tab, `j/k` move, `Enter` detail, `n` namespace,
@@ -70,12 +81,12 @@ khealth --no-ssh                          # API-only view
 khealth --bastion jump@bastion.example.com --insecure-host-key
 khealth --helm-updates=false              # skip the chart update check (on by default from your `helm repo` list and helm.repos)
 khealth --ssh-user admin --ask-pass       # prompt for a password used when keys fail (and for sudo)
-khealth --bootstrap-kubeconfig 10.0.0.11 --ssh-user admin   # no kubeconfig yet: build one over SSH (below)
+khealth root@10.0.0.11                   # no kubeconfig yet: fetch the admin kubeconfig over SSH from a server node (below)
 ```
 
 ### No kubeconfig, but SSH to the nodes
 
-`--bootstrap-kubeconfig <server>[,<server>...]` fetches the admin kubeconfig
+`khealth [user@]server-node` (or `--bootstrap-kubeconfig <server>[,<server>...]`) fetches the admin kubeconfig
 (`rke2.yaml` / `k3s.yaml` / `admin.conf`) from the first reachable server node
 and rewrites `server: https://127.0.0.1:6443` to an endpoint the apiserver
 certificate is actually valid for. Candidates come from the serving
@@ -109,6 +120,34 @@ on Windows; `--config <path>` to put it elsewhere; it never overwrites) and
 `./khealth.yaml` in the working directory are also picked up. Every key is
 optional; flags override the file. The source of the example is
 `internal/config/config.example.yaml`.
+
+Run `khealth` with nothing else and it lists the clusters it knows (the
+kubeconfig in use plus every `~/.kube/khealth-*.yaml`) as a numbered menu,
+with `n` to bootstrap another from `[user@]host`. Each bootstrapped context
+remembers how its nodes were reached - `ssh-user`, `ssh-key`, `ssh-port`,
+`become` and the bootstrap host, stored as a `khealth` extension on the
+context, never a password - and both the menu and `C` re-apply it, so a
+cluster reached as `root` and one reached as `ubuntu` need no flags. Flags
+typed on the command line still win; picking a file that predates this
+remembers the current `--ssh-user` in it.
+
+`C` inside the app opens a context picker: the contexts of the kubeconfig in
+use plus every `~/.kube/khealth-*.yaml`, so each cluster bootstrapped once is
+one keypress away; switching drops all cached results and starts a fresh
+first-contact cycle.
+
+A file bootstrapped earlier is reused while it still connects: matched by
+server host before any SSH, or by the cluster CA once the admin kubeconfig is
+fetched. A stale one (endpoint no longer answers) is replaced in place with a
+`.bak`; `--bootstrap-fresh` skips the reuse.
+
+Started with no usable kubeconfig and no host, khealth asks instead of failing:
+on a cluster node it offers the local `rke2.yaml` / `k3s.yaml` / `admin.conf`
+(copied through `sudo` into `~/.kube/khealth-local.yaml` when it is root-only);
+otherwise it asks for a server node (`[user@]host`, password prompt when there
+is no key or agent) and bootstraps from it. `--ssh-address` is the node address
+*type* (InternalIP / ExternalIP / Hostname) used for nodes listed by the API,
+not a host.
 
 ### What SSH needs on the nodes
 

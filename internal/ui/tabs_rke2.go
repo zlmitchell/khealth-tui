@@ -6,34 +6,42 @@ import (
 	"strings"
 
 	"k8s-health-tui/internal/checks"
+	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/nodeinfo"
 )
 
 // settings that should normally agree across nodes of the same role
+// driftKeysUpstream are the KubeletConfiguration fields (kubeadm / upstream
+// nodes: /var/lib/kubelet/config.yaml) compared across nodes.
+var driftKeysUpstream = []string{"cgroupDriver", "failSwapOn", "rotateCertificates", "serverTLSBootstrap", "protectKernelDefaults", "readOnlyPort", "staticPodPath", "maxPods", "containerRuntimeEndpoint", "tlsCipherSuites", "eventRecordQPS", "streamingConnectionIdleTimeout", "makeIPTablesUtilChains", "cloudProvider", "resolvConf", "kubeReserved", "systemReserved"}
+
 var driftKeys = []string{"profile", "cni", "selinux", "secrets-encryption", "protect-kernel-defaults", "system-default-registry", "cluster-cidr", "service-cidr", "cluster-domain", "disable", "kube-apiserver-arg", "kubelet-arg", "etcd-snapshot-schedule-cron", "etcd-snapshot-retention", "data-dir", "write-kubeconfig-mode", "tls-san"}
 
 // rke2Content renders the RKE2/k3s configuration tab.
 func (a *App) rke2Content() content {
 	s := a.snap
 	dist := s.Distribution
-	hdr := []string{styleTitle.Render(a.tabName(tabRKE2)+" configuration") + "  " + kv("distribution", dist) + "  " + kv("version", s.Version) + styleDim.Render("   enter = full config.yaml, manifests and static pod dumps for the node")}
-	if dist != "rke2" && dist != "k3s" {
-		// upstream: no config.yaml, but the endpoint / certificate SAN check
-		// applies just the same (kubeadm-config carries certSANs)
-		hdr[0] = styleTitle.Render(a.tabName(tabRKE2)+" configuration") + "  " + kv("distribution", dist) + "  " + kv("version", s.Version)
+	rancher := distro.IsRancher(dist)
+	voc := distro.For(dist)
+	keys := driftKeys
+	if !rancher {
+		keys = driftKeysUpstream
+	}
+	hdr := []string{styleTitle.Render(a.tabName(tabRKE2)+" configuration") + "  " + kv("distribution", dist) + "  " + kv("version", s.Version) + styleDim.Render("   enter = full "+voc.ConfigName+", manifests and static pod dumps for the node")}
+	if !rancher {
+		// upstream: the kubelet's KubeletConfiguration replaces config.yaml and
+		// kubeadm-config carries the cluster-wide settings (certSANs, subnets)
 		if kc := s.Kubeadm; kc != nil {
-			hdr = append(hdr, kv("kubeadm ClusterConfiguration", fmt.Sprintf("clusterName=%s controlPlaneEndpoint=%s certSANs=[%s] serviceSubnet=%s", kc.ClusterName, kc.ControlPlaneEndpoint, strings.Join(kc.CertSANs, ", "), kc.ServiceSubnet)))
-		} else {
-			hdr = append(hdr, styleDim.Render("no kube-system/kubeadm-config ConfigMap: not kubeadm, or no RBAC to read it"))
+			hdr = append(hdr, kv("kubeadm ClusterConfiguration", fmt.Sprintf("clusterName=%s controlPlaneEndpoint=%s certSANs=[%s] serviceSubnet=%s kubernetesVersion=%s", kc.ClusterName, kc.ControlPlaneEndpoint, strings.Join(kc.CertSANs, ", "), kc.ServiceSubnet, kc.KubernetesVersion)))
+			if kc.KubeletRaw != "" {
+				hdr = append(hdr, kv("kube-system/kubelet-config", "cluster-wide KubeletConfiguration present (enter on a node shows the node's copy)"))
+			}
+		} else if dist == "kubeadm" {
+			hdr = append(hdr, styleDim.Render("no kube-system/kubeadm-config ConfigMap: no RBAC to read it?"))
 		}
-		if !a.sshEnabled {
-			hdr = append(hdr, styleWarn.Render("SSH collection is off - the apiserver certificate SANs come from the control-plane nodes."))
-		}
-		hdr = append(hdr, a.endpointLines()...)
-		return content{header: hdr, empty: "rke2/k3s node settings and drift need an rke2/k3s cluster"}
 	}
 	if !a.sshEnabled {
-		hdr = append(hdr, styleWarn.Render("SSH collection is off - config.yaml and manifest directories need SSH."))
+		hdr = append(hdr, styleWarn.Render("SSH collection is off - "+voc.ConfigName+" and manifest directories need SSH."))
 	}
 
 	// drift: value sets per key across server nodes / agent nodes
@@ -48,7 +56,7 @@ func (a *App) rke2Content() content {
 		if ni.ControlPlane {
 			vs = servers
 		}
-		for _, k := range driftKeys {
+		for _, k := range keys {
 			if vs[k] == nil {
 				vs[k] = map[string]bool{}
 			}
@@ -60,7 +68,7 @@ func (a *App) rke2Content() content {
 		}
 	}
 	var drift []string
-	for _, k := range driftKeys {
+	for _, k := range keys {
 		if len(servers[k]) > 1 {
 			drift = append(drift, "servers:"+k)
 		}
@@ -71,7 +79,7 @@ func (a *App) rke2Content() content {
 	if len(drift) > 0 {
 		hdr = append(hdr, styleWarn.Render("config drift between nodes: ")+strings.Join(drift, ", "))
 	} else if len(a.nodes) > 1 {
-		hdr = append(hdr, styleOK.Render("no config drift across nodes for ")+styleDim.Render(strings.Join(driftKeys[:8], ", ")+", ..."))
+		hdr = append(hdr, styleOK.Render("no config drift across nodes for ")+styleDim.Render(strings.Join(keys[:8], ", ")+", ..."))
 	}
 
 	// API endpoint: what the kubeconfig uses vs what the serving certificate
@@ -89,7 +97,9 @@ func (a *App) rke2Content() content {
 			failed++
 		}
 	}
-	hdr = append(hdr, kv("bundled HelmCharts", fmt.Sprintf("%d (%d with HelmChartConfig overrides, %s)", len(s.HelmCharts), overrides, colorCount(failed, "failed", styleCrit)))+"  "+kv("rke2 settings on nodes", "see table; Addons tab shows registries/CNI"))
+	if rancher {
+		hdr = append(hdr, kv("bundled HelmCharts", fmt.Sprintf("%d (%d with HelmChartConfig overrides, %s)", len(s.HelmCharts), overrides, colorCount(failed, "failed", styleCrit)))+"  "+kv(voc.Name+" settings on nodes", "see table; Addons tab shows registries/CNI"))
+	}
 
 	hdr = append(hdr, "", styleTitle.Render("Control-plane isolation")+styleDim.Render("  user pods = non-system namespaces excluding DaemonSets; CP requests = requests set on apiserver/etcd/scheduler/controller static pods"))
 	var isoRows [][]string
@@ -132,6 +142,43 @@ func (a *App) rke2Content() content {
 
 	var rows [][]string
 	var ids []string
+	if !rancher {
+		// upstream / kubeadm: the kubelet settings that matter, from
+		// /var/lib/kubelet/config.yaml on each node
+		for i := range s.Nodes {
+			n := &s.Nodes[i]
+			ni := a.nodes[n.Name]
+			role := "worker"
+			if ni != nil && ni.ControlPlane {
+				role = "control-plane"
+			}
+			if ni == nil || ni.Err != nil {
+				state := styleDim.Render("no ssh data")
+				if ni != nil {
+					state = styleCrit.Render("ssh error")
+				}
+				rows = append(rows, []string{n.Name, role, state})
+				ids = append(ids, n.Name)
+				continue
+			}
+			st := ni.Settings
+			get := func(k, def string) string {
+				if v := st[k]; v != "" {
+					return v
+				}
+				return styleDim.Render(def)
+			}
+			rows = append(rows, []string{n.Name, role, get("cgroupDriver", "cgroupfs"), get("failSwapOn", "true"), get("rotateCertificates", "false"), get("protectKernelDefaults", "false"), get("readOnlyPort", "0"), get("maxPods", "110"), fmt.Sprint(len(ni.ConfigFiles)), fmt.Sprint(len(ni.StaticPods))})
+			ids = append(ids, n.Name)
+		}
+		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "ROLE"}, {title: "CGROUP DRIVER"}, {title: "FAIL SWAP ON"}, {title: "ROTATE CERTS"}, {title: "PROTECT KERNEL"}, {title: "READONLY PORT"}, {title: "MAX PODS"}, {title: "CFG FILES", right: true}, {title: "STATIC PODS", right: true}}, rows)
+		hdr = append(hdr, h)
+		c := content{header: hdr, selectable: true, empty: "no nodes"}
+		for i, l := range lines {
+			c.rows = append(c.rows, row{id: ids[i], text: l})
+		}
+		return c
+	}
 	for i := range s.Nodes {
 		n := &s.Nodes[i]
 		ni := a.nodes[n.Name]
@@ -207,8 +254,13 @@ func (a *App) rke2Detail(node string) (string, []string) {
 	if ni == nil {
 		return "", nil
 	}
+	voc := distro.For(ni.Dist)
+	if ni.Dist == "" || ni.Dist == "unknown" {
+		voc = distro.For(a.snap.Distribution)
+	}
+	title := voc.Label + " " + node
 	if ni.Err != nil {
-		return "RKE2 " + node, []string{styleCrit.Render("ssh error: " + ni.Err.Error())}
+		return title, []string{styleCrit.Render("ssh error: " + ni.Err.Error())}
 	}
 	w := a.width - 6
 	var out []string
@@ -216,6 +268,12 @@ func (a *App) rke2Detail(node string) (string, []string) {
 	role := "agent"
 	if ni.ControlPlane {
 		role = "server"
+	}
+	if !distro.IsRancher(voc.Name) {
+		role = "worker"
+		if ni.ControlPlane {
+			role = "control-plane"
+		}
 	}
 	add(kv("role", role) + "  " + kv("dist", ni.Dist) + "  " + kv("data-dir", ni.DataDir) + "  " + kv("collected", age(ni.Collected)+" ago"))
 	var kvs []string
@@ -226,7 +284,7 @@ func (a *App) rke2Detail(node string) (string, []string) {
 
 	add("", styleTitle.Render("Configuration files (secrets masked)"))
 	if len(ni.ConfigFiles) == 0 {
-		add(styleDim.Render("  no /etc/rancher/{rke2,k3s}/config.yaml"))
+		add(styleDim.Render("  no " + voc.ConfigFile + " (config tier not collected yet, or the file is absent)"))
 	}
 	for _, f := range ni.ConfigFiles {
 		add(styleBold.Render("--- " + f.Path))
@@ -292,7 +350,21 @@ func (a *App) rke2Detail(node string) (string, []string) {
 		add("", styleTitle.Render("kubelet process args"))
 		add(wrap(strings.Join(flags, " "), w)...)
 	}
-	return "RKE2 " + node, out
+	if kc := a.snap.Kubeadm; kc != nil && !distro.IsRancher(voc.Name) {
+		if kc.Raw != "" {
+			add("", styleTitle.Render("kube-system/kubeadm-config ClusterConfiguration")+styleDim.Render("  cluster-wide; the same on every node"))
+			for _, l := range strings.Split(strings.TrimRight(kc.Raw, "\n"), "\n") {
+				add(wrap(l, w)...)
+			}
+		}
+		if kc.KubeletRaw != "" {
+			add("", styleTitle.Render("kube-system/kubelet-config KubeletConfiguration")+styleDim.Render("  cluster default; compare with /var/lib/kubelet/config.yaml above"))
+			for _, l := range strings.Split(strings.TrimRight(kc.KubeletRaw, "\n"), "\n") {
+				add(wrap(l, w)...)
+			}
+		}
+	}
+	return title, out
 }
 
 // endpointLines renders the API endpoint section of the RKE2 tab: the

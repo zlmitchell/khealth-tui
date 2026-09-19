@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
 )
@@ -133,21 +134,8 @@ func evalEndpoint(in Input, add func(Severity, string, string, string, string)) 
 }
 
 // SANKey names where the extra apiserver SANs are configured per distribution.
-func SANKey(dist string) string {
-	if dist == "kubeadm" {
-		return "kubeadm-config apiServer.certSANs"
-	}
-	return "tls-san (config.yaml)"
-}
+func SANKey(dist string) string { return distro.For(dist).SANKey }
 
 // ReissueHint is how the apiserver serving certificate gets regenerated
 // after the configured SANs change.
-func ReissueHint(dist string) string {
-	switch dist {
-	case "kubeadm":
-		return "on each control-plane node: kubeadm certs renew apiserver (reads certSANs from kube-system/kubeadm-config), then restart kube-apiserver (crictl stopp the pod, or move its manifest out of /etc/kubernetes/manifests and back)"
-	case "k3s":
-		return "systemctl restart k3s (one server at a time); k3s regenerates serving-kube-apiserver.crt with the new SANs"
-	}
-	return "systemctl restart rke2-server (one server at a time); rke2 regenerates serving-kube-apiserver.crt with the new SANs"
-}
+func ReissueHint(dist string) string { return distro.For(dist).Reissue }

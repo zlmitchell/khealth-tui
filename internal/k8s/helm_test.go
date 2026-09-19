@@ -89,10 +89,26 @@ func TestNodeRolesAndAddress(t *testing.T) {
 }
 
 func TestDetectDistribution(t *testing.T) {
-	if d := detectDistribution([]corev1.Node{{Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.30.4+rke2r1"}}}}); d != "rke2" {
+	if d := detectDistribution(&Snapshot{Nodes: []corev1.Node{{Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.30.4+rke2r1"}}}}}); d != "rke2" {
 		t.Errorf("got %s", d)
 	}
-	if d := detectDistribution([]corev1.Node{{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"kubeadm.alpha.kubernetes.io/cri-socket": "x"}}}}); d != "kubeadm" {
+	if d := detectDistribution(&Snapshot{Nodes: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"kubeadm.alpha.kubernetes.io/cri-socket": "x"}}}}}); d != "kubeadm" {
+		t.Errorf("got %s", d)
+	}
+	// recent kubeadm: no node annotation, but the kubeadm-config ConfigMap
+	plain := corev1.Node{Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.31.2"}}}
+	if d := detectDistribution(&Snapshot{Nodes: []corev1.Node{plain}, ConfigMapNames: map[string]bool{"kube-system/kubeadm-config": true}}); d != "kubeadm" {
+		t.Errorf("got %s", d)
+	}
+	// or the static kube-apiserver pod when configmaps could not be listed
+	pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "kube-apiserver-cp-1", Annotations: map[string]string{"kubernetes.io/config.source": "file"}}}
+	if d := detectDistribution(&Snapshot{Nodes: []corev1.Node{plain}, Pods: []corev1.Pod{pod}}); d != "kubeadm" {
+		t.Errorf("got %s", d)
+	}
+	if d := detectDistribution(&Snapshot{Nodes: []corev1.Node{plain}}); d != "unknown" {
+		t.Errorf("got %s", d)
+	}
+	if d := detectDistribution(&Snapshot{Nodes: []corev1.Node{{Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.30.2-eks-1552ad0"}}}}}); d != "eks" {
 		t.Errorf("got %s", d)
 	}
 }

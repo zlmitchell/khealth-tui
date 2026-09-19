@@ -19,6 +19,8 @@ type KubeadmConfig struct {
 	CertSANs             []string // apiServer.certSANs
 	ServiceSubnet        string
 	KubernetesVersion    string
+	Raw                  string // the ClusterConfiguration document as stored
+	KubeletRaw           string // kube-system/kubelet-config KubeletConfiguration (cluster-wide kubelet defaults)
 }
 
 // kubeadmConfig reads kube-system/kubeadm-config; nil when absent.
@@ -45,5 +47,9 @@ func (c *Client) kubeadmConfig(ctx context.Context) *KubeadmConfig {
 	if err := yaml.Unmarshal([]byte(raw), &cc); err != nil {
 		return nil
 	}
-	return &KubeadmConfig{ClusterName: cc.ClusterName, ControlPlaneEndpoint: cc.ControlPlaneEndpoint, CertSANs: cc.APIServer.CertSANs, ServiceSubnet: cc.Networking.ServiceSubnet, KubernetesVersion: cc.KubernetesVersion}
+	kc := &KubeadmConfig{ClusterName: cc.ClusterName, ControlPlaneEndpoint: cc.ControlPlaneEndpoint, CertSANs: cc.APIServer.CertSANs, ServiceSubnet: cc.Networking.ServiceSubnet, KubernetesVersion: cc.KubernetesVersion, Raw: raw}
+	if kl, err := c.CS.CoreV1().ConfigMaps("kube-system").Get(ctx, "kubelet-config", metav1.GetOptions{}); err == nil {
+		kc.KubeletRaw = kl.Data["kubelet"]
+	}
+	return kc
 }

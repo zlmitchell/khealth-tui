@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"k8s-health-tui/internal/checks"
+	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/k8s"
 )
 
@@ -259,7 +260,7 @@ func (a *App) nodeDetail(name string) (string, []string) {
 		for _, k := range sortedKeys(ni.Settings) {
 			kvs = append(kvs, k+"="+ni.Settings[k])
 		}
-		plat = append(plat, []string{"rke2 config", strings.Join(kvs, "  ")})
+		plat = append(plat, []string{distro.For(ni.Dist).ConfigName, strings.Join(kvs, "  ")})
 	}
 	if ni.Rancher.SystemAgent != "" || ni.Rancher.Provisioned {
 		plat = append(plat, []string{"rancher", fmt.Sprintf("system-agent=%s provisioned=%v url=%s plans=%d", strings.TrimSpace(ni.Rancher.SystemAgent), ni.Rancher.Provisioned, ni.Rancher.AgentURL, ni.Rancher.Plans)})

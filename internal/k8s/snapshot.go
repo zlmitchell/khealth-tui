@@ -637,7 +637,7 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		return s.HelmReleases[i].Name < s.HelmReleases[j].Name
 	})
 	sort.Strings(s.Errors)
-	s.Distribution = detectDistribution(s.Nodes)
+	s.Distribution = detectDistribution(s)
 	s.FetchDuration = time.Since(fetchStart)
 	s.Traffic = c.Stats().Sub(statsStart)
 	return s
@@ -994,8 +994,12 @@ func describeValueFrom(v *corev1.EnvVarSource) string {
 	return "ref"
 }
 
-func detectDistribution(nodes []corev1.Node) string {
-	for _, n := range nodes {
+// detectDistribution names the Kubernetes distribution from node
+// annotations/labels and the kubelet version suffix, then from what kubeadm
+// leaves behind (the kubeadm-config ConfigMap, kube-apiserver-<node> static
+// pods): recent kubeadm no longer annotates nodes with cri-socket.
+func detectDistribution(s *Snapshot) string {
+	for _, n := range s.Nodes {
 		if _, ok := n.Annotations["rke2.io/node-args"]; ok {
 			return "rke2"
 		}
@@ -1003,13 +1007,43 @@ func detectDistribution(nodes []corev1.Node) string {
 			return "k3s"
 		}
 		v := n.Status.NodeInfo.KubeletVersion
-		if strings.Contains(v, "+rke2") {
+		switch {
+		case strings.Contains(v, "+rke2"):
 			return "rke2"
-		}
-		if strings.Contains(v, "+k3s") {
+		case strings.Contains(v, "+k3s"):
 			return "k3s"
+		case strings.Contains(v, "+k0s"):
+			return "k0s"
+		case strings.Contains(v, "-eks-"):
+			return "eks"
+		case strings.Contains(v, "-gke."):
+			return "gke"
 		}
 		if _, ok := n.Annotations["kubeadm.alpha.kubernetes.io/cri-socket"]; ok {
+			return "kubeadm"
+		}
+		if _, ok := n.Annotations["rke.cattle.io/internal-ip"]; ok {
+			return "rke1"
+		}
+		if _, ok := n.Annotations["machineconfiguration.openshift.io/currentConfig"]; ok {
+			return "openshift"
+		}
+		if _, ok := n.Labels["kubernetes.azure.com/agentpool"]; ok {
+			return "aks"
+		}
+		if _, ok := n.Labels["microk8s.io/cluster"]; ok {
+			return "microk8s"
+		}
+		if strings.Contains(n.Status.NodeInfo.OSImage, "Talos") {
+			return "talos"
+		}
+	}
+	if s.ConfigMapNames["kube-system/kubeadm-config"] {
+		return "kubeadm"
+	}
+	for i := range s.Pods {
+		p := &s.Pods[i]
+		if p.Namespace == "kube-system" && strings.HasPrefix(p.Name, "kube-apiserver-") && p.Annotations["kubernetes.io/config.source"] == "file" {
 			return "kubeadm"
 		}
 	}

@@ -145,7 +145,9 @@ echo "config_probed=yes"
 fi
 if [ "__CONFIG__" = 1 ]; then
 sec RKE2CFG
-for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do
+# rke2/k3s config.yaml(.d), and on kubeadm/upstream nodes the kubelet's
+# KubeletConfiguration and the drop-ins that carry its flags
+for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml /var/lib/kubelet/config.yaml /var/lib/kubelet/kubeadm-flags.env /etc/default/kubelet /etc/sysconfig/kubelet /etc/systemd/system/kubelet.service.d/*.conf; do
   [ -f "$f" ] || continue
   echo "--- $f"
   grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | mask /dev/stdin

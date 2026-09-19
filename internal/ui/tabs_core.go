@@ -264,12 +264,17 @@ func (a *App) nodesContent() content {
 			} else {
 				data = styleDim.Render("(root)")
 			}
-			if svc := ni.Service("kubelet"); svc != nil {
-				kubelet = okText(svc.Active == "active", "active", svc.Active)
-			} else if svc := ni.Service("rke2-server"); svc != nil {
-				kubelet = okText(svc.Active == "active", "rke2-server", "rke2-server:"+svc.Active)
-			} else if svc := ni.Service("rke2-agent"); svc != nil {
-				kubelet = okText(svc.Active == "active", "rke2-agent", "rke2-agent:"+svc.Active)
+			// the unit that carries the kubelet: kubelet itself, or the
+			// rke2/k3s supervisor it runs under
+			for _, u := range []string{"kubelet", "rke2-server", "rke2-agent", "k3s", "k3s-agent"} {
+				if svc := ni.Service(u); svc != nil {
+					label := "active"
+					if u != "kubelet" {
+						label = u
+					}
+					kubelet = okText(svc.Active == "active", label, u+":"+svc.Active)
+					break
+				}
 			}
 			uptime = humanDur(ni.Uptime)
 			ssh = styleOK.Render("ok")

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
 )
@@ -18,6 +19,7 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 	s := in.Snap
 	ci := s.Cloud()
 	external := ci.Provider != "none" && ci.Provider != "rke2"
+	cv := distro.For(s.Distribution)
 
 	// ---- cloud-controller-managers ----
 	var stub *k8s.Component
@@ -53,7 +55,7 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 			}
 			add(SevCrit, "cloud", n.Name, "node still carries the node.cloudprovider.kubernetes.io/uninitialized taint: the cloud controller ("+ci.Provider+") has not initialised it, so no workload pods schedule there", hint)
 		case external && n.ProviderID == "":
-			add(SevWarn, "cloud", n.Name, "node has no providerID although the "+ci.Provider+" cloud controller is installed: the kubelet did not start with --cloud-provider=external, so the CPI never adopted it (no zone labels, CSI cannot map it to an instance)", "config.yaml on this node: cloud-provider-name: "+cloudProviderName(ci.Provider)+" (kubelet-arg cloud-provider=external), then restart rke2; providerID is set once at registration")
+			add(SevWarn, "cloud", n.Name, "node has no providerID although the "+ci.Provider+" cloud controller is installed: the kubelet did not start with --cloud-provider=external, so the CPI never adopted it (no zone labels, CSI cannot map it to an instance)", cv.CloudProvider(ci.Provider)+"; providerID is set once at registration")
 		case external && (scheme == "rke2" || scheme == "k3s"):
 			add(SevCrit, "cloud", n.Name, fmt.Sprintf("node was initialised by the embedded %s cloud-controller (providerID %s) instead of the %s CPI: the %s CSI cannot map it to its instance, so volumes never attach on this node", scheme, n.ProviderID, ci.Provider, ci.Provider), "providerID is immutable: set disable-cloud-controller: true and cloud-provider-name in config.yaml, then delete the Node object and restart rke2 on it to re-register")
 		case external && scheme != "" && scheme != providerScheme(ci.Provider) && providerScheme(ci.Provider) != "":
@@ -95,7 +97,7 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 		}
 		if d.Provider == "vsphere" {
 			if ci.Provider != "vsphere" {
-				add(SevCrit, "storage", obj, "vSphere CSI is installed but the vSphere CPI is not (provider: "+ci.Provider+"): the CSI needs the vsphere:// providerID the CPI sets to find each node's VM, so attach fails", "install rancher-vsphere-cpi (Rancher: cluster > Cloud Provider vSphere) and set cloud-provider-name: rancher-vsphere / disable-cloud-controller: true")
+				add(SevCrit, "storage", obj, "vSphere CSI is installed but the vSphere CPI is not (provider: "+ci.Provider+"): the CSI needs the vsphere:// providerID the CPI sets to find each node's VM, so attach fails", "install the vSphere CPI (Rancher: cluster > Cloud Provider vSphere; upstream: cloud-provider-vsphere manifests) and "+cv.CloudProvider("vsphere"))
 			}
 			if v := d.VSphere; v != nil {
 				if v.SecretRef != "" && !v.SecretFound {
@@ -130,9 +132,10 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 func evalCloudNode(name string, ni *nodeinfo.Info, in Input, ci k8s.CloudInfo, add func(Severity, string, string, string, string)) {
 	p := &ni.Preflight
 	external := ci.Provider != "none" && ci.Provider != "rke2"
+	nv := distro.For(ni.Dist)
 	if external && len(ni.KubeletFlags) > 0 {
 		if v := ni.KubeletFlags["cloud-provider"]; v != "external" {
-			add(SevCrit, "cloud", name, fmt.Sprintf("kubelet runs with --cloud-provider=%s while the %s cloud controller is installed: the node registers without the uninitialized taint and providerID, so the CPI ignores it and the CSI cannot map it", orDefault(v, "<unset>"), ci.Provider), "config.yaml: cloud-provider-name: "+cloudProviderName(ci.Provider)+"; restart rke2 (re-register the node if it already has an rke2:// providerID)")
+			add(SevCrit, "cloud", name, fmt.Sprintf("kubelet runs with --cloud-provider=%s while the %s cloud controller is installed: the node registers without the uninitialized taint and providerID, so the CPI ignores it and the CSI cannot map it", orDefault(v, "<unset>"), ci.Provider), nv.CloudProvider(ci.Provider)+" (re-register the node if it already has an rke2:// providerID)")
 		}
 	}
 	if !p.Probed {
@@ -201,17 +204,6 @@ func orDefault(v, def string) string {
 		return def
 	}
 	return v
-}
-
-// cloudProviderName is the rke2 config.yaml value for a provider.
-func cloudProviderName(p string) string {
-	switch p {
-	case "vsphere":
-		return "rancher-vsphere (external)"
-	case "aws":
-		return "aws (external)"
-	}
-	return "external"
 }
 
 func providerScheme(p string) string {

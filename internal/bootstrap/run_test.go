@@ -387,3 +387,58 @@ func TestWriteFile(t *testing.T) {
 		t.Errorf("mode %v", st.Mode())
 	}
 }
+
+// A file bootstrapped earlier is reused while it connects (by server host
+// before SSH, by cluster CA after the fetch) and replaced when it is stale.
+func TestRunReusesExisting(t *testing.T) {
+	api, caData := apiserver(t)
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(api.URL, "https://"))
+	cert := servingCert(t, []string{"kubernetes"}, []string{"127.0.0.1", "10.43.0.1"})
+	srv := node(t, nodeOutput(nodeKubeconfig(port, caData), cert))
+	r := runner(t, srv)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	kube := filepath.Join(home, ".kube")
+	_ = os.MkdirAll(kube, 0o700)
+	var logs []string
+	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+
+	// 1. same server host as the bootstrap host and it connects: no SSH at all
+	good := filepath.Join(kube, "khealth-lab.yaml")
+	_ = os.WriteFile(good, []byte(strings.ReplaceAll(nodeKubeconfig(port, caData), "default", "lab")), 0o600)
+	res, err := Run(context.Background(), nil, Options{Hosts: []string{"127.0.0.1"}, Log: logf})
+	if err != nil || res.Path != good || res.Name != "lab" || res.Version != "v1.30.4+rke2r1" {
+		t.Fatalf("reuse by host: %v %+v\n%s", err, res, strings.Join(logs, "\n"))
+	}
+
+	// 2. same cluster (CA) reached through another host name, still connects: reused after the fetch
+	_, sshPort, _ := net.SplitHostPort(srv.Addr)
+	logs = nil
+	res, err = Run(context.Background(), r, Options{Hosts: []string{"localhost:" + sshPort}, Log: logf})
+	if err != nil || res.Path != good || !strings.Contains(strings.Join(logs, "\n"), "same CA") {
+		t.Fatalf("reuse by CA: %v %+v\n%s", err, res, strings.Join(logs, "\n"))
+	}
+
+	// 3. stale: the file points at a dead port; it is replaced in place with a .bak
+	_ = os.WriteFile(good, []byte(strings.ReplaceAll(nodeKubeconfig("1", caData), "default", "lab")), 0o600)
+	logs = nil
+	res, err = Run(context.Background(), r, Options{Hosts: []string{srv.Addr}, Log: logf})
+	if err != nil || res.Path != good {
+		t.Fatalf("replace stale: %v %+v\n%s", err, res, strings.Join(logs, "\n"))
+	}
+	if kc, _ := clientcmd.LoadFromFile(good); kc == nil || kc.Clusters[kc.CurrentContext] == nil || kc.Clusters[kc.CurrentContext].Server != "https://127.0.0.1:"+port {
+		t.Errorf("replaced file: %+v", kc)
+	}
+	if _, err := os.Stat(good + ".bak"); err != nil {
+		t.Errorf("no backup of the stale file")
+	}
+	if !strings.Contains(strings.Join(res.Notes, "\n"), "replaced the stale") {
+		t.Errorf("notes: %v", res.Notes)
+	}
+
+	// 4. --bootstrap-fresh ignores it and writes the derived name
+	res, err = Run(context.Background(), r, Options{Hosts: []string{srv.Addr}, Fresh: true})
+	if err != nil || res.Path == good {
+		t.Fatalf("fresh: %v %+v", err, res)
+	}
+}

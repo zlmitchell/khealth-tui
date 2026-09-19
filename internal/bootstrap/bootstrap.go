@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/sshrun"
 )
@@ -57,6 +58,7 @@ type Result struct {
 	Version  string
 	Endpoint Endpoint
 	Notes    []string
+	SSH      k8s.SSHHint // the hint stored in the context (from this run, or the reused file)
 }
 
 // script prints the admin kubeconfig, the rke2/k3s config files, the
@@ -286,7 +288,7 @@ func anyIP(ips []net.IP, f func(string) bool) bool {
 // Rewrite points the kubeconfig at host (keeping the original port) and
 // names the cluster, user and context after the cluster instead of
 // "default", so several bootstrapped clusters can be merged and switched.
-func Rewrite(kubeconfig []byte, host, name string) ([]byte, error) {
+func Rewrite(kubeconfig []byte, host, name string, hint ...k8s.SSHHint) ([]byte, error) {
 	cfg, err := clientcmd.Load(kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("parse kubeconfig: %w", err)
@@ -336,6 +338,9 @@ func Rewrite(kubeconfig []byte, host, name string) ([]byte, error) {
 			}
 		}
 	}
+	if len(hint) > 0 && !hint[0].Empty() {
+		k8s.SetSSHHint(cfg, cfg.CurrentContext, hint[0])
+	}
 	return clientcmd.Write(*cfg)
 }
 
@@ -378,11 +383,68 @@ func ClusterName(explicit string, ep Endpoint, src *Source) string {
 
 // Options drive Run.
 type Options struct {
-	Hosts  []string // SSH hosts to try in order (server nodes)
-	Out    string   // output path ("" = ~/.kube/khealth-<name>.yaml)
-	Name   string   // cluster/context name ("" = derived)
+	Hosts  []string    // SSH hosts to try in order (server nodes)
+	Out    string      // output path ("" = ~/.kube/khealth-<name>.yaml)
+	Name   string      // cluster/context name ("" = derived)
+	Fresh  bool        // ignore existing ~/.kube/khealth-*.yaml files for this cluster
+	SSH    k8s.SSHHint // remembered in the written context (user/key/port/become; the host is filled in)
 	Lookup Lookup
 	Log    func(format string, args ...any)
+}
+
+// existing is a previously bootstrapped ~/.kube/khealth-*.yaml.
+type existing struct {
+	Path    string
+	Host    string // server host[:port]
+	CA      string // certificate-authority-data (identifies the cluster)
+	Context string
+	Raw     []byte
+}
+
+// existingKubeconfigs lists the khealth-*.yaml files under dir.
+func existingKubeconfigs(dir string) []existing {
+	matches, _ := filepath.Glob(filepath.Join(dir, "khealth-*.yaml"))
+	var out []existing
+	for _, p := range matches {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		cfg, err := clientcmd.Load(raw)
+		if err != nil {
+			continue
+		}
+		e := existing{Path: p, Raw: raw, Context: cfg.CurrentContext}
+		for _, c := range cfg.Clusters {
+			if u, err := url.Parse(c.Server); err == nil {
+				e.Host = u.Host
+			}
+			e.CA = string(c.CertificateAuthorityData)
+			break
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func kubeconfigCA(raw []byte) string {
+	cfg, err := clientcmd.Load(raw)
+	if err != nil {
+		return ""
+	}
+	for _, c := range cfg.Clusters {
+		return string(c.CertificateAuthorityData)
+	}
+	return ""
+}
+
+// reuse turns a verified existing file into a Result.
+func reuse(e existing, version string) *Result {
+	res := &Result{Path: e.Path, Name: e.Context, Server: "https://" + e.Host, Version: version, Endpoint: Endpoint{Host: e.Host, Reason: "existing " + filepath.Base(e.Path)}, Notes: []string{"reused " + e.Path + " (delete it or pass --bootstrap-fresh to bootstrap again)"}}
+	if cfg, err := clientcmd.Load(e.Raw); err == nil {
+		res.SSH = k8s.GetSSHHint(cfg.Contexts[cfg.CurrentContext])
+	}
+	return res
 }
 
 // Run fetches from the first reachable host, ranks the endpoints, verifies
@@ -392,6 +454,36 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 	logf := o.Log
 	if logf == nil {
 		logf = func(string, ...any) {}
+	}
+	// a file bootstrapped earlier for this cluster is reused while it still
+	// connects: first by server host (no SSH needed), then, once the admin
+	// kubeconfig is fetched, by the cluster CA. A stale file is replaced.
+	var known []existing
+	kubeDir := filepath.Dir(o.Out)
+	if o.Out == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			kubeDir = filepath.Join(home, ".kube")
+		}
+	}
+	if !o.Fresh && kubeDir != "" {
+		known = existingKubeconfigs(kubeDir)
+	}
+	stale := map[string]bool{}
+	for _, e := range known {
+		for _, h := range o.Hosts {
+			hh, _, _ := strings.Cut(h, ":")
+			eh, _, _ := strings.Cut(e.Host, ":")
+			if eh != hh {
+				continue
+			}
+			if v, err := Verify(ctx, e.Raw); err == nil {
+				logf("  %s already points at %s and connects (%s): reusing it", e.Path, e.Host, v)
+				return reuse(e, v), nil
+			} else {
+				logf("  %s points at %s but does not connect (%s): bootstrapping again", e.Path, e.Host, shortErr(err))
+				stale[e.Path] = true
+			}
+		}
 	}
 	var src *Source
 	var errs []string
@@ -409,6 +501,26 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 		return nil, fmt.Errorf("no host yielded a kubeconfig: %s", strings.Join(errs, "; "))
 	}
 	logf("  %s: %s (cert %s: %d DNS, %d IP SANs)", src.Host, src.Path, filepath.Base(src.CertPath), len(src.CertDNS), len(src.CertIPs))
+	replace := ""
+	if ca := kubeconfigCA(src.Kubeconfig); ca != "" {
+		for _, e := range known {
+			if e.CA != ca || stale[e.Path] {
+				continue
+			}
+			if v, err := Verify(ctx, e.Raw); err == nil {
+				logf("  %s is this cluster (same CA) via %s and connects (%s): reusing it", e.Path, e.Host, v)
+				return reuse(e, v), nil
+			} else {
+				logf("  %s is this cluster (same CA) but %s does not connect (%s): replacing it", e.Path, e.Host, shortErr(err))
+				stale[e.Path] = true
+			}
+		}
+		for _, e := range known {
+			if e.CA == ca && stale[e.Path] && replace == "" {
+				replace = e.Path
+			}
+		}
+	}
 	eps := Rank(src, o.Lookup)
 	res := &Result{}
 	// tls-san entries not yet in the certificate mean a pending restart
@@ -416,9 +528,13 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 		res.Notes = append(res.Notes, fmt.Sprintf("tls-san %q is configured but not in the serving certificate yet: %s", s, src.reissueHint()))
 	}
 	var out []byte
+	hint := o.SSH
+	hint.Host = src.Host
+	hint.Bootstrapped = time.Now().UTC().Format(time.RFC3339)
+	res.SSH = hint
 	for _, ep := range eps {
 		name := ClusterName(o.Name, ep, src)
-		kc, err := Rewrite(src.Kubeconfig, ep.Host, name)
+		kc, err := Rewrite(src.Kubeconfig, ep.Host, name, hint)
 		if err != nil {
 			return nil, err
 		}
@@ -442,6 +558,10 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 		res.Notes = append(res.Notes, fmt.Sprintf("add %s so the certificate covers a stable name, then %s", src.sanHint(res.Endpoint.Host), src.reissueHint()))
 	}
 	path := o.Out
+	if path == "" && replace != "" {
+		path = replace // the stale file for this cluster, kept as .bak
+		res.Notes = append(res.Notes, "replaced the stale "+replace+" (previous copy in "+replace+".bak)")
+	}
 	if path == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -455,6 +575,39 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 	res.Path = path
 	res.Server = "https://" + res.Endpoint.Host
 	return res, nil
+}
+
+// RememberSSH stores the SSH hint on a context of an existing kubeconfig
+// file (a khealth-*.yaml bootstrapped before hints existed, or one whose
+// user changed), rewriting the file in place.
+func RememberSSH(path, ctxName string, h k8s.SSHHint) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	cfg, err := clientcmd.Load(raw)
+	if err != nil {
+		return err
+	}
+	if ctxName == "" {
+		ctxName = cfg.CurrentContext
+	}
+	if cfg.Contexts[ctxName] == nil {
+		return fmt.Errorf("no context %q in %s", ctxName, path)
+	}
+	old := k8s.GetSSHHint(cfg.Contexts[ctxName])
+	if h.Host == "" {
+		h.Host = old.Host
+	}
+	if h.Bootstrapped == "" {
+		h.Bootstrapped = old.Bootstrapped
+	}
+	k8s.SetSSHHint(cfg, ctxName, h)
+	out, err := clientcmd.Write(*cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o600)
 }
 
 // writeFile writes 0600, keeping a .bak of an existing file.

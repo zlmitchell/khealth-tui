@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/nodeinfo"
 )
 
@@ -76,8 +77,8 @@ func TestPreflightFindings(t *testing.T) {
 	}{
 		{SevCrit, "node", "swap active (2.0GiB on /dev/dm-1): the running kubelet"},
 		{SevWarn, "node", "rules.d changed after compiled.rules"},
-		{SevCrit, "storage", "fapolicyd allows the rke2 paths but not /var/lib/longhorn/engine-binaries"},
-		{SevCrit, "node", "fapolicyd denied 7 executions of rke2/k8s binaries"},
+		{SevCrit, "storage", "fapolicyd has no allow rule for /var/lib/longhorn/engine-binaries"},
+		{SevCrit, "node", "fapolicyd denied 7 executions of rke2/CSI binaries"},
 		{SevWarn, "storage", "iscsid is not running"},
 		{SevWarn, "storage", "multipathd is running without a blacklist"},
 		{SevCrit, "node", "auditd admin_space_left_action=single,disk_full_action=halt"},
@@ -204,16 +205,16 @@ func TestAuditMB(t *testing.T) {
 func TestRegistryProbeOffline(t *testing.T) {
 	// airgapped node: implicit upstreams are listed as skipped, never a finding
 	skipped := nodeinfo.RegProbe{Host: "docker.io", URL: "https://registry-1.docker.io", Implicit: true, Skipped: "airgap"}
-	if _, _, _, bad := regVerdict(skipped); bad {
+	if _, _, _, bad := regVerdict(skipped, distro.For("rke2")); bad {
 		t.Fatal("skipped probe produced a finding")
 	}
 	// an implicit upstream that was probed and is unreachable says why containerd would go there
-	msg, _, sev, bad := regVerdict(nodeinfo.RegProbe{Host: "docker.io", URL: "https://registry-1.docker.io", Exit: 6, Implicit: true})
+	msg, _, sev, bad := regVerdict(nodeinfo.RegProbe{Host: "docker.io", URL: "https://registry-1.docker.io", Exit: 6, Implicit: true}, distro.For("rke2"))
 	if !bad || sev != SevWarn || !strings.Contains(msg, "no mirror endpoint") {
 		t.Fatalf("implicit unreachable: %v %q", bad, msg)
 	}
 	// explicit mirror endpoints keep the plain wording
-	msg, _, _, _ = regVerdict(nodeinfo.RegProbe{Host: "harbor.local", URL: "https://harbor.local", Exit: 7})
+	msg, _, _, _ = regVerdict(nodeinfo.RegProbe{Host: "harbor.local", URL: "https://harbor.local", Exit: 7}, distro.For("rke2"))
 	if strings.Contains(msg, "no mirror endpoint") {
 		t.Fatalf("explicit endpoint tagged implicit: %q", msg)
 	}

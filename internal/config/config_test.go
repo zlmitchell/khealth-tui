@@ -44,3 +44,24 @@ func TestWriteExampleConfig(t *testing.T) {
 		t.Errorf("default path: %q %v", p, err)
 	}
 }
+
+func TestPositionalBootstrapHost(t *testing.T) {
+	empty := filepath.Join(t.TempDir(), "khealth.yaml")
+	if err := os.WriteFile(empty, []byte("refresh: 30s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load([]string{"--config", empty, "root@10.0.0.143", "--no-ssh", "10.0.0.144", "--bootstrap-out", "/tmp/x.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSH.User != "root" || len(cfg.Bootstrap.Hosts) != 2 || cfg.Bootstrap.Hosts[0] != "10.0.0.143" || cfg.Bootstrap.Hosts[1] != "10.0.0.144" || cfg.SSH.Enabled || cfg.Bootstrap.Out != "/tmp/x.yaml" {
+		t.Errorf("user=%q hosts=%v ssh=%v out=%q", cfg.SSH.User, cfg.Bootstrap.Hosts, cfg.SSH.Enabled, cfg.Bootstrap.Out)
+	}
+	cfg, err = Load([]string{"--config", empty, "--bootstrap-kubeconfig", "ubuntu@cp-1,cp-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSH.User != "ubuntu" || len(cfg.Bootstrap.Hosts) != 2 || cfg.Bootstrap.Hosts[0] != "cp-1" {
+		t.Errorf("user=%q hosts=%v", cfg.SSH.User, cfg.Bootstrap.Hosts)
+	}
+}

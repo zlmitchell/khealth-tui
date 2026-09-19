@@ -16,6 +16,11 @@ import (
 
 // Config is the top-level configuration.
 type Config struct {
+	// Flags holds the names of the command-line flags that were given, so a
+	// remembered per-cluster setting (ssh user/key from a bootstrapped
+	// context) never overrides what the operator typed.
+	Flags map[string]bool `yaml:"-"`
+
 	Kubeconfig string        `yaml:"kubeconfig"`
 	Context    string        `yaml:"context"`
 	Namespace  string        `yaml:"namespace"`
@@ -46,6 +51,7 @@ type Bootstrap struct {
 	Hosts []string // server nodes to fetch the admin kubeconfig from, in order
 	Out   string   // output path (default ~/.kube/khealth-<cluster>.yaml)
 	Name  string   // cluster/context name (default: from the endpoint DNS name or node hostname)
+	Fresh bool     // do not reuse an existing ~/.kube/khealth-*.yaml for the cluster
 }
 
 // Perf configures footprint measurement and the API-side load reducers.
@@ -232,16 +238,32 @@ func Load(args []string) (Config, error) {
 		bootstrap    = fs.String("bootstrap-kubeconfig", "", "comma-separated server node addresses: fetch the admin kubeconfig over SSH, point it at a VIP/DNS the apiserver cert is valid for, name the context after the cluster, write it under ~/.kube and use it")
 		bootstrapOut = fs.String("bootstrap-out", "", "where --bootstrap-kubeconfig writes the file (default ~/.kube/khealth-<cluster>.yaml)")
 		bootstrapNm  = fs.String("bootstrap-name", "", "cluster/context name for --bootstrap-kubeconfig (default: first label of the endpoint DNS name, else the node hostname)")
+		bootstrapFr  = fs.Bool("bootstrap-fresh", false, "bootstrap again even when a ~/.kube/khealth-*.yaml for the cluster exists and connects (a stale one is replaced anyway)")
 		showVersion  = fs.Bool("version", false, "print version and exit")
 		initConfig   = fs.Bool("init-config", false, "write the annotated example config to --config (default: the user config path) and exit; never overwrites")
 		printConfig  = fs.Bool("print-config", false, "print the annotated example config to stdout and exit")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "khealth - Kubernetes / RKE2 cluster health TUI\n\nUsage: khealth [flags]\n\n")
+		fmt.Fprintf(fs.Output(), "khealth - Kubernetes / RKE2 cluster health TUI\n\nUsage: khealth [flags] [[user@]server-node ...]\n\n  With no kubeconfig, name a server node (e.g. khealth root@10.0.0.143): the admin kubeconfig is fetched over SSH,\n  written under ~/.kube and used. Same as --bootstrap-kubeconfig user@host.\n\n")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
-		return cfg, err
+	// flags and positional [user@]host arguments may be mixed (khealth
+	// root@10.0.0.1 --no-ssh): the flag package stops at the first
+	// positional, so collect it and parse the rest again
+	var positional []string
+	for rest := args; ; {
+		if err := fs.Parse(rest); err != nil {
+			return cfg, err
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		a := fs.Arg(0)
+		if strings.HasPrefix(a, "-") {
+			return cfg, fmt.Errorf("unexpected argument %q", a)
+		}
+		positional = append(positional, a)
+		rest = fs.Args()[1:]
 	}
 	if *showVersion {
 		fmt.Println("khealth", Version)
@@ -276,7 +298,9 @@ func Load(args []string) (Config, error) {
 		}
 	}
 
+	cfg.Flags = map[string]bool{}
 	fs.Visit(func(f *flag.Flag) {
+		cfg.Flags[f.Name] = true
 		switch f.Name {
 		case "kubeconfig":
 			cfg.Kubeconfig = *kubeconfig
@@ -343,8 +367,21 @@ func Load(args []string) (Config, error) {
 			cfg.Bootstrap.Out = *bootstrapOut
 		case "bootstrap-name":
 			cfg.Bootstrap.Name = *bootstrapNm
+		case "bootstrap-fresh":
+			cfg.Bootstrap.Fresh = *bootstrapFr
 		}
 	})
+	// positional [user@]host arguments are bootstrap hosts (khealth root@10.0.0.1)
+	for _, a := range positional {
+		if a = strings.TrimSpace(a); a != "" {
+			cfg.Bootstrap.Hosts = append(cfg.Bootstrap.Hosts, a)
+		}
+	}
+	for i, h := range cfg.Bootstrap.Hosts {
+		if u, host, ok := strings.Cut(h, "@"); ok && u != "" && host != "" {
+			cfg.SSH.User, cfg.Bootstrap.Hosts[i] = u, host
+		}
+	}
 	cfg.Bootstrap.Out = expand(cfg.Bootstrap.Out)
 
 	cfg.Kubeconfig = expand(cfg.Kubeconfig)

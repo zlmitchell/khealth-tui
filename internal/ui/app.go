@@ -18,6 +18,7 @@ import (
 
 	"k8s-health-tui/internal/checks"
 	"k8s-health-tui/internal/config"
+	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/helmcheck"
 	"k8s-health-tui/internal/k8s"
@@ -71,6 +72,7 @@ const (
 	ovRevisions
 	ovInspect
 	ovPodLogs
+	ovContext
 )
 
 // row is one selectable/scrollable line of a tab.
@@ -134,6 +136,8 @@ type App struct {
 	overlay      overlayKind
 	nsInput      textinput.Model
 	nsCursor     int
+	ctxList      []k8s.ContextInfo // context picker (c)
+	ctxCursor    int
 	detailTitle  string
 	detailLines  []string
 	detailScroll int
@@ -169,13 +173,8 @@ func (a *App) tabName(t tab) string {
 	if a.snap == nil {
 		return "Config"
 	}
-	switch a.snap.Distribution {
-	case "rke2":
-		return "RKE2"
-	case "k3s":
-		return "k3s"
-	case "kubeadm":
-		return "kubeadm"
+	if d := a.snap.Distribution; d != "" && d != "unknown" {
+		return distro.For(d).Label
 	}
 	return "Config"
 }
@@ -1015,6 +1014,11 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.nsInput.SetValue("")
 		a.nsCursor = 0
 		return a, a.nsInput.Focus()
+	case "C":
+		a.ctxList = k8s.Contexts(a.cfg.Kubeconfig, a.client.Context)
+		a.ctxCursor = 0
+		a.overlay = ovContext
+		return a, nil
 	case "r":
 		if !a.refreshing {
 			a.setStatus("refreshing")
@@ -1213,6 +1217,17 @@ func nearestRow(rows []row, i int) int {
 
 func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := m.String()
+	// tab switching is disabled while a modal view is open: say so instead
+	// of silently swallowing the key (pod logs use tab/[ ] for containers)
+	if a.overlay != ovPodLogs && a.overlay != ovNamespace {
+		switch key {
+		case "tab", "shift+tab", "[", "]", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "left", "right", "h", "l":
+			if a.overlay != ovInspect || key == "tab" || key == "shift+tab" {
+				a.setStatus("this view is modal: press esc to close it, then tab / arrows switch tabs again")
+				return a, nil
+			}
+		}
+	}
 	switch a.overlay {
 	case ovConfirm, ovRevisions:
 		return a.handleActionOverlayKey(key)
@@ -1220,6 +1235,24 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleInspectKey(key)
 	case ovPodLogs:
 		return a.handleLogKey(key)
+	case ovContext:
+		switch key {
+		case "esc", "q", "C":
+			a.overlay = ovNone
+		case "j", "down":
+			if a.ctxCursor < len(a.ctxList)-1 {
+				a.ctxCursor++
+			}
+		case "k", "up":
+			if a.ctxCursor > 0 {
+				a.ctxCursor--
+			}
+		case "enter":
+			a.overlay = ovNone
+			if a.ctxCursor >= 0 && a.ctxCursor < len(a.ctxList) {
+				return a, a.switchContext(a.ctxList[a.ctxCursor])
+			}
+		}
 	case ovNamespace:
 		switch key {
 		case "esc":
@@ -1282,6 +1315,67 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.overlay = ovNone
 	}
 	return a, nil
+}
+
+// switchContext points the app at another cluster: a new API client, every
+// cached result dropped (in-flight results of the old cluster are ignored
+// by their sequence number) and a first-contact refresh cycle.
+func (a *App) switchContext(c k8s.ContextInfo) tea.Cmd {
+	kubeconfig := a.cfg.Kubeconfig
+	if c.File != "" {
+		kubeconfig = c.File
+	}
+	client, err := k8s.NewWithOptions(kubeconfig, c.Name, k8s.Options{
+		WatchCache: a.cfg.Perf.WatchCache, Protobuf: a.cfg.Perf.Protobuf, DiscoveryTTL: a.cfg.Perf.DiscoveryTTL, ConfigzTTL: a.cfg.Perf.ConfigzTTL, DeniedTTL: a.cfg.Perf.DeniedTTL,
+	})
+	if err != nil {
+		a.setStatus("context " + c.Name + ": " + err.Error())
+		return nil
+	}
+	a.closePodLogs()
+	a.client = client
+	a.cfg.Kubeconfig, a.cfg.Context = kubeconfig, c.Name
+	a.snap, a.snapErr, a.knownNodes = nil, "", nil
+	a.nodes, a.pending = map[string]*nodeinfo.Info{}, map[string]bool{}
+	a.etcd, a.etcdPend, a.etcdExec = map[string]*etcd.Probe{}, map[string]bool{}, nil
+	a.s3, a.s3Reach = nil, map[string]etcd.S3Check{}
+	a.logSum, a.stigRes, a.helmLatest, a.findings = map[string]*logs.Summary{}, nil, map[string]helmcheck.Latest{}, nil
+	a.hist, a.crdCounts, a.inspect = nil, nil, nil
+	a.logsNode, a.namespace = "", ""
+	for t := range a.cursor {
+		a.cursor[t], a.scroll[t], a.filters[t] = 0, 0, ""
+	}
+	if a.cfg.SSH.Enabled {
+		// the cluster remembers how its nodes were reached (khealth context
+		// extension); flags typed at startup still win
+		if h := c.SSH; !h.Empty() {
+			if h.User != "" && !a.cfg.Flags["ssh-user"] {
+				a.cfg.SSH.User = h.User
+			}
+			if h.Key != "" && !a.cfg.Flags["ssh-key"] {
+				a.cfg.SSH.Key = h.Key
+			}
+			if h.Port != 0 && !a.cfg.Flags["ssh-port"] {
+				a.cfg.SSH.Port = h.Port
+			}
+			if h.Become != "" && !a.cfg.Flags["become"] {
+				a.cfg.SSH.Become = h.Become
+			}
+		}
+		// the runner caches connections per host; the new cluster has its own
+		if a.runner != nil {
+			a.runner.Close()
+		}
+		if r, err := sshrun.New(a.cfg.SSH); err == nil {
+			a.runner, a.sshEnabled, a.sshErr = r, true, ""
+		} else {
+			a.runner, a.sshEnabled, a.sshErr = nil, false, err.Error()
+		}
+	}
+	a.heavyNext, a.cycle, a.refreshing = true, 0, false
+	a.seq++
+	a.setStatus("switched to context " + c.Name + " (" + c.Server + ")")
+	return a.refreshCmd()
 }
 
 func (a *App) nsOptions() []string {
@@ -1689,7 +1783,23 @@ func (a *App) renderBody() string {
 }
 
 func (a *App) renderFooter() string {
-	keys := []string{"tab switch", "←/→ sub-tab", "j/k move", "enter inspect", "n namespace", "/ filter", "a problems", "r refresh", "R full", "s ssh", "? help", "q quit"}
+	keys := []string{"tab/shift-tab switch", "←/→ sub-tab", "j/k move", "enter inspect", "n namespace", "C context", "/ filter", "a problems", "r refresh", "R full", "s ssh", "? help", "q quit"}
+	// a modal view has its own keys; esc is always the way out and the tab
+	// row is inactive until it closes
+	switch a.overlay {
+	case ovDetail, ovHelp:
+		keys = []string{"esc close", "j/k scroll", "PgUp/PgDn page", "g/G top/bottom", "(tabs resume after esc)"}
+	case ovConfirm, ovRevisions:
+		keys = []string{"esc cancel", "enter confirm", "j/k choose", "(tabs resume after esc)"}
+	case ovNamespace:
+		keys = []string{"esc cancel", "enter select", "type filter", "↑/↓ choose"}
+	case ovContext:
+		keys = []string{"esc cancel", "enter switch", "j/k choose"}
+	case ovInspect:
+		keys = []string{"esc back", "enter drill down", "j/k move", "q close", "(tabs resume after esc)"}
+	case ovPodLogs:
+		keys = []string{"esc close", "[ ]/tab container", "{ } pod", "p previous", "f follow", "w wrap", "T timestamps", "H highlight", "r reload"}
+	}
 	var parts []string
 	for _, k := range keys {
 		kk, rest, _ := strings.Cut(k, " ")
@@ -1740,6 +1850,41 @@ func (a *App) renderOverlay() string {
 		title, lines = a.renderInspect()
 	case ovPodLogs:
 		title, lines = a.renderPodLogs()
+	case ovContext:
+		title = "Switch cluster context"
+		lines = append(lines, styleDim.Render("contexts of the kubeconfig in use plus every ~/.kube/khealth-*.yaml written by `khealth user@host`; enter switches and starts a fresh first-contact cycle"), "")
+		var rows [][]string
+		for _, c := range a.ctxList {
+			cur := ""
+			if c.Current {
+				cur = styleOK.Render("current")
+			}
+			file := styleDim.Render("kubeconfig")
+			if c.File != "" {
+				file = shortPath(c.File)
+			}
+			ssh := styleDim.Render("-")
+			if c.SSH.User != "" {
+				ssh = c.SSH.User
+				if c.SSH.Host != "" {
+					ssh += "@" + c.SSH.Host
+				}
+			}
+			rows = append(rows, []string{c.Name, c.Cluster, c.Server, file, ssh, cur})
+		}
+		tw := a.width - 8
+		hdr, rl := renderTable(tw, []column{{title: "CONTEXT", max: 32}, {title: "CLUSTER", max: 24}, {title: "SERVER", max: 40}, {title: "FILE", max: 32}, {title: "SSH", max: 28}, {title: ""}}, rows)
+		lines = append(lines, "  "+pad(hdr, tw))
+		for i, l := range rl {
+			if i == a.ctxCursor {
+				lines = append(lines, selectRow("> "+l, tw+2))
+			} else {
+				lines = append(lines, "  "+pad(l, tw))
+			}
+		}
+		if len(rows) == 0 {
+			lines = append(lines, styleDim.Render("  no contexts found"))
+		}
 	case ovDetail:
 		title = a.detailTitle
 		visible := h - 4
@@ -1750,6 +1895,8 @@ func (a *App) renderOverlay() string {
 		lines = append(lines, a.detailLines[a.detailScroll:end]...)
 		if len(a.detailLines) > visible {
 			lines = append(lines, styleDim.Render(fmt.Sprintf("-- %d-%d of %d (j/k, PgUp/PgDn, esc closes) --", a.detailScroll+1, end, len(a.detailLines))))
+		} else {
+			lines = append(lines, styleDim.Render("-- esc closes --"))
 		}
 	}
 	inner := a.width - 4
@@ -1775,6 +1922,7 @@ func helpLines() []string {
 		"  left / right or h / l    previous / next sub-tab inside the current tab",
 		"  j/k or arrows            move selection / scroll    g / G     top / bottom",
 		"  PgUp / PgDn / space      page                       enter     open detail for the selected row",
+		"  C                        switch cluster context (kubeconfig contexts + ~/.kube/khealth-*.yaml)",
 		"  esc                      close overlay / clear filter",
 		"",
 		styleBold.Render("Everywhere"),
