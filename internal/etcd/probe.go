@@ -263,7 +263,7 @@ sec RKE2CONFIG
 if [ "$DIST" = rke2 ] || [ "$DIST" = k3s ]; then
   for f in /etc/rancher/$DIST/config.yaml /etc/rancher/$DIST/config.yaml.d/*.yaml; do
     [ -f "$f" ] || continue
-    grep -E '^[[:space:]]*(etcd-|cluster-init|disable-etcd|server:|profile:|secrets-encryption)' "$f" 2>/dev/null | grep -viE 'access-key|secret-key|token' | sed "s|^|$f: |"
+    grep -E '^[[:space:]]*(etcd-|cluster-init|disable-etcd|server:|profile:|secrets-encryption)' "$f" 2>/dev/null | grep -viE 'token' | sed -E -e "s/^([[:space:]]*[^:]*(access-key|secret-key)[^:]*:)[[:space:]]*(\"\"|'')[[:space:]]*$/\1/" -e 's/^([[:space:]]*[^:]*(access-key|secret-key)[^:]*:)[[:space:]]*[^[:space:]#].*/\1 <set>/' | sed "s|^|$f: |"
   done
 fi
 sec CONFIGDUMP

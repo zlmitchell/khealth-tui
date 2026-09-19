@@ -159,12 +159,18 @@ func (a *App) handleInspectKey(key string) (tea.Model, tea.Cmd) {
 				a.wlPods = false
 			}
 		}
+	// j/k walk the references first, then keep going into the YAML; k comes
+	// back up the YAML before it moves the reference cursor again
 	case "j", "down":
 		if top.cursor < len(top.refs)-1 {
 			top.cursor++
+		} else {
+			top.scroll++
 		}
 	case "k", "up":
-		if top.cursor > 0 {
+		if top.scroll > 0 {
+			top.scroll--
+		} else if top.cursor > 0 {
 			top.cursor--
 		}
 	case "enter":
@@ -221,7 +227,7 @@ func (a *App) renderInspect() (string, []string) {
 	if len(top.refs) == 0 {
 		lines = append(lines, styleDim.Render("References: none found"))
 	} else {
-		lines = append(lines, styleTitle.Render(fmt.Sprintf("References (%d)", len(top.refs)))+styleDim.Render("  j/k select · enter opens · esc back · J/K or PgUp/PgDn scroll the YAML"))
+		lines = append(lines, styleTitle.Render(fmt.Sprintf("References (%d)", len(top.refs)))+styleDim.Render("  j/k select, then scroll the YAML · enter opens · esc back · J/K or PgUp/PgDn page the YAML"))
 		var rows [][]string
 		for _, r := range top.refs {
 			via := r.Via

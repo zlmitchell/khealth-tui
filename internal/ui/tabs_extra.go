@@ -289,10 +289,36 @@ func (a *App) etcdContent() content {
 	}
 	if a.s3 != nil {
 		if a.s3.Found {
-			add(kv("S3 secret "+a.s3.Name, fmt.Sprintf("endpoint=%s bucket=%s folder=%s region=%s credentials=%s", a.s3.Endpoint, a.s3.Bucket, a.s3.Folder, a.s3.Region, okText(a.s3.HasCredentials, "set", "missing"))))
+			ca := "system CAs"
+			switch {
+			case a.s3.SkipSSLVerify:
+				ca = styleWarn.Render("skip-ssl-verify")
+			case a.s3.EndpointCA != "":
+				ca = "custom CA in secret"
+			}
+			add(kv("S3 secret "+a.s3.Name, fmt.Sprintf("endpoint=%s bucket=%s folder=%s region=%s credentials=%s tls=%s", a.s3.Endpoint, a.s3.Bucket, a.s3.Folder, a.s3.Region, okText(a.s3.HasCredentials, "set", "missing"), ca)))
 		} else {
 			add(kv("S3 secret "+a.s3.Name, styleCrit.Render("not found: "+a.s3.Err)))
 		}
+	}
+	if s3rows := checks.S3Rows(checks.Input{Etcd: a.etcd, S3: a.s3, S3Reach: a.s3Reach}); len(s3rows) > 0 {
+		for _, r := range s3rows {
+			switch {
+			case r[1] == "off":
+				r[1] = styleDim.Render("off")
+			case strings.HasPrefix(r[6], "FAIL"):
+				r[6] = styleCrit.Render(r[6])
+			case strings.HasPrefix(r[6], "ok"):
+				r[6] = styleOK.Render(r[6])
+			}
+			if r[5] == "missing" {
+				r[5] = styleWarn.Render(r[5])
+			}
+		}
+		add(kv("S3 per server", styleDim.Render("(every server uploads its own snapshots; reachability = curl from the node with its CA settings)")))
+		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "S3"}, {title: "SOURCE"}, {title: "ENDPOINT", max: 40}, {title: "BUCKET/FOLDER", max: 40}, {title: "CREDS"}, {title: "REACHABLE"}}, s3rows)
+		add(h)
+		add(lines...)
 	}
 	var rows2 [][]string
 	for _, n := range sortedKeys(a.etcd) {
@@ -1041,21 +1067,14 @@ func (a *App) helmContent() content {
 		} else if a.helm == nil {
 			latest = styleDim.Render("off: --helm-updates")
 		}
-		if r.ValuesYAML != "" {
-			st += styleDim.Render(fmt.Sprintf(" (%d value lines)", strings.Count(r.ValuesYAML, "\n")+1))
-		}
 		name := r.Name
 		if r.Bundled {
 			name += styleDim.Render(" (rke2)")
 		}
-		origin := r.Origin
-		if origin == "" {
-			origin = styleDim.Render("unknown (not recorded by helm)")
-		}
-		rows = append(rows, []string{r.Namespace, name, r.Chart, r.Version, r.AppVersion, fmt.Sprintf("%d/%d", r.Revision, len(r.History)), st, age(r.Updated), origin, latest})
+		rows = append(rows, []string{r.Namespace, name, r.Chart, r.Version, r.AppVersion, fmt.Sprintf("%d/%d", r.Revision, len(r.History)), st, age(r.Updated), latest})
 		ids = append(ids, r.Namespace+"/"+r.Name)
 	}
-	h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "RELEASE", max: 30}, {title: "CHART", max: 30}, {title: "VERSION"}, {title: "APP"}, {title: "REV/HIST", right: true}, {title: "STATUS"}, {title: "UPDATED", right: true}, {title: "ORIGIN", max: 44}, {title: "LATEST"}}, rows)
+	h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "RELEASE", max: 30}, {title: "CHART", max: 30}, {title: "VERSION"}, {title: "APP"}, {title: "REV/HIST", right: true}, {title: "STATUS"}, {title: "UPDATED", right: true}, {title: "LATEST"}}, rows)
 	hsegs := []seg{{0, styleOK, "deployed"}, {0, styleCrit, "failed"}, {0, styleWarn, "other"}, {0, styleInfo, "outdated"}}
 	for _, r := range s.HelmReleases {
 		switch strings.ToLower(r.Status) {
@@ -1073,8 +1092,27 @@ func (a *App) helmContent() content {
 	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope; enter = values, ", len(rows))) + styleKey.Render("u") + styleDim.Render(" upgrade to latest, ") + styleKey.Render("b") + styleDim.Render(" rollback. Update check: ")}
 	if a.helm != nil {
 		hdr[0] += styleOK.Render("on")
+		var names []string
+		for _, r := range a.helm.Repos() {
+			n := r.Name
+			if r.FromHelm {
+				n += styleDim.Render(" (helm)")
+			}
+			names = append(names, n)
+		}
+		src := "repos: " + strings.Join(names, ", ")
+		if len(names) == 0 {
+			src = "no repos (helm repo add, or helm.repos in the config)"
+		}
+		if a.cfg.Helm.ArtifactHub {
+			src += "; then Artifact Hub"
+		}
+		hdr[0] += styleDim.Render("  " + src)
+		if e := a.helm.LoadErr(); e != "" {
+			hdr = append(hdr, styleWarn.Render("helm repositories.yaml: "+e))
+		}
 	} else {
-		hdr[0] += styleWarn.Render("off") + styleDim.Render(" - run with --helm-updates (Artifact Hub) or set helm.check_updates + helm.repos in the config; needs outbound HTTP")
+		hdr[0] += styleWarn.Render("off") + styleDim.Render(" - run with --helm-updates; uses your helm repos (helm repo add), helm.repos in the config, then Artifact Hub; needs outbound HTTP")
 	}
 	hdr = append(hdr, h)
 	c := content{header: hdr, selectable: true, empty: "no Helm releases found (helm.sh/release.v1 secrets)"}
@@ -1125,10 +1163,10 @@ func (a *App) helmDetail(id string) (string, []string) {
 			out = append(out, h)
 			out = append(out, lines...)
 		}
-		out = append(out, "", styleTitle.Render("User-supplied values (helm get values)"))
 		if r.ValuesYAML == "" {
-			out = append(out, styleDim.Render("(none - chart defaults)"))
+			out = append(out, "", styleTitle.Render("User-supplied values (helm get values)"), styleDim.Render("(none - chart defaults)"))
 		} else {
+			out = append(out, "", styleTitle.Render("User-supplied values (helm get values)")+styleDim.Render(fmt.Sprintf("  %d lines", strings.Count(r.ValuesYAML, "\n")+1)))
 			for _, l := range strings.Split(r.ValuesYAML, "\n") {
 				out = append(out, wrap(l, a.width-6)...)
 			}

@@ -158,6 +158,10 @@ func TestRenderAllTabsAndDetails(t *testing.T) {
 	_ = a.View()
 	a.sub[tabWorkloads] = 0
 	a.overlay = ovNamespace
+	a.nsInput.SetValue("")
+	if r := a.nsRow("default"); !strings.Contains(ansi.Strip(r[1]), "none") {
+		t.Errorf("default namespace should have no PSA label: %v", r)
+	}
 	a.nsInput.SetValue("team")
 	if opts := a.nsOptions(); len(opts) != 2 || opts[1] != "team-a" {
 		t.Errorf("ns options: %v", opts)
@@ -412,5 +416,30 @@ func TestAddonsRowSelection(t *testing.T) {
 	// no selection still gives the full dump
 	if title, lines := a.addonsDetail(""); title == "" || len(lines) == 0 {
 		t.Errorf("empty id should fall back to the full dump")
+	}
+}
+
+func TestInspectArrowsScrollYAML(t *testing.T) {
+	a := testApp()
+	a.tab = tabWorkloads
+	a.inspect = append(a.inspect, inspectLevel{title: "x", refs: []k8s.ObjRef{{Kind: "Pod", Name: "a"}, {Kind: "Pod", Name: "b"}}, dump: []string{"l1", "l2", "l3", "l4", "l5", "l6"}})
+	a.showInspect()
+	down := tea.KeyMsg{Type: tea.KeyDown}
+	up := tea.KeyMsg{Type: tea.KeyUp}
+	a.handleKey(down)
+	top := &a.inspect[0]
+	if top.cursor != 1 || top.scroll != 0 {
+		t.Fatalf("first down should select the second ref: cursor=%d scroll=%d", top.cursor, top.scroll)
+	}
+	a.handleKey(down)
+	a.handleKey(down)
+	if top.cursor != 1 || top.scroll != 2 {
+		t.Fatalf("down past the last ref should scroll the YAML: cursor=%d scroll=%d", top.cursor, top.scroll)
+	}
+	a.handleKey(up)
+	a.handleKey(up)
+	a.handleKey(up)
+	if top.cursor != 0 || top.scroll != 0 {
+		t.Fatalf("up should unscroll the YAML before moving the cursor: cursor=%d scroll=%d", top.cursor, top.scroll)
 	}
 }

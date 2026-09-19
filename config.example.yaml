@@ -39,7 +39,9 @@ etcd:
 helm:
   check_updates: false            # look up newer chart versions (needs outbound HTTP)
   artifacthub: true               # fall back to artifacthub.io search for charts not found in repos
-  repos:                          # name -> Helm repo URL; index.yaml is fetched hourly
+  use_helm_repos: true            # also use the repos you added with `helm repo add` (repositories.yaml, incl. their
+                                  # username/password, CA/client certs); helm's cached index is used when a fetch fails
+  repos:                          # extra name -> Helm repo URL (no credentials); index.yaml is fetched hourly
     # bitnami: https://charts.bitnami.com/bitnami
     # rancher-stable: https://releases.rancher.com/server-charts/stable
   timeout: 15s

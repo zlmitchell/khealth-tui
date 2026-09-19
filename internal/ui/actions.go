@@ -93,16 +93,25 @@ func (a *App) startHelmUpgrade() {
 		a.setStatus(rel.Name + " is already at the latest known version " + rel.Version)
 		return
 	}
-	if l.RepoURL == "" {
-		a.setStatus("no chart repository URL known for " + rel.Chart + " (add it under helm.repos)")
+	if l.RepoURL == "" && l.Alias == "" {
+		a.setStatus("no chart repository known for " + rel.Chart + " (helm repo add it, or add it under helm.repos)")
 		return
 	}
-	argv := append(a.helmBase(), "upgrade", rel.Name, rel.Chart, "--repo", l.RepoURL, "--version", l.Version, "--namespace", rel.Namespace, "--reuse-values")
+	// a repo the user added with `helm repo add` is referenced by alias so
+	// helm applies its stored credentials; otherwise pass the URL
+	var argv []string
+	source := l.RepoURL + " (" + l.Source + ")"
+	if l.Alias != "" {
+		argv = append(a.helmBase(), "upgrade", rel.Name, l.Alias+"/"+rel.Chart, "--version", l.Version, "--namespace", rel.Namespace, "--reuse-values")
+		source = l.Alias + "/" + rel.Chart + " from your helm repos (" + l.RepoURL + ")"
+	} else {
+		argv = append(a.helmBase(), "upgrade", rel.Name, rel.Chart, "--repo", l.RepoURL, "--version", l.Version, "--namespace", rel.Namespace, "--reuse-values")
+	}
 	a.pendingAct = &action{
 		title: fmt.Sprintf("Upgrade %s/%s: %s %s -> %s", rel.Namespace, rel.Name, rel.Chart, rel.Version, l.Version),
 		argv:  argv,
 		desc: []string{
-			"Source: " + l.RepoURL + " (" + l.Source + ")",
+			"Source: " + source,
 			"--reuse-values keeps the values currently applied (helm get values); new chart defaults are not merged.",
 			"A failed upgrade can be undone with rollback (b) to revision " + fmt.Sprint(rel.Revision) + ".",
 		},

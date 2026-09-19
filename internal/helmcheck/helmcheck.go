@@ -1,6 +1,8 @@
-// Package helmcheck looks up the latest available chart versions from
-// configured Helm repositories (index.yaml) or Artifact Hub. It is opt-in
-// because it needs outbound internet/registry access.
+// Package helmcheck looks up the latest available chart versions from Helm
+// repositories (index.yaml) or Artifact Hub. Repositories come from khealth's
+// config and from the user's own `helm repo add` list (repositories.yaml with
+// its credentials), so private repos work; helm's cached index files serve as
+// an offline fallback. It is opt-in because it needs outbound access.
 package helmcheck
 
 import (
@@ -10,6 +12,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,13 +30,17 @@ type Latest struct {
 	Version string
 	Source  string // repo name or "artifacthub"
 	RepoURL string // chart repository URL usable with helm --repo
+	Alias   string // helm CLI repo name when the repo is in repositories.yaml (`helm upgrade alias/chart` reuses its credentials)
 	Err     string
 }
 
 // Checker caches repo indexes and Artifact Hub lookups.
 type Checker struct {
-	cfg    config.Helm
-	client *http.Client
+	cfg      config.Helm
+	client   *http.Client
+	repos    []Repo
+	cacheDir string // helm's <name>-index.yaml cache, used when a fetch fails
+	loadErr  string
 
 	mu      sync.Mutex
 	indexes map[string]map[string][]string // repo -> chart -> versions
@@ -40,9 +49,44 @@ type Checker struct {
 	hubAt   map[string]time.Time
 }
 
-// New creates a checker.
+// New creates a checker. Repos listed under helm.repos take precedence over a
+// same-named entry in the user's helm repositories.yaml.
 func New(cfg config.Helm) *Checker {
-	return &Checker{cfg: cfg, client: &http.Client{Timeout: cfg.Timeout}, indexes: map[string]map[string][]string{}, fetched: map[string]time.Time{}, hub: map[string]Latest{}, hubAt: map[string]time.Time{}}
+	c := &Checker{cfg: cfg, client: &http.Client{Timeout: cfg.Timeout}, indexes: map[string]map[string][]string{}, fetched: map[string]time.Time{}, hub: map[string]Latest{}, hubAt: map[string]time.Time{}}
+	seen := map[string]bool{}
+	for _, name := range sortedNames(cfg.Repos) {
+		c.repos = append(c.repos, Repo{Name: name, URL: cfg.Repos[name]})
+		seen[name] = true
+	}
+	if cfg.UseHelmRepos {
+		c.cacheDir = HelmCacheDir()
+		repos, err := LoadHelmRepos(HelmRepositoriesFile())
+		if err != nil {
+			c.loadErr = err.Error()
+		}
+		for _, r := range repos {
+			if !seen[r.Name] {
+				c.repos = append(c.repos, r)
+				seen[r.Name] = true
+			}
+		}
+	}
+	return c
+}
+
+// Repos lists the repositories the checker consults, config first.
+func (c *Checker) Repos() []Repo { return c.repos }
+
+// LoadErr describes a problem reading the helm CLI's repositories.yaml ("" when fine).
+func (c *Checker) LoadErr() string { return c.loadErr }
+
+func sortedNames(m map[string]string) []string {
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Lookup returns the latest versions for the given chart names.
@@ -79,46 +123,72 @@ func (c *Checker) Lookup(ctx context.Context, charts []string) map[string]Latest
 }
 
 func (c *Checker) refreshIndexes(ctx context.Context) {
-	for name, repo := range c.cfg.Repos {
+	for _, repo := range c.repos {
 		c.mu.Lock()
-		stale := time.Since(c.fetched[name]) > time.Hour
+		stale := time.Since(c.fetched[repo.Name]) > time.Hour
 		c.mu.Unlock()
 		if !stale {
 			continue
 		}
-		u := strings.TrimSuffix(repo, "/") + "/index.yaml"
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		body, err := c.fetchIndex(ctx, repo)
 		if err != nil {
-			continue
-		}
-		resp, err := c.client.Do(req)
-		if err != nil {
-			continue
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-		resp.Body.Close()
-		if err != nil || resp.StatusCode != 200 {
-			continue
-		}
-		var idx struct {
-			Entries map[string][]struct {
-				Version string `yaml:"version"`
-			} `yaml:"entries"`
-		}
-		if err := yaml.Unmarshal(body, &idx); err != nil {
-			continue
-		}
-		m := map[string][]string{}
-		for chart, entries := range idx.Entries {
-			for _, e := range entries {
-				m[chart] = append(m[chart], e.Version)
+			// offline or unreachable from here: fall back to what `helm repo update` cached
+			if c.cacheDir == "" || !repo.FromHelm {
+				continue
+			}
+			if body, err = os.ReadFile(filepath.Join(c.cacheDir, repo.Name+"-index.yaml")); err != nil {
+				continue
 			}
 		}
+		m, err := parseIndex(body)
+		if err != nil {
+			continue
+		}
 		c.mu.Lock()
-		c.indexes[name] = m
-		c.fetched[name] = time.Now()
+		c.indexes[repo.Name] = m
+		c.fetched[repo.Name] = time.Now()
 		c.mu.Unlock()
 	}
+}
+
+// fetchIndex downloads <repo>/index.yaml with the repo's credentials.
+func (c *Checker) fetchIndex(ctx context.Context, repo Repo) ([]byte, error) {
+	u := strings.TrimSuffix(repo.URL, "/") + "/index.yaml"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if repo.Username != "" || repo.Password != "" {
+		req.SetBasicAuth(repo.Username, repo.Password)
+	}
+	resp, err := repo.httpClient(c.cfg.Timeout, c.client).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+}
+
+// parseIndex reduces a repo index.yaml to chart -> versions.
+func parseIndex(body []byte) (map[string][]string, error) {
+	var idx struct {
+		Entries map[string][]struct {
+			Version string `yaml:"version"`
+		} `yaml:"entries"`
+	}
+	if err := yaml.Unmarshal(body, &idx); err != nil {
+		return nil, err
+	}
+	m := map[string][]string{}
+	for chart, entries := range idx.Entries {
+		for _, e := range entries {
+			m[chart] = append(m[chart], e.Version)
+		}
+	}
+	return m, nil
 }
 
 func (c *Checker) fromIndexes(chart string) (Latest, bool) {
@@ -126,13 +196,16 @@ func (c *Checker) fromIndexes(chart string) (Latest, bool) {
 	defer c.mu.Unlock()
 	best := Latest{}
 	found := false
-	for repo, m := range c.indexes {
-		for _, v := range m[chart] {
+	for _, repo := range c.repos {
+		for _, v := range c.indexes[repo.Name][chart] {
 			if IsPrerelease(v) {
 				continue
 			}
 			if !found || CompareVersions(v, best.Version) > 0 {
-				best = Latest{Version: v, Source: repo, RepoURL: c.cfg.Repos[repo]}
+				best = Latest{Version: v, Source: repo.Name, RepoURL: repo.URL}
+				if repo.FromHelm {
+					best.Alias = repo.Name
+				}
 				found = true
 			}
 		}

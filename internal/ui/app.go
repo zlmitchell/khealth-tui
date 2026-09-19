@@ -106,6 +106,7 @@ type App struct {
 	etcdPend   map[string]bool
 	knownNodes []corev1.Node // last node list the API returned; used when the apiserver is down
 	s3         *k8s.S3SecretInfo
+	s3Reach    map[string]etcd.S3Check
 	logSum     map[string]*logs.Summary
 	stigRes    []stig.Result
 	helmLatest map[string]helmcheck.Latest
@@ -226,6 +227,11 @@ type etcdMsg struct {
 	probe *etcd.Probe
 }
 type s3Msg struct{ info *k8s.S3SecretInfo }
+
+type s3CheckMsg struct {
+	seq   int
+	check etcd.S3Check
+}
 type helmMsg struct{ latest map[string]helmcheck.Latest }
 type etcdExecMsg struct {
 	seq   int
@@ -247,6 +253,7 @@ func New(cfg config.Config) (*App, error) {
 		pending:    map[string]bool{},
 		etcd:       map[string]*etcd.Probe{},
 		etcdPend:   map[string]bool{},
+		s3Reach:    map[string]etcd.S3Check{},
 		logSum:     map[string]*logs.Summary{},
 		helmLatest: map[string]helmcheck.Latest{},
 		heavyNext:  true,
@@ -460,6 +467,44 @@ func (a *App) s3Cmd(name string) tea.Cmd {
 	}
 }
 
+// s3CheckCmd tests the snapshot S3 endpoint from one etcd node with the CA
+// and TLS settings that node would use. Runs when the node's S3 config is
+// known: after its etcd probe, and again once the config secret is read.
+func (a *App) s3CheckCmd(node string) tea.Cmd {
+	p := a.etcd[node]
+	if p == nil || p.Err != nil || a.runner == nil || !a.sshEnabled {
+		return nil
+	}
+	c := checks.S3ConfigFor(p, a.s3)
+	if !c.Enabled || (c.SecretName != "" && !c.SecretFound) {
+		return nil
+	}
+	var n *corev1.Node
+	targets, _ := a.sshTargets(a.snap)
+	for i := range targets {
+		if targets[i].Name == node {
+			n = &targets[i]
+		}
+	}
+	if n == nil {
+		return nil
+	}
+	host := a.nodeAddress(n)
+	url := c.URL()
+	script := etcd.S3CheckScript(url, c.CAFile, c.CAPEM, c.SkipSSLVerify)
+	runner, seq, timeout := a.runner, a.seq, a.cfg.SSH.Timeout
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		res := runner.Run(ctx, host, script)
+		out := res.Stdout
+		if res.Err != nil && strings.TrimSpace(out) == "" {
+			out = "ssh: " + firstLine(res.Err.Error())
+		}
+		return s3CheckMsg{seq: seq, check: etcd.ParseS3Check(node, url, out)}
+	}
+}
+
 func (a *App) recompute() {
 	for name, ni := range a.nodes {
 		if ni != nil && len(ni.Journal) > 0 {
@@ -477,7 +522,7 @@ func (a *App) recompute() {
 	}
 	a.stigRes = stig.Evaluate(stig.Input{Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd})
 	a.findings = checks.Evaluate(checks.Input{
-		Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec, S3: a.s3, Logs: a.logSum, Stig: a.stigRes,
+		Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec, S3: a.s3, S3Reach: a.s3Reach, Logs: a.logSum, Stig: a.stigRes,
 		HelmLatest: a.helmLatest, SSHEnabled: a.sshEnabled, SSHErr: a.sshErr, Cfg: a.cfg, Now: time.Now(),
 	})
 }
@@ -664,10 +709,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if name := m.probe.RKE2Config["etcd-s3-config-secret"]; name != "" && (a.s3 == nil || a.s3.Name != name) {
 			return a, a.s3Cmd(name)
 		}
-		return a, nil
+		return a, a.s3CheckCmd(m.probe.Node)
 	case s3Msg:
 		a.s3 = m.info
 		a.recompute()
+		var cmds []tea.Cmd
+		for _, n := range sortedKeys(a.etcd) {
+			cmds = append(cmds, a.s3CheckCmd(n))
+		}
+		return a, tea.Batch(cmds...)
+	case s3CheckMsg:
+		if m.seq == a.seq {
+			a.s3Reach[m.check.Node] = m.check
+			a.recompute()
+		}
 		return a, nil
 	case helmMsg:
 		a.helmLatest = m.latest
@@ -1082,6 +1137,77 @@ func (a *App) nsOptions() []string {
 	return opts
 }
 
+// nsRow describes a namespace for the picker: PSA level and privileged pods.
+func (a *App) nsRow(name string) []string {
+	if name == "(all namespaces)" || a.snap == nil {
+		return []string{name, "", "", "", ""}
+	}
+	var labels map[string]string
+	for i := range a.snap.Namespaces {
+		if a.snap.Namespaces[i].Name == name {
+			labels = a.snap.Namespaces[i].Labels
+		}
+	}
+	enforce := labels["pod-security.kubernetes.io/enforce"]
+	psa := ""
+	switch enforce {
+	case "privileged":
+		psa = styleWarn.Render("privileged")
+	case "baseline":
+		psa = styleInfo.Render("baseline")
+	case "restricted":
+		psa = styleOK.Render("restricted")
+	case "":
+		psa = styleDim.Render("none (cluster default)")
+	default:
+		psa = enforce
+	}
+	extra := []string{}
+	if v := labels["pod-security.kubernetes.io/warn"]; v != "" && v != enforce {
+		extra = append(extra, "warn="+v)
+	}
+	if v := labels["pod-security.kubernetes.io/audit"]; v != "" && v != enforce {
+		extra = append(extra, "audit="+v)
+	}
+	if len(extra) > 0 {
+		psa += styleDim.Render(" [" + strings.Join(extra, " ") + "]")
+	}
+	pods, priv, hostNS := 0, 0, 0
+	for i := range a.snap.Pods {
+		p := &a.snap.Pods[i]
+		if p.Namespace != name || p.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		pods++
+		isPriv := false
+		for _, c := range append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
+			if c.SecurityContext != nil && c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged {
+				isPriv = true
+			}
+		}
+		if isPriv {
+			priv++
+		}
+		if p.Spec.HostNetwork || p.Spec.HostPID || p.Spec.HostIPC {
+			hostNS++
+		}
+	}
+	privTxt := styleDim.Render("0")
+	if priv > 0 || hostNS > 0 {
+		privTxt = styleWarn.Render(fmt.Sprintf("%d privileged, %d host-ns", priv, hostNS))
+	}
+	note := ""
+	switch {
+	case enforce == "" && (priv > 0 || hostNS > 0) && !k8s.IsSystemNamespace(name):
+		note = styleWarn.Render("privileged workloads without a PSA policy")
+	case enforce == "restricted" && (priv > 0 || hostNS > 0):
+		note = styleCrit.Render("privileged pods despite restricted (pre-existing or exempt)")
+	case k8s.IsSystemNamespace(name):
+		note = styleDim.Render("system")
+	}
+	return []string{name, psa, privTxt, fmt.Sprint(pods), note}
+}
+
 func (a *App) bodyHeight() int {
 	h := a.height - 5 // header, tab strip, rule, status line, footer
 	if len(subTabs[a.tab]) > 0 {
@@ -1421,21 +1547,25 @@ func (a *App) renderOverlay() string {
 		lines = helpLines()
 	case ovNamespace:
 		title = "Select namespace"
-		lines = append(lines, a.nsInput.View(), "")
+		lines = append(lines, a.nsInput.View(), styleDim.Render("PSA = pod-security.kubernetes.io/enforce label (warn/audit in brackets); PRIV = running pods with privileged containers / host namespaces"), "")
 		opts := a.nsOptions()
-		visible := h - 6
+		visible := h - 7
 		start := 0
 		if a.nsCursor >= visible {
 			start = a.nsCursor - visible + 1
 		}
+		var rows [][]string
 		for i := start; i < len(opts) && i < start+visible; i++ {
-			t := opts[i]
-			if i == a.nsCursor {
-				t = styleSel.Render(" " + t + " ")
+			rows = append(rows, a.nsRow(opts[i]))
+		}
+		hdr, rl := renderTable(a.width-6, []column{{title: "NAMESPACE", max: 40}, {title: "PSA ENFORCE"}, {title: "PRIV PODS"}, {title: "PODS", right: true}, {title: "NOTE"}}, rows)
+		lines = append(lines, "  "+hdr)
+		for i, l := range rl {
+			if start+i == a.nsCursor {
+				lines = append(lines, styleSel.Render("> "+pad(l, a.width-8)))
 			} else {
-				t = "  " + t
+				lines = append(lines, "  "+l)
 			}
-			lines = append(lines, t)
 		}
 	case ovConfirm, ovRevisions:
 		title, lines = a.renderActionOverlay()

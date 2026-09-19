@@ -122,6 +122,9 @@ type S3SecretInfo struct {
 	Folder         string
 	Region         string
 	HasCredentials bool
+	EndpointCA     string // PEM content of etcd-s3-endpoint-ca, if set
+	SkipSSLVerify  bool
+	Insecure       bool // plain http
 	Err            string
 }
 
@@ -696,6 +699,9 @@ func (c *Client) S3Secret(ctx context.Context, name string) *S3SecretInfo {
 	info.Folder = get("etcd-s3-folder")
 	info.Region = get("etcd-s3-region")
 	info.HasCredentials = len(sec.Data["etcd-s3-access-key"]) > 0 && len(sec.Data["etcd-s3-secret-key"]) > 0
+	info.EndpointCA = get("etcd-s3-endpoint-ca")
+	info.SkipSSLVerify = get("etcd-s3-skip-ssl-verify") == "true"
+	info.Insecure = get("etcd-s3-insecure") == "true"
 	return info
 }
 

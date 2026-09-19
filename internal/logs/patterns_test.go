@@ -69,3 +69,15 @@ func TestPatternsCompile(t *testing.T) {
 		t.Errorf("Find failed")
 	}
 }
+
+func TestS3UploadFailPattern(t *testing.T) {
+	lines := []string{
+		`2026-09-18T01:00:00+00:00 cp-1 rke2[1]: time="2026-09-18T01:00:00Z" level=error msg="failed to upload snapshot etcd-snapshot-cp-1-1758100000 to S3: AccessDenied: Access Denied"`,
+		`2026-09-18T01:00:01+00:00 cp-1 rke2[1]: time="2026-09-18T01:00:01Z" level=error msg="Unable to initialize S3 client: x509: certificate signed by unknown authority"`,
+		`2026-09-18T01:00:02+00:00 cp-1 rke2[1]: time="2026-09-18T01:00:02Z" level=info msg="Saving etcd snapshot to /var/lib/rancher/rke2/server/db/snapshots/x"`,
+	}
+	s := Classify(lines, time.Now())
+	if s.ByName["s3-upload-fail"] != 2 {
+		t.Errorf("s3-upload-fail=%d byName=%v", s.ByName["s3-upload-fail"], s.ByName)
+	}
+}

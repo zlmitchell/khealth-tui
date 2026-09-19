@@ -71,7 +71,8 @@ type Etcd struct {
 type Helm struct {
 	CheckUpdates bool              `yaml:"check_updates"`
 	ArtifactHub  bool              `yaml:"artifacthub"`
-	Repos        map[string]string `yaml:"repos"` // name -> repo URL (index.yaml is fetched)
+	Repos        map[string]string `yaml:"repos"`          // name -> repo URL (index.yaml is fetched)
+	UseHelmRepos bool              `yaml:"use_helm_repos"` // also consult the helm CLI's repositories.yaml (with its credentials)
 	Timeout      time.Duration     `yaml:"timeout"`
 }
 
@@ -115,7 +116,7 @@ func Default() Config {
 			Concurrency:   8,
 		},
 		Etcd:    Etcd{MaxBackupAge: 24 * time.Hour},
-		Helm:    Helm{Timeout: 15 * time.Second},
+		Helm:    Helm{Timeout: 15 * time.Second, UseHelmRepos: true},
 		Logs:    Logs{Lines: 400, Since: "-24h"},
 		Actions: Actions{Enabled: true, HelmBinary: "helm"},
 		Thresholds: Thresholds{

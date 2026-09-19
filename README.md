@@ -64,7 +64,7 @@ khealth                                   # current kubeconfig context, SSH as $
 khealth --context prod --ssh-user ubuntu --ssh-key ~/.ssh/prod.pem
 khealth --no-ssh                          # API-only view
 khealth --bastion jump@bastion.example.com --insecure-host-key
-khealth --helm-updates                    # also look up newer chart versions
+khealth --helm-updates                    # also look up newer chart versions (your `helm repo` list, then Artifact Hub)
 khealth --ssh-user admin --ask-pass       # prompt for a password used when keys fail (and for sudo)
 ```
 

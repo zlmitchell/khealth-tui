@@ -55,6 +55,7 @@ type Input struct {
 	Etcd       map[string]*etcd.Probe
 	EtcdExec   *etcd.Probe // cluster-wide view via kubectl exec (optional)
 	S3         *k8s.S3SecretInfo
+	S3Reach    map[string]etcd.S3Check // S3 endpoint reachability per etcd node
 	Logs       map[string]*logs.Summary
 	Stig       []stig.Result
 	HelmLatest map[string]helmcheck.Latest
@@ -483,8 +484,6 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 	backupMechanism := false
 	rke2 := s.Distribution == "rke2" || s.Distribution == "k3s"
 	snapshotsDisabled := false
-	var s3Secret string
-	s3Enabled := false
 	leaders := map[string]bool{}
 	memberCounts := map[int]bool{}
 
@@ -625,12 +624,6 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 		if v := p.RKE2Config["etcd-disable-snapshots"]; v == "true" {
 			snapshotsDisabled = true
 		}
-		if v := p.RKE2Config["etcd-s3"]; v == "true" {
-			s3Enabled = true
-		}
-		if v := p.RKE2Config["etcd-s3-config-secret"]; v != "" {
-			s3Secret = v
-		}
 		if f, _, ok := p.LatestSnapshot(); ok {
 			backupMechanism = true
 			if f.ModTime.After(latestLocal) {
@@ -649,14 +642,10 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 	// cluster-level snapshot records (rke2)
 	var latestRec *k8s.EtcdSnapshotRecord
 	failed := 0
-	s3Snaps := 0
 	for i := range s.RKE2Snapshots {
 		r := &s.RKE2Snapshots[i]
 		if r.Status == "failed" {
 			failed++
-		}
-		if r.S3 {
-			s3Snaps++
 		}
 		if r.Status != "failed" && (latestRec == nil || r.Created.After(latestRec.Created)) {
 			latestRec = r
@@ -693,14 +682,7 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 			add(SevWarn, "etcd", "backups", fmt.Sprintf("latest etcd snapshot is %s old (%s)", roundDur(in.Now.Sub(latest)), src), "check etcd-snapshot-schedule-cron / backup job")
 		}
 	}
-	if s3Enabled {
-		if s3Secret != "" && (in.S3 == nil || !in.S3.Found) {
-			add(SevWarn, "etcd", "backups", "etcd-s3-config-secret "+s3Secret+" not found in kube-system", "create the secret or fix the name")
-		}
-		if len(s.RKE2Snapshots) > 0 && s3Snaps == 0 {
-			add(SevWarn, "etcd", "backups", "S3 snapshots enabled but no snapshot record is marked as uploaded to S3", "check S3 credentials/endpoint in rke2-server logs")
-		}
-	}
+	evalS3(in, add)
 }
 
 // MergePVCUsage combines kubelet stats/summary usage with the SSH df fallback
