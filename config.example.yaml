@@ -20,6 +20,8 @@ ssh:
   address: InternalIP             # InternalIP | ExternalIP | Hostname (from the Node object)
   hosts:                          # per-node address overrides (node name -> host[:port])
     # cp-1: 192.168.1.10
+  nodes: []                       # only SSH to these node names (empty = every node in the cluster)
+    # - cp-1
   bastion: ""                     # jump host: user@host[:port]
   strict_host_key: true           # verify against known_hosts (false = accept anything)
   known_hosts: ~/.ssh/known_hosts

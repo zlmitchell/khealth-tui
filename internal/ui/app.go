@@ -218,8 +218,15 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 	if heavy {
 		timeout = 6 * a.cfg.SSH.Timeout
 	}
+	only := map[string]bool{}
+	for _, n := range a.cfg.SSH.Nodes {
+		only[n] = true
+	}
 	for i := range snap.Nodes {
 		n := &snap.Nodes[i]
+		if len(only) > 0 && !only[n.Name] {
+			continue
+		}
 		host := a.nodeAddress(n)
 		name := n.Name
 		opts := nodeinfo.Options{Heavy: heavy, LogLines: a.cfg.Logs.Lines, LogSince: a.cfg.Logs.Since}

@@ -41,6 +41,7 @@ type SSH struct {
 	Timeout       time.Duration     `yaml:"timeout"`
 	Address       string            `yaml:"address"` // InternalIP | ExternalIP | Hostname
 	Hosts         map[string]string `yaml:"hosts"`   // node name -> address override
+	Nodes         []string          `yaml:"nodes"`   // only collect from these node names (empty = all)
 	Bastion       string            `yaml:"bastion"` // user@host:port
 	StrictHostKey bool              `yaml:"strict_host_key"`
 	KnownHosts    string            `yaml:"known_hosts"`
@@ -148,6 +149,7 @@ func Load(args []string) (Config, error) {
 		askPass     = fs.Bool("ask-pass", false, "prompt for the SSH/sudo password at startup")
 		sshAddr     = fs.String("ssh-address", "", "node address type: InternalIP, ExternalIP or Hostname")
 		bastion     = fs.String("bastion", "", "SSH jump host (user@host[:port])")
+		sshNodes    = fs.String("ssh-nodes", "", "comma-separated node names to collect from (default: all)")
 		noSSH       = fs.Bool("no-ssh", false, "disable SSH collection")
 		noSudo      = fs.Bool("no-sudo", false, "do not use sudo on nodes")
 		insecureHK  = fs.Bool("insecure-host-key", false, "skip SSH host key verification")
@@ -205,6 +207,13 @@ func Load(args []string) (Config, error) {
 			cfg.SSH.Address = *sshAddr
 		case "bastion":
 			cfg.SSH.Bastion = *bastion
+		case "ssh-nodes":
+			cfg.SSH.Nodes = nil
+			for _, n := range strings.Split(*sshNodes, ",") {
+				if n = strings.TrimSpace(n); n != "" {
+					cfg.SSH.Nodes = append(cfg.SSH.Nodes, n)
+				}
+			}
 		case "no-ssh":
 			cfg.SSH.Enabled = !*noSSH
 		case "no-sudo":
