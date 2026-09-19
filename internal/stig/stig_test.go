@@ -3,8 +3,11 @@ package stig
 import (
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
@@ -155,5 +158,70 @@ func TestOSRulesPerBenchmark(t *testing.T) {
 	}
 	if find(rs, "OS-fips").Ref != "" {
 		t.Errorf("generic OS rules carry no Ref")
+	}
+}
+
+func TestRancherRules(t *testing.T) {
+	// downstream cluster: no rancher rules at all
+	rs := Evaluate(Input{Snap: &k8s.Snapshot{Rancher: &k8s.RancherInfo{Managed: true}}})
+	for _, r := range rs {
+		if r.Group == "rancher" {
+			t.Fatalf("rancher rule %s on a downstream cluster", r.ID)
+		}
+	}
+
+	port444 := intstr.FromInt(444)
+	port443 := intstr.FromInt(443)
+	snap := &k8s.Snapshot{
+		Rancher: &k8s.RancherInfo{Management: true, IngressFound: true, IngressPorts: []int32{443}, IngressTLS: []string{"tls-rancher-ingress"},
+			AuthProviders: []string{"openldap (OpenLdap)"},
+			GlobalRoles:   map[string]bool{"admin": false, "user": true, "user-base": true},
+			Users: []k8s.RancherUser{
+				{Name: "user-abc", Username: "admin", Local: true, Admin: true, Enabled: true},
+				{Name: "u-x1", Username: "svc-break-glass", Local: true, Admin: false, Enabled: true},
+				{Name: "u-x2", DisplayName: "Jane", Local: false, Enabled: true},
+			}},
+		Deployments: []appsv1.Deployment{{ObjectMeta: metav1.ObjectMeta{Name: "rancher", Namespace: "cattle-system"},
+			Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "rancher", Env: []corev1.EnvVar{{Name: "AUDIT_LEVEL", Value: "1"}}}}}}}}},
+		NetPols: []networkingv1.NetworkPolicy{
+			{ObjectMeta: metav1.ObjectMeta{Name: "rancher-allow-https", Namespace: "cattle-system"}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "rancher"}},
+				Ingress: []networkingv1.NetworkPolicyIngressRule{{Ports: []networkingv1.NetworkPolicyPort{{Port: &port444}}}}}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "rancher-deny-ingress", Namespace: "cattle-system"}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "rancher"}}}},
+		},
+		HelmReleases: []k8s.HelmRelease{{Namespace: "cattle-system", Name: "rancher", ValuesYAML: "privateCA: true\ningress:\n  tls:\n    source: secret\n"}},
+	}
+	rs = Evaluate(Input{Snap: snap})
+	expect := map[string]Status{"V-252843": Pass, "V-252844": Fail, "V-252845": Fail, "V-252846": Manual, "V-252847": Fail, "V-252849": Pass, "V-257292": Pass}
+	for id, want := range expect {
+		r := find(rs, id)
+		if r == nil {
+			t.Errorf("missing %s", id)
+			continue
+		}
+		if r.Status != want {
+			t.Errorf("%s: got %s (%s) want %s", id, r.Status, r.Detail, want)
+		}
+	}
+
+	// fix the findings and open a port: audit level, defaults, single local admin, extra port, self-signed
+	snap.Deployments[0].Spec.Template.Spec.Containers[0].Env[0].Value = "2"
+	snap.Rancher.GlobalRoles["user"] = false
+	snap.Rancher.Users = snap.Rancher.Users[:1]
+	snap.NetPols[0].Spec.Ingress[0].Ports = append(snap.NetPols[0].Spec.Ingress[0].Ports, networkingv1.NetworkPolicyPort{Port: &port443})
+	snap.HelmReleases[0].ValuesYAML = "ingress:\n  tls:\n    source: rancher\n"
+	rs = Evaluate(Input{Snap: snap})
+	expect = map[string]Status{"V-252844": Pass, "V-252845": Pass, "V-252847": Pass, "V-252849": Fail, "V-257292": Fail}
+	for id, want := range expect {
+		if r := find(rs, id); r == nil || r.Status != want {
+			t.Errorf("%s: got %+v want %s", id, r, want)
+		}
+	}
+	snap.Rancher.MgmtErr = "management.cattle.io: users: forbidden"
+	snap.Rancher.Users, snap.Rancher.GlobalRoles = nil, nil
+	rs = Evaluate(Input{Snap: snap})
+	for _, id := range []string{"V-252845", "V-252847"} {
+		if r := find(rs, id); r == nil || r.Status != Unknown {
+			t.Errorf("%s without RBAC: got %+v want UNKNOWN", id, r)
+		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
+	"k8s.io/klog/v2"
 
 	"k8s-health-tui/internal/config"
 	"k8s-health-tui/internal/etcd"
@@ -65,6 +66,10 @@ func main() {
 		}
 		cfg.SSH.Password = string(pw)
 	}
+	// klog (client-go throttling notices etc.) writes to stderr, which lands on
+	// top of the alt-screen; silence it while the TUI owns the terminal.
+	klog.SetOutput(io.Discard)
+	klog.LogToStderr(false)
 	app, err := ui.New(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

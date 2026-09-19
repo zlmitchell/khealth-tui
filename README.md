@@ -152,6 +152,7 @@ benchmark numbering:
 |---|---|---|
 | DISA Kubernetes STIG | V2R6 (01 Apr 2026) | `V-2423xx`..`V-2424xx`, `V-2455xx`, `V-2548xx`, `V-2748xx` |
 | DISA Rancher Government RKE2 STIG | V2R7 (01 Jul 2026) | `V-2545xx`; `RKE2-*` for hardening-guide prerequisites the STIG does not number |
+| DISA Rancher Government MCM STIG | V2R2 (05 Jan 2026) | `V-2528xx`, `V-257292`; only on the cluster that runs Rancher (auth provider, `AUDIT_LEVEL`, new-user default role, single local admin, ingress 443 + NetworkPolicies to 444, `privateCA`/`ingress.tls.source=secret` from helm values) |
 | CIS Kubernetes Benchmark | v2.0.1 (Jun 2026) / rke2 self-assessment v1.12 | `CIS-x.y.z` |
 | DISA RHEL STIG | 8 V2R8, 9 V2R9, 10 V1R2 (01 Jul 2026) | per node, matched from `/etc/os-release` |
 | DISA Ubuntu LTS STIG | 20.04 V2R4, 22.04 V2R9, 24.04 V1R6 | per node, matched from `/etc/os-release` |
@@ -177,7 +178,7 @@ internal/sshrun        SSH runner (agent/key/password, bastion, sudo, known_host
 internal/nodeinfo      node collection script + parser (resources, perms, registries, images, logs)
 internal/etcd          etcd probe script + parser (config source, health, metrics, etcdctl, snapshots)
 internal/logs          log pattern knowledge base + classifier
-internal/stig          STIG/CIS rule engine (one file per reference: kubernetes, rke2, cis, os + rhel/ubuntu tables)
+internal/stig          STIG/CIS rule engine (one file per reference: kubernetes, rke2, rancher, cis, os + rhel/ubuntu tables)
 internal/helmcheck     chart update lookup (repo index.yaml / Artifact Hub)
 internal/checks        findings engine (thresholds -> CRIT/WARN/INFO)
 internal/ui            Bubble Tea app, tabs, detail views

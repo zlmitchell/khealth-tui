@@ -8,6 +8,7 @@
 //
 //	kubernetes.go  DISA Kubernetes STIG V2R6            (V-2423xx.., V-2455xx, V-2548xx, V-2748xx)
 //	rke2.go        DISA Rancher Government RKE2 STIG V2R7 (V-2545xx; RKE2-* prerequisites)
+//	rancher.go     DISA Rancher Government MCM STIG V2R2  (V-2528xx, V-257292; management cluster only)
 //	cis.go         CIS Kubernetes Benchmark v2.0 numbering (CIS-x.y.z)
 //	os.go          per-node OS checks shared by the OS STIGs
 //	rhel.go        DISA RHEL 8 / 9 / 10 STIG rule tables
@@ -51,6 +52,7 @@ func (b Benchmark) Matches(id string) bool {
 var Benchmarks = []Benchmark{
 	{Name: "DISA Kubernetes STIG", Version: "V2R6 (01 Apr 2026)", Prefixes: []string{"V-242", "V-245", "V-2548", "V-2748"}, Note: "vulnerability IDs V-2423xx..V-2424xx, V-2455xx, V-2548xx, V-2748xx (secrets at rest, new in V2R6)"},
 	{Name: "DISA Rancher Government RKE2 STIG", Version: "V2R7 (01 Jul 2026)", Prefixes: []string{"V-2545", "V-268", "RKE2-"}, Note: "V-2545xx/V-268321; RKE2-* are rke2 hardening-guide prerequisites (etcd user, SELinux) not carried as STIG IDs"},
+	{Name: "DISA Rancher Government MCM STIG", Version: "V2R2 (05 Jan 2026)", Prefixes: []string{"V-2528", "V-257292"}, Note: "Rancher Multi-Cluster Manager; evaluated only on the cluster that runs Rancher"},
 	{Name: "CIS Kubernetes Benchmark", Version: "v2.0.1 (Jun 2026) / rke2 CIS self-assessment v1.12", Prefixes: []string{"CIS-"}, Note: "section numbers follow v2.0 (renumbered from v1.9)"},
 	{Name: "DISA OS STIGs", Version: "RHEL 8 V2R8 / 9 V2R9 / 10 V1R2, Ubuntu 20.04 V2R4 / 22.04 V2R9 / 24.04 V1R6", Prefixes: []string{"OS-"}, Note: "matched per node from /etc/os-release (see OSBenchmarks); OS-* IDs are the generic fallback for other distributions"},
 }
@@ -85,7 +87,7 @@ type Result struct {
 	ID      string
 	Title   string
 	Cat     string // I, II, III
-	Group   string // apiserver, controller-manager, scheduler, etcd, kubelet, node, os, cluster
+	Group   string // apiserver, controller-manager, scheduler, etcd, kubelet, node, os, cluster, rancher
 	Status  Status
 	Detail  string
 	Fix     string
@@ -126,6 +128,7 @@ func Evaluate(in Input) []Result {
 		e.osRules()
 	}
 	e.clusterRules()
+	e.rancherRules()
 
 	sort.SliceStable(e.out, func(i, j int) bool {
 		if e.out[i].Status != e.out[j].Status {

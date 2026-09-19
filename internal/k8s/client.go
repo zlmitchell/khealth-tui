@@ -49,6 +49,9 @@ func New(kubeconfig, ctxName string) (*Client, error) {
 	restCfg.Timeout = 30 * time.Second
 	restCfg.QPS = 50
 	restCfg.Burst = 100
+	// Deprecation warnings would otherwise go to stderr via klog and corrupt
+	// the TUI frame.
+	restCfg.WarningHandler = rest.NoWarnings{}
 
 	cs, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {

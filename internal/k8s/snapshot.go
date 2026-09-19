@@ -151,6 +151,17 @@ type RancherInfo struct {
 	Env             map[string]string // CATTLE_* env (tokens masked)
 	SystemUpgradeOK *bool
 	Provisioning    string // "rancher (v2prov)", "imported", ...
+
+	// Management-cluster facts, filled only when this cluster runs Rancher
+	// itself (Rancher MCM STIG). See rancher.go.
+	Management    bool
+	IngressFound  bool
+	IngressPorts  []int32         // backend service ports of ingress cattle-system/rancher
+	IngressTLS    []string        // TLS secret names on that ingress
+	AuthProviders []string        // enabled authconfigs other than local
+	GlobalRoles   map[string]bool // global role name -> newUserDefault
+	Users         []RancherUser
+	MgmtErr       string // first collection error (RBAC / CRDs missing)
 }
 
 var checkRe = regexp.MustCompile(`^\[([+-])\](\S+)\s*(.*)$`)
@@ -224,7 +235,7 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		return nil
 	})
 	run("events", func() error {
-		l, err := cs.CoreV1().Events("").List(ctx, metav1.ListOptions{FieldSelector: "type=Warning"})
+		l, err := cs.CoreV1().Events("").List(ctx, all) // all types; events expire after the apiserver's event-ttl
 		if err != nil {
 			return err
 		}
@@ -738,6 +749,7 @@ func (c *Client) rancherInfo(ctx context.Context) *RancherInfo {
 		if _, err := c.CS.AppsV1().Deployments("cattle-system").Get(ctx, "rancher", metav1.GetOptions{}); err == nil {
 			info.Provisioning = "this cluster runs Rancher (management/local cluster)"
 			info.Managed = false
+			c.rancherManagement(ctx, info)
 			return info
 		}
 		return info
@@ -809,6 +821,17 @@ func detectDistribution(nodes []corev1.Node) string {
 		}
 	}
 	return "unknown"
+}
+
+// WarningEvents returns only Warning-type events.
+func (s *Snapshot) WarningEvents() []corev1.Event {
+	var out []corev1.Event
+	for i := range s.Events {
+		if s.Events[i].Type == "Warning" {
+			out = append(out, s.Events[i])
+		}
+	}
+	return out
 }
 
 // EventTime returns the best timestamp for an event.

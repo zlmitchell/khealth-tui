@@ -1039,7 +1039,7 @@ func (a *App) helmContent() content {
 				latest = styleOK.Render("up to date")
 			}
 		} else if a.helm == nil {
-			latest = styleDim.Render("(off)")
+			latest = styleDim.Render("off: --helm-updates")
 		}
 		vals := ""
 		if r.ValuesYAML != "" {
@@ -1071,7 +1071,7 @@ func (a *App) helmContent() content {
 	if a.helm != nil {
 		hdr[0] += styleOK.Render("on")
 	} else {
-		hdr[0] += styleDim.Render("off (helm.check_updates / --helm-updates)")
+		hdr[0] += styleWarn.Render("off") + styleDim.Render(" - run with --helm-updates (Artifact Hub) or set helm.check_updates + helm.repos in the config; needs outbound HTTP")
 	}
 	hdr = append(hdr, h)
 	c := content{header: hdr, selectable: true, empty: "no Helm releases found (helm.sh/release.v1 secrets)"}

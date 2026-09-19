@@ -514,7 +514,7 @@ func (a *App) recordSnapshot() {
 	a.record("pods.unhealthy", float64(unhealthy))
 	a.record("nodes.ready", float64(ready))
 	a.record("nodes.total", float64(len(s.Nodes)))
-	a.record("events.warn", float64(len(s.Events)))
+	a.record("events.warn", float64(len(s.WarningEvents())))
 	crit, warn := 0, 0
 	for _, f := range a.findings {
 		switch f.Severity {

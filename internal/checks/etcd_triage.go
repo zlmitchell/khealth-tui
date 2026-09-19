@@ -306,13 +306,8 @@ func (r nodeRank) String(now time.Time) string {
 }
 
 // triageClusterDown is the finding for a lost quorum: which node to start the
-// recovery from, and the exact sequence for the distribution.
+// recovery from, and the exact sequence for that node's etcd runtime.
 func triageClusterDown(in Input, recs []*etcdTriage, members []etcd.Member, q etcdQuorum) Finding {
-	dist := "rke2"
-	if in.Snap != nil && in.Snap.Distribution != "" {
-		dist = in.Snap.Distribution
-	}
-	svc := supervisorFor(dist)
 	ranked := rankEtcdNodes(recs, members)
 	f := Finding{Severity: SevCrit, Area: "etcd", Object: "cluster"}
 	f.Message = fmt.Sprintf("etcd quorum lost: %d/%d members healthy", q.healthy, q.total)
@@ -320,15 +315,26 @@ func triageClusterDown(in Input, recs []*etcdTriage, members []etcd.Member, q et
 	if len(ranked) > 0 && (ranked[0].leaderTerm > 0 || ranked[0].snapTerm > 0 || ranked[0].walIndex > 0) {
 		best = &ranked[0]
 	}
+	// the runtime of the target node decides the commands
+	var targetRec *etcdTriage
+	for _, t := range recs {
+		if best != nil && t.node == best.node {
+			targetRec = t
+		}
+	}
+	if targetRec == nil && len(recs) > 0 {
+		targetRec = recs[0]
+	}
+	rt := runtimeFor(targetRec, clusterDist(in))
 	if best != nil && best.leaderTerm > 0 {
 		f.Message += fmt.Sprintf("; last known leader %s (term %d)", best.node, best.leaderTerm)
-		f.Hint = "if it does not recover on its own, cluster-reset from " + best.node
+		f.Hint = "if it does not recover on its own, " + rt.resetName() + " from " + best.node
 	} else {
 		f.Hint = "no leader history found on any node yet (needs ssh); see steps"
 	}
 	f.Steps = []string{
-		"First: get every control-plane host powered on and " + svc + " running, then wait ~5 minutes. With all members' data intact etcd re-elects a leader by itself; nothing below is needed while hosts are still booting",
-		"Do NOT run cluster-reset on more than one node, and not while other members are still coming up: it makes that node's data the only truth",
+		"First: get every control-plane host powered on and " + rt.svc + " running, then wait ~5 minutes. With all members' data intact etcd re-elects a leader by itself; nothing below is needed while hosts are still booting",
+		"Do NOT run " + rt.resetName() + " on more than one node, and not while other members are still coming up: it makes that node's data the only truth",
 	}
 	if len(ranked) > 0 {
 		f.Steps = append(f.Steps, "Nodes ranked by freshest data (highest election term, then on-disk raft snapshot/WAL):")
@@ -341,29 +347,34 @@ func triageClusterDown(in Input, recs []*etcdTriage, members []etcd.Member, q et
 			}
 		}
 	}
-	target := "<the node ranked first above>"
+	target, targetIP := "<the node ranked first above>", "<its ip>"
+	var others []string
 	if best != nil {
 		target = best.node
+		if targetRec != nil {
+			targetIP = nodeIP(in, targetRec)
+		}
+		for _, t := range recs {
+			if t.node != target {
+				others = append(others, t.node+" ("+nodeIP(in, t)+")")
+			}
+		}
 	}
-	dbDir := strings.TrimSuffix(dataDir(&etcdTriage{}, dist), "/etcd")
-	switch dist {
-	case "rke2", "k3s":
-		f.Steps = append(f.Steps,
-			"If quorum has not returned: on EVERY other server first: systemctl stop "+svc+"   (nothing else may be trying to form a cluster while "+target+" resets)",
-			"Then on "+target+": systemctl stop "+svc+"; "+dist+" server --cluster-reset   (keeps its local data, drops the other members; the command exits when done)",
-			"systemctl start "+svc+" on "+target+"; wait until kubectl get nodes answers",
-			"On each of the other servers, one at a time: rm -rf "+dbDir+"; systemctl start "+svc+"   (they rejoin and resync from "+target+")",
-			"Only if "+target+"'s data dir is damaged (container log shows wal/snap corruption): "+dist+" server --cluster-reset --cluster-reset-restore-path="+latestSnapshotPath(in, recs)+" in the reset step instead; the rest is the same",
-		)
-	default:
-		f.Steps = append(f.Steps,
-			"If quorum has not returned: on "+target+" only, add --force-new-cluster to the etcd static pod args (/etc/kubernetes/manifests/etcd.yaml), let it restart as a one-member cluster, then remove the flag",
-			"On every other control-plane node: stop kubelet, move "+dataDir(&etcdTriage{}, dist)+" aside, re-add with etcdctl member add and restart kubelet",
-			"Only if "+target+"'s data is damaged: etcdctl snapshot restore "+latestSnapshotPath(in, recs)+" --data-dir "+dataDir(&etcdTriage{}, dist)+" on "+target,
-		)
-	}
-	f.Steps = append(f.Steps, "Afterwards: etcdctl endpoint status --cluster -w table must show one leader and matching raft indexes; take a fresh snapshot ("+dist+" etcd-snapshot save)")
+	f.Steps = append(f.Steps, rt.resetSteps(target, targetIP, latestSnapshotPath(in, recs), others)...)
+	f.Steps = append(f.Steps, "Afterwards: etcdctl endpoint status --cluster -w table must show one leader and matching raft indexes; take a fresh snapshot: "+rt.snapshotSave())
 	return f
+}
+
+// clusterDist is the distribution the API reported, defaulting to kubeadm
+// semantics (static pod) when unknown.
+func clusterDist(in Input) string {
+	if in.Snap != nil {
+		switch in.Snap.Distribution {
+		case "rke2", "k3s", "kubeadm":
+			return in.Snap.Distribution
+		}
+	}
+	return "kubeadm"
 }
 
 // latestSnapshotPath picks the newest snapshot file the probes found on disk,
@@ -399,11 +410,8 @@ func latestSnapshotPath(in Input, recs []*etcdTriage) string {
 
 // triageOne classifies one etcd node and returns its finding, if any.
 func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
-	dist := "rke2"
-	if in.Snap != nil && in.Snap.Distribution != "" {
-		dist = in.Snap.Distribution
-	}
-	svc := supervisorFor(dist)
+	rt := runtimeFor(t, clusterDist(in))
+	svc := rt.svc
 	podState := ""
 	if t.pod != nil {
 		podState = k8s.PodStatus(t.pod)
@@ -414,9 +422,11 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 		restarts, lastRestart = k8s.PodRestarts(t.pod)
 	}
 	crashLooping := podState == "CrashLoopBackOff" || (restarts > 0 && !lastRestart.IsZero() && in.Now.Sub(lastRestart) < time.Hour)
-	problem := (t.known && !t.healthy) || (t.member == nil && q.total > 0) || !t.ready || crashLooping || (t.pod != nil && t.pod.Status.Phase != corev1.PodRunning)
+	// container evidence only means something where etcd is a container
+	containerDown := rt.static && (crashLooping || (t.pod != nil && t.pod.Status.Phase != corev1.PodRunning) || (len(containersOf(t.info)) > 0 && !hasContainer(t.info, "etcd")))
+	problem := (t.known && !t.healthy) || (t.member == nil && q.total > 0) || !t.ready || containerDown
 	if !problem {
-		return triageLag(t, q)
+		return triageLag(t, q, rt)
 	}
 
 	f := Finding{Severity: SevCrit, Area: "etcd", Object: t.node}
@@ -424,7 +434,11 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 	if t.member != nil {
 		memberTxt = "member " + t.member.Name
 	}
-	cause, causeSteps := etcdCause(in, t, dist)
+	cause, causeSteps := etcdCause(in, t, rt)
+	healthyPeer := q.leader
+	if healthyPeer == "" {
+		healthyPeer = "a healthy member"
+	}
 
 	switch {
 	// ---- node offline: NotReady and unreachable over SSH ----
@@ -436,14 +450,14 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 			"Confirm the host is down: ping / console / hypervisor or cloud console; kubelet last reported " + nodeHeartbeat(in, t.node),
 			"If it is only unreachable from here, verify ssh.user/key/address in the config - the node may be fine",
 			"When the host comes back " + svc + " starts, the etcd member catches up from the leader automatically; verify with etcdctl endpoint health --cluster",
-			"If the host is permanently gone: on a healthy member etcdctl member remove " + memberID(t) + "; then kubectl delete node " + t.node + "; then join a fresh node",
+			"If the host is permanently gone: on " + healthyPeer + " etcdctl member remove " + memberID(t) + "; then kubectl delete node " + t.node + "; then " + rt.joinHint(),
 		}
 		if q.lost {
-			f.Steps = append(f.Steps, "Quorum is lost: if the majority of hosts cannot be recovered, restore from the latest snapshot on one surviving server: "+restoreCommand(dist, in))
+			f.Steps = append(f.Steps, "Quorum is lost: if the majority of hosts cannot be recovered, follow the cluster finding above (reset from the node with the freshest data, restore from "+latestSnapshotPath(in, []*etcdTriage{t})+" only if its data is damaged)")
 		}
 		return f, true
 
-	// ---- host up, supervisor / kubelet down ----
+	// ---- host up, the unit that runs etcd is down ----
 	case t.sshOK && !serviceActive(t.info, svc):
 		f.Message = fmt.Sprintf("host up but %s is %s; %s", svc, serviceState(t.info, svc), memberTxt)
 		f.Hint = "systemctl status " + svc + "; journalctl -u " + svc + " -n 200"
@@ -458,8 +472,8 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 		f.Steps = append(f.Steps, "systemctl restart "+svc+"; then watch etcdctl endpoint health --cluster until "+t.node+" reports healthy")
 		return f, true
 
-	// ---- supervisor up, etcd container not running / crash-looping ----
-	case t.sshOK && (crashLooping || (t.pod != nil && t.pod.Status.Phase != corev1.PodRunning) || (len(containersOf(t.info)) > 0 && !hasContainer(t.info, "etcd"))):
+	// ---- unit up, etcd container not running / crash-looping (static pod runtimes) ----
+	case t.sshOK && containerDown:
 		state := podState
 		if state == "" {
 			state = "no etcd container in crictl ps"
@@ -468,7 +482,7 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 		f.Hint = "crictl ps -a --name etcd; crictl logs <id>"
 		f.Steps = []string{
 			q.String(),
-			"Read the container's own log: crictl ps -a --name etcd; crictl logs --tail 200 <id>  (or kubectl -n kube-system logs etcd-" + t.node + " --previous)",
+			"Read the container's own log: " + strings.ReplaceAll(rt.logs, "<node>", t.node),
 		}
 		if cause != "" {
 			f.Steps = append(f.Steps, "Journal points at: "+cause)
@@ -476,8 +490,13 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 		} else {
 			f.Steps = append(f.Steps, "No known pattern in the journal yet: the container log will show the exit reason (data dir corruption, peer TLS, bind failure)")
 		}
-		if t.probe != nil && len(t.probe.Sources) == 0 && (dist == "rke2" || dist == "k3s") {
-			f.Steps = append(f.Steps, "No etcd static-pod manifest found on the node: check disable-etcd / etcd-only role settings in /etc/rancher/"+dist+"/config.yaml")
+		if t.probe != nil && len(t.probe.Sources) == 0 {
+			switch rt.kind {
+			case "rke2", "k3s":
+				f.Steps = append(f.Steps, "No etcd static-pod manifest found on the node: check disable-etcd / etcd-only role settings in /etc/rancher/"+rt.kind+"/config.yaml")
+			default:
+				f.Steps = append(f.Steps, "No "+kubeadmManifest+" on the node: kubelet has nothing to run; restore the manifest (kubeadm init phase etcd local, or copy from another control-plane node and fix the node-specific args)")
+			}
 		}
 		return f, true
 
@@ -493,7 +512,7 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 			what = "running but not a cluster member"
 		}
 		f.Message = fmt.Sprintf("etcd on %s is %s: %s", t.node, what, firstNonEmpty(t.reason, cause, "no error text"))
-		f.Hint = firstNonEmpty(cause, "check peer connectivity on 2380 and the container log")
+		f.Hint = firstNonEmpty(cause, "check peer connectivity on 2380 and the member's log")
 		f.Steps = []string{q.String()}
 		if cause != "" {
 			f.Steps = append(f.Steps, "Cause: "+cause)
@@ -501,9 +520,9 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 		} else {
 			f.Steps = append(f.Steps,
 				"From another member: nc -vz "+peerHost(t)+" 2380 and 2379 - firewall / security group between control-plane nodes is the usual cause",
-				"On "+t.node+": crictl logs --tail 200 $(crictl ps -q --name etcd) for peer TLS or raft errors; check clock sync (etcd needs it)",
-				"If the member never recovers: on a healthy member etcdctl member remove "+memberID(t)+"; on "+t.node+" stop "+svc+", move the etcd data dir aside ("+dataDir(t, dist)+"), start "+svc+" - it rejoins as a learner and resyncs",
-			)
+				"On "+t.node+": "+strings.ReplaceAll(rt.logs, "<node>", t.node)+" for peer TLS or raft errors; check clock sync (etcd needs it)",
+				"If the member never recovers, rebuild it:")
+			f.Steps = append(f.Steps, rt.rejoinSteps(t.node, nodeIP(in, t), memberID(t), healthyPeer)...)
 		}
 		return f, true
 
@@ -512,24 +531,28 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 		f.Severity = SevWarn
 		f.Message = "node NotReady but its etcd member is healthy; kubelet/CNI problem rather than etcd"
 		f.Hint = "see the node finding; etcd quorum is unaffected"
-		f.Steps = []string{q.String(), "systemctl status " + svc + " kubelet; journalctl -u " + svc + " -n 100 | grep -iE 'kubelet|cni'", "This member still votes and replicates - no etcd action needed"}
+		units := "kubelet"
+		if svc != "kubelet" {
+			units = svc + " kubelet"
+		}
+		f.Steps = []string{q.String(), "systemctl status " + units + "; journalctl -u " + strings.ReplaceAll(units, " ", " -u ") + " -n 100 | grep -iE 'kubelet|cni'", "This member still votes and replicates - no etcd action needed"}
 		return f, true
 	}
 	return f, false
 }
 
 // triageLag reports a healthy member that trails the leader or is a learner.
-func triageLag(t *etcdTriage, q etcdQuorum) (Finding, bool) {
+func triageLag(t *etcdTriage, q etcdQuorum, rt etcdRuntime) (Finding, bool) {
 	if t.member == nil || t.status == nil {
 		return Finding{}, false
 	}
 	if t.member.IsLearner {
 		return Finding{Severity: SevInfo, Area: "etcd", Object: t.node,
 			Message: "member " + t.member.Name + " is a learner (not voting)",
-			Hint:    "promoted automatically once it has caught up",
+			Hint:    "promote once it has caught up",
 			Steps: []string{
 				q.String(),
-				"A learner receives the log but does not vote; rke2 promotes it once its raft index matches the leader",
+				"A learner receives the log but does not vote; " + map[bool]string{true: "rke2/k3s promote it automatically", false: "etcd does not promote it by itself"}[rt.kind == "rke2" || rt.kind == "k3s"] + " once its raft index matches the leader",
 				fmt.Sprintf("Current index %d vs leader %d - if this does not converge, check disk and network on %s", t.status.RaftIndex, q.leaderIndex, t.node),
 				"Manual promotion: etcdctl member promote " + t.member.ID,
 			}}, true
@@ -560,64 +583,93 @@ func triageLag(t *etcdTriage, q etcdQuorum) (Finding, bool) {
 }
 
 // etcdCause maps journal patterns, probe facts and node facts to a human cause
-// and the steps that fix it.
-func etcdCause(in Input, t *etcdTriage, dist string) (string, []string) {
-	svc := supervisorFor(dist)
-	dd := dataDir(t, dist)
+// and the steps that fix it on this node's runtime.
+func etcdCause(in Input, t *etcdTriage, rt etcdRuntime) (string, []string) {
+	dd := rt.dataDir
 	lg := t.logs
 	has := func(name string) bool { return lg != nil && lg[name] > 0 }
+	healthyPeer := "a healthy member"
+	ip := nodeIP(in, t)
 	switch {
 	case has("cluster-id"):
-		return "cluster ID mismatch - this node's etcd data belongs to a different cluster (reinstalled or restored node)", []string{
-			"On a healthy member: etcdctl member list; if " + t.node + " is listed, etcdctl member remove " + memberID(t),
-			"On " + t.node + ": systemctl stop " + svc + "; mv " + dd + " " + dd + ".bak-$(date +%F); systemctl start " + svc,
-			"It rejoins as a learner and syncs from the leader; verify with etcdctl endpoint status --cluster -w table",
-		}
+		steps := []string{"On " + healthyPeer + ": etcdctl member list; if " + t.node + " is listed, etcdctl member remove " + memberID(t)}
+		return "cluster ID mismatch - this node's etcd data belongs to a different cluster (reinstalled or restored node)",
+			append(steps, rt.rejoinSteps(t.node, ip, memberID(t), healthyPeer)...)
 	case has("etcd-nospace") || hasAlarm(t, "NOSPACE"):
 		return "NOSPACE alarm - the database hit quota-backend-bytes; the cluster is read-only until cleared", []string{
 			"rev=$(etcdctl endpoint status -w json | grep -o '\"revision\":[0-9]*' | head -1 | cut -d: -f2); etcdctl compact $rev",
 			"etcdctl defrag --endpoints=<one member at a time>; wait for each to come back healthy",
-			"etcdctl alarm disarm; then raise the quota if the working set really is this big (rke2: etcd-arg: [quota-backend-bytes=8589934592])",
+			"etcdctl alarm disarm; then raise the quota if the working set really is this big (" + quotaHint(rt) + ")",
 		}
 	case has("disk-full") || dataDirFull(t, in):
 		return "data-dir filesystem full - etcd stops writing when the disk fills", []string{
-			"Free space on the etcd filesystem: crictl rmi --prune; journalctl --vacuum-size=500M; prune old snapshots in " + snapshotDir(t, dist),
+			"Free space on the etcd filesystem: crictl rmi --prune; journalctl --vacuum-size=500M; prune old " + snapshotHint(t, rt),
 			"Give etcd its own disk if it shares one with images/logs",
-			"systemctl restart " + svc + " once space is back",
+			rt.restart + " once space is back",
 		}
 	case has("etcd-user") || (t.info != nil && !t.info.EtcdUser && t.info.Settings != nil && strings.HasPrefix(t.info.Settings["profile"], "cis")):
 		return "CIS profile requires an etcd user/group on the host and it is missing", []string{
 			"useradd -r -c 'etcd user' -s /sbin/nologin -M etcd -U",
 			"chown -R etcd:etcd " + dd,
-			"systemctl restart " + svc,
+			rt.restart,
 		}
 	case expiredEtcdCert(t, in.Now) != "":
-		return "expired etcd certificate: " + expiredEtcdCert(t, in.Now), []string{
-			"rke2/k3s: systemctl stop " + svc + "; " + dist + " certificate rotate; systemctl start " + svc,
-			"kubeadm: kubeadm certs renew etcd-server etcd-peer etcd-healthcheck-client apiserver-etcd-client; then restart the etcd static pod",
-		}
+		return "expired etcd certificate: " + expiredEtcdCert(t, in.Now), certRenewSteps(rt)
 	case t.probe != nil && len(t.probe.Missing) > 0:
 		return "expected etcd cert/tool paths are missing on the node: " + strings.Join(t.probe.Missing, ", "), []string{
 			"ls -l " + strings.Join(t.probe.Missing, " "),
-			"If the layout is non-standard set etcd.ca_cert/client_cert/client_key/endpoint in the config; if the files are really gone the server needs its TLS regenerated (" + dist + " certificate rotate)",
+			"If the layout is non-standard set etcd.ca_cert/client_cert/client_key/endpoint in the config; if the files are really gone the TLS material must be regenerated: " + strings.Join(certRenewSteps(rt), "; "),
 		}
 	case has("port-in-use"):
 		return "a required port is already in use (2379/2380)", []string{
-			"ss -lntp | grep -E ':(2379|2380) ' to see who holds it; stop the stray process (leftover etcd, a second " + svc + " instance)",
-			"systemctl restart " + svc,
+			"ss -lntp | grep -E ':(2379|2380) ' to see who holds it; stop the stray process (a leftover etcd, a second " + rt.product() + " instance)",
+			rt.restart,
 		}
 	case has("wait-etcd") || has("conn-refused-local"):
-		return svc + " is still waiting for the local etcd to listen on 2379 - the container is not coming up", []string{
-			"crictl ps -a --name etcd; crictl logs --tail 200 <id> shows why it exits",
+		return rt.svc + " is still waiting for the local etcd to listen on 2379 - the member is not coming up", []string{
+			strings.ReplaceAll(rt.logs, "<node>", t.node) + " shows why it exits",
 			"Typical: data dir permissions, peer TLS mismatch, unreachable peers on 2380, wrong --initial-cluster after an IP change",
 		}
 	case has("clock-skew"):
 		return "clock skew - TLS handshakes between members fail when clocks drift", []string{
 			"timedatectl; chronyc tracking on every control-plane node",
-			"Fix NTP, then systemctl restart " + svc,
+			"Fix NTP, then " + rt.restart,
 		}
 	}
 	return "", nil
+}
+
+func quotaHint(rt etcdRuntime) string {
+	switch rt.kind {
+	case "rke2", "k3s":
+		return "config.yaml: etcd-arg: [quota-backend-bytes=8589934592]"
+	case "systemd":
+		return "ETCD_QUOTA_BACKEND_BYTES=8589934592 in /etc/etcd.env"
+	}
+	return "--quota-backend-bytes=8589934592 in " + kubeadmManifest
+}
+
+func snapshotHint(t *etcdTriage, rt etcdRuntime) string {
+	if t.probe != nil {
+		for _, d := range t.probe.SnapshotDirs {
+			return "snapshots in " + d.Path
+		}
+	}
+	switch rt.kind {
+	case "rke2", "k3s":
+		return "snapshots in /var/lib/rancher/" + rt.kind + "/server/db/snapshots"
+	}
+	return "backups / snapshots (etcd.backup_dirs in the config lists where to look)"
+}
+
+func certRenewSteps(rt etcdRuntime) []string {
+	switch rt.kind {
+	case "rke2", "k3s":
+		return []string{rt.stop + "; " + rt.kind + " certificate rotate; " + rt.start}
+	case "systemd":
+		return []string{"Regenerate the etcd certs with the tool that provisioned them (kubespray: the etcd cert playbook); then " + rt.restart}
+	}
+	return []string{"kubeadm certs renew etcd-server etcd-peer etcd-healthcheck-client apiserver-etcd-client", rt.restart + "; also restart kube-apiserver the same way so it picks up apiserver-etcd-client"}
 }
 
 // ---- helpers ----
@@ -730,16 +782,6 @@ func etcdPodOn(s *k8s.Snapshot, node string) *corev1.Pod {
 	return nil
 }
 
-func supervisorFor(dist string) string {
-	switch dist {
-	case "rke2":
-		return "rke2-server"
-	case "k3s":
-		return "k3s"
-	}
-	return "kubelet"
-}
-
 func serviceActive(ni *nodeinfo.Info, name string) bool {
 	if ni == nil {
 		return true // unknown: do not blame the service
@@ -805,52 +847,6 @@ func expiredEtcdCert(t *etcdTriage, now time.Time) string {
 		}
 	}
 	return ""
-}
-
-func dataDir(t *etcdTriage, dist string) string {
-	if t.probe != nil && t.probe.DataDir != "" {
-		return t.probe.DataDir
-	}
-	switch dist {
-	case "rke2":
-		return "/var/lib/rancher/rke2/server/db/etcd"
-	case "k3s":
-		return "/var/lib/rancher/k3s/server/db/etcd"
-	}
-	return "/var/lib/etcd"
-}
-
-func snapshotDir(t *etcdTriage, dist string) string {
-	if t.probe != nil {
-		for _, d := range t.probe.SnapshotDirs {
-			return d.Path
-		}
-	}
-	if dist == "k3s" {
-		return "/var/lib/rancher/k3s/server/db/snapshots"
-	}
-	return "/var/lib/rancher/rke2/server/db/snapshots"
-}
-
-func restoreCommand(dist string, in Input) string {
-	snap := "<snapshot>"
-	if in.Snap != nil {
-		var latest *k8s.EtcdSnapshotRecord
-		for i := range in.Snap.RKE2Snapshots {
-			r := &in.Snap.RKE2Snapshots[i]
-			if r.Status != "failed" && (latest == nil || r.Created.After(latest.Created)) {
-				latest = r
-			}
-		}
-		if latest != nil {
-			snap = latest.Name
-		}
-	}
-	switch dist {
-	case "rke2", "k3s":
-		return "systemctl stop " + supervisorFor(dist) + " on all servers; on one: " + dist + " server --cluster-reset --cluster-reset-restore-path=" + snap + "; start it; wipe " + dataDir(&etcdTriage{}, dist) + " on the others and start them"
-	}
-	return "etcdctl snapshot restore " + snap + " --data-dir=<new dir> on one node with --force-new-cluster semantics, then re-add the others"
 }
 
 func memberID(t *etcdTriage) string {

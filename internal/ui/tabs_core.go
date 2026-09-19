@@ -116,7 +116,7 @@ func (a *App) overviewContent() content {
 	if s.Rancher != nil && s.Rancher.Managed {
 		api += "  " + kv("rancher", okText(s.Rancher.ClusterAgentOK, "connected "+s.Rancher.Server, "disconnected "+s.Rancher.Server))
 	}
-	api += "  " + kv("warning events", fmt.Sprint(len(s.Events))) + " " + styleInfo.Render(sparkline(a.values("events.warn"), 12, 0))
+	api += "  " + kv("warning events", fmt.Sprint(len(s.WarningEvents()))) + " " + styleInfo.Render(sparkline(a.values("events.warn"), 12, 0))
 	hdr = append(hdr, api)
 
 	fsegs := []seg{{float64(crit), styleCrit, "critical"}, {float64(warn), styleWarn, "warning"}, {float64(info), styleInfo, "info"}}
@@ -325,17 +325,33 @@ func (a *App) eventsContent() content {
 	s := a.snap
 	var rows [][]string
 	var ids []string
+	warnings := 0
 	for i := range s.Events {
 		e := &s.Events[i]
 		if !a.inNamespace(e.Namespace) {
 			continue
 		}
+		if e.Type == "Warning" {
+			warnings++
+		} else if a.problemOnly {
+			continue
+		}
 		obj := e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name
-		rows = append(rows, []string{age(k8s.EventTime(e)), e.Namespace, obj, styleWarn.Render(e.Reason), fmt.Sprint(k8s.EventCount(e)), firstLine(e.Message)})
+		typ := styleDim.Render(e.Type)
+		reason := e.Reason
+		if e.Type == "Warning" {
+			typ = styleWarn.Render("Warning")
+			reason = styleWarn.Render(e.Reason)
+		}
+		rows = append(rows, []string{age(k8s.EventTime(e)), typ, e.Namespace, obj, reason, fmt.Sprint(k8s.EventCount(e)), firstLine(e.Message)})
 		ids = append(ids, fmt.Sprint(i))
 	}
-	h, lines := renderTable(a.width, []column{{title: "LAST", right: true}, {title: "NAMESPACE", max: 24}, {title: "OBJECT", max: 44}, {title: "REASON", max: 26}, {title: "N", right: true}, {title: "MESSAGE"}}, rows)
-	c := content{header: []string{styleTitle.Render("Warning events") + styleDim.Render(fmt.Sprintf("  %d in scope, newest first; enter for full message", len(rows))), h}, selectable: true, empty: styleOK.Render("no warning events")}
+	h, lines := renderTable(a.width, []column{{title: "LAST", right: true}, {title: "TYPE"}, {title: "NAMESPACE", max: 24}, {title: "OBJECT", max: 44}, {title: "REASON", max: 26}, {title: "N", right: true}, {title: "MESSAGE"}}, rows)
+	mode := "all types"
+	if a.problemOnly {
+		mode = "warnings only (a toggles)"
+	}
+	c := content{header: []string{styleTitle.Render("Events") + "  " + kv("in scope", fmt.Sprint(len(rows))) + "  " + kv("warnings", colorCount(warnings, "", styleWarn)) + "  " + styleDim.Render(mode+"; newest first; enter opens the involved object. The apiserver drops events after event-ttl (1h on rke2), so only recent activity is visible."), h}, selectable: true, empty: styleOK.Render("no events in the retention window")}
 	for i, l := range lines {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
