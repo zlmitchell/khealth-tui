@@ -213,12 +213,20 @@ func TestPodLogsViewer(t *testing.T) {
 	if !ok || ns != "default" || pod != "app-1" || len(sib) != 1 {
 		t.Fatalf("podForLogs: %v %s/%s %v", ok, ns, pod, sib)
 	}
-	lv := &logView{ns: ns, pod: pod, containers: []string{"c"}, lines: []string{"2024 level=error boom", "ok line"}, follow: true}
+	lv := &logView{ns: ns, pod: pod, containers: []string{"c"}, lines: []string{"2024-09-18T10:00:00.123456789Z level=error boom", "ok line"}, follow: true}
 	a.logs = lv
 	a.overlay = ovPodLogs
 	v := ansi.Strip(a.View())
 	if !strings.Contains(v, "Logs default/app-1") || !strings.Contains(v, "boom") {
 		t.Errorf("log viewer not rendered")
+	}
+	if strings.Contains(v, "2024-09-18T10:00:00.123456789Z") {
+		t.Errorf("timestamp should be shortened by default")
+	}
+	a.handleLogKey("T")
+	a.handleLogKey("T")
+	if v := ansi.Strip(a.View()); !strings.Contains(v, "2024-09-18T10:00:00.123456789Z") {
+		t.Errorf("T twice should show the full timestamp")
 	}
 	a.handleLogKey("w")
 	_ = a.View()

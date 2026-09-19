@@ -25,6 +25,7 @@ type logView struct {
 	previous   bool
 	follow     bool
 	wrap       bool
+	tsMode     int // 0 short HH:MM:SS, 1 hidden, 2 full RFC3339
 	filter     string
 	lines      []string
 	scroll     int
@@ -205,6 +206,7 @@ func (a *App) logVisibleLines() []string {
 		if f != "" && !strings.Contains(strings.ToLower(l), f) {
 			continue
 		}
+		l = shortenTimestamp(l, lv.tsMode)
 		if lv.wrap {
 			out = append(out, wrap(l, w)...)
 		} else {
@@ -268,6 +270,8 @@ func (a *App) handleLogKey(key string) (tea.Model, tea.Cmd) {
 	case "w":
 		lv.wrap = !lv.wrap
 		lv.scroll = a.logMaxScroll()
+	case "T":
+		lv.tsMode = (lv.tsMode + 1) % 3
 	case "r":
 		return a, a.startLogStream()
 	case "j", "down":
@@ -323,7 +327,7 @@ func (a *App) renderPodLogs() (string, []string) {
 	}
 	lines := []string{
 		kv("containers", strings.Join(ctrs, " ")) + "   " + strings.Join(mode, "  "),
-		styleDim.Render("[ ] or tab switch container · { } next/prev pod of the same controller · p previous · f follow · w wrap · r reload · j/k G g scroll · esc close"),
+		styleDim.Render("[ ] or tab switch container · { } next/prev pod of the same controller · p previous · f follow · w wrap · T timestamps (short/off/full) · r reload · j/k G g scroll · esc close"),
 	}
 	if len(lv.pods) > 1 {
 		lines[0] += "   " + kv("pod", fmt.Sprintf("%d/%d", lv.podIdx+1, len(lv.pods)))
@@ -349,6 +353,26 @@ func (a *App) renderPodLogs() (string, []string) {
 	}
 	lines = append(lines, styleDim.Render(fmt.Sprintf("-- lines %d-%d of %d --", lv.scroll+1, end, len(vis))))
 	return title, lines
+}
+
+// shortenTimestamp rewrites the leading kubelet RFC3339 timestamp: mode 0 =
+// local HH:MM:SS, 1 = dropped, 2 = untouched.
+func shortenTimestamp(l string, mode int) string {
+	if mode == 2 {
+		return l
+	}
+	ts, rest, ok := strings.Cut(l, " ")
+	if !ok || len(ts) < 20 || ts[4] != '-' || ts[10] != 'T' {
+		return l
+	}
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return l
+	}
+	if mode == 1 {
+		return rest
+	}
+	return styleDim.Render(t.Local().Format("15:04:05")) + " " + rest
 }
 
 // colorLogLine highlights obvious severities without parsing formats.
