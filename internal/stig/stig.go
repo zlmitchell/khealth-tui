@@ -3,9 +3,10 @@
 // component flags, kubelet configz, namespaces, RBAC) and node facts
 // (sysctls, file permissions, rke2 profile).
 //
-// Rule identifiers reference the DISA Kubernetes STIG (V-2424xx) or the CIS
-// Kubernetes/RKE2 benchmarks; verify the mapping against the STIG release you
-// are audited against.
+// Rule identifiers reference the DISA Kubernetes STIG V2R6, the DISA Rancher
+// Government Solutions RKE2 STIG V2R7 (both from dl.dod.cyber.mil) or the CIS
+// Kubernetes Benchmark v2.0 numbering; verify the mapping against the release
+// you are audited against.
 package stig
 
 import (
@@ -23,19 +24,30 @@ import (
 
 // Benchmark names a reference document the rule IDs were written against.
 type Benchmark struct {
-	Name    string
-	Version string
-	Prefix  string // rule ID prefix
-	Note    string
+	Name     string
+	Version  string
+	Prefixes []string // rule ID prefixes owned by this reference
+	Note     string
 }
 
-// Benchmarks lists the references behind the rule table. The IDs are a
-// best-effort mapping: confirm against the release you are audited on.
+// Matches reports whether a rule ID belongs to this benchmark.
+func (b Benchmark) Matches(id string) bool {
+	for _, p := range b.Prefixes {
+		if strings.HasPrefix(id, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// Benchmarks lists the references behind the rule table, newest releases as
+// published on dl.dod.cyber.mil / cisecurity.org at the time of writing. The
+// IDs are a best-effort mapping: confirm against the release you are audited on.
 var Benchmarks = []Benchmark{
-	{Name: "DISA Kubernetes STIG", Version: "V2R2 (Jan 2025)", Prefix: "V-24", Note: "vulnerability IDs V-2423xx..V-2424xx, V-2455xx, V-254800"},
-	{Name: "DISA Rancher RKE2 STIG", Version: "V2R1 (2024)", Prefix: "RKE2-", Note: "profile: cis, etcd user, config permissions, SELinux"},
-	{Name: "CIS Kubernetes Benchmark", Version: "v1.9 / CIS RKE2 Benchmark v1.x", Prefix: "CIS-", Note: "section numbers"},
-	{Name: "OS hardening (RHEL/Ubuntu STIG themes)", Version: "FIPS, MAC, fapolicyd, auditd, firewall, secure boot", Prefix: "OS-", Note: "per-node facts over SSH"},
+	{Name: "DISA Kubernetes STIG", Version: "V2R6 (01 Apr 2026)", Prefixes: []string{"V-242", "V-245", "V-2548", "V-2748"}, Note: "vulnerability IDs V-2423xx..V-2424xx, V-2455xx, V-2548xx, V-2748xx (secrets at rest, new in V2R6)"},
+	{Name: "DISA Rancher Government RKE2 STIG", Version: "V2R7 (01 Jul 2026)", Prefixes: []string{"V-2545", "V-268", "RKE2-"}, Note: "V-2545xx/V-268321; RKE2-* are rke2 hardening-guide prerequisites (etcd user, SELinux) not carried as STIG IDs"},
+	{Name: "CIS Kubernetes Benchmark", Version: "v2.0.1 (Jun 2026) / rke2 CIS self-assessment v1.12", Prefixes: []string{"CIS-"}, Note: "section numbers follow v2.0 (renumbered from v1.9)"},
+	{Name: "OS hardening (RHEL/Ubuntu STIG themes)", Version: "FIPS, MAC, fapolicyd, auditd, firewall, secure boot", Prefixes: []string{"OS-"}, Note: "per-node facts over SSH"},
 }
 
 // Status of one rule.
@@ -253,22 +265,22 @@ func (e *evaluator) apiserverRules() {
 	e.perNode("V-242418", "API server approved TLS cipher suites configured", "II", g, "kube-apiserver-arg: tls-cipher-suites=<FIPS/approved list>", nodes, func(n string) (Status, string) { return flagSet(rk(n), "tls-cipher-suites") })
 	e.perNode("V-242402", "API server audit log path configured", "II", g, "kube-apiserver-arg: audit-log-path=/var/lib/rancher/rke2/server/logs/audit.log (rke2 profile: cis sets this)", nodes, func(n string) (Status, string) { return flagSet(rk(n), "audit-log-path") })
 	e.perNode("V-242461", "API server audit policy file configured", "II", g, "kube-apiserver-arg: audit-policy-file=/etc/rancher/rke2/audit-policy.yaml", nodes, func(n string) (Status, string) { return flagSet(rk(n), "audit-policy-file") })
-	e.perNode("V-242463", "API server audit-log-maxage >= 30", "II", g, "kube-apiserver-arg: audit-log-maxage=30", nodes, func(n string) (Status, string) { return flagMinInt(rk(n), "audit-log-maxage", 30) })
-	e.perNode("V-242464", "API server audit-log-maxbackup >= 10", "II", g, "kube-apiserver-arg: audit-log-maxbackup=10", nodes, func(n string) (Status, string) { return flagMinInt(rk(n), "audit-log-maxbackup", 10) })
-	e.perNode("V-242465", "API server audit-log-maxsize >= 100", "II", g, "kube-apiserver-arg: audit-log-maxsize=100", nodes, func(n string) (Status, string) { return flagMinInt(rk(n), "audit-log-maxsize", 100) })
-	e.perNode("V-242436", "ValidatingAdmissionWebhook admission plugin enabled", "II", g, "do not list ValidatingAdmissionWebhook in --disable-admission-plugins", nodes, func(n string) (Status, string) {
+	e.perNode("V-242464", "API server audit-log-maxage >= 30", "II", g, "kube-apiserver-arg: audit-log-maxage=30", nodes, func(n string) (Status, string) { return flagMinInt(rk(n), "audit-log-maxage", 30) })
+	e.perNode("V-242463", "API server audit-log-maxbackup >= 10", "II", g, "kube-apiserver-arg: audit-log-maxbackup=10", nodes, func(n string) (Status, string) { return flagMinInt(rk(n), "audit-log-maxbackup", 10) })
+	e.perNode("V-242462", "API server audit-log-maxsize >= 100", "II", g, "kube-apiserver-arg: audit-log-maxsize=100", nodes, func(n string) (Status, string) { return flagMinInt(rk(n), "audit-log-maxsize", 100) })
+	e.perNode("V-242436", "ValidatingAdmissionWebhook admission plugin enabled", "I", g, "do not list ValidatingAdmissionWebhook in --disable-admission-plugins", nodes, func(n string) (Status, string) {
 		if strings.Contains(rk(n)["disable-admission-plugins"], "ValidatingAdmissionWebhook") {
 			return Fail, "disabled via --disable-admission-plugins"
 		}
 		return Pass, ""
 	})
-	e.perNode("CIS-1.2.16", "NodeRestriction admission plugin enabled", "II", g, "kube-apiserver-arg: enable-admission-plugins=NodeRestriction,...", nodes, func(n string) (Status, string) {
+	e.perNode("CIS-1.2.14", "NodeRestriction admission plugin enabled", "II", g, "kube-apiserver-arg: enable-admission-plugins=NodeRestriction,...", nodes, func(n string) (Status, string) {
 		if strings.Contains(rk(n)["enable-admission-plugins"], "NodeRestriction") {
 			return Pass, ""
 		}
 		return Fail, "--enable-admission-plugins=" + rk(n)["enable-admission-plugins"]
 	})
-	e.perNode("V-254800", "Pod Security Admission configured (admission-control-config-file)", "II", g, "rke2: profile: cis (uses /etc/rancher/rke2/rke2-pss.yaml) or set pod-security-admission-config-file; kubeadm: --admission-control-config-file", nodes, func(n string) (Status, string) {
+	e.perNode("V-254800", "Pod Security Admission configured (admission-control-config-file)", "I", g, "rke2: profile: cis (uses /etc/rancher/rke2/rke2-pss.yaml) or set pod-security-admission-config-file; kubeadm: --admission-control-config-file", nodes, func(n string) (Status, string) {
 		f := rk(n)
 		if f["admission-control-config-file"] != "" || f["pod-security-admission-config-file"] != "" {
 			return Pass, ""
@@ -276,10 +288,10 @@ func (e *evaluator) apiserverRules() {
 		return Fail, "no admission config file (namespaces must carry pod-security.kubernetes.io/enforce labels instead)"
 	})
 	e.perNode("V-242438", "API server request-timeout set", "II", g, "kube-apiserver-arg: request-timeout=300s", nodes, func(n string) (Status, string) { return flagSet(rk(n), "request-timeout") })
-	e.perNode("CIS-1.2.18", "API server profiling disabled", "II", g, "kube-apiserver-arg: profiling=false", nodes, func(n string) (Status, string) { return flagEq(rk(n), "profiling", "false") })
-	e.perNode("CIS-1.2.29", "Secrets encrypted at rest (encryption-provider-config)", "II", g, "rke2: secrets-encryption: true; kubeadm: --encryption-provider-config", nodes, func(n string) (Status, string) { return flagSet(rk(n), "encryption-provider-config") })
+	e.perNode("CIS-1.2.15", "API server profiling disabled", "II", g, "kube-apiserver-arg: profiling=false", nodes, func(n string) (Status, string) { return flagEq(rk(n), "profiling", "false") })
+	e.perNode("V-274882", "Secrets encrypted at rest (encryption-provider-config)", "I", g, "rke2: secrets-encryption: true; kubeadm: --encryption-provider-config", nodes, func(n string) (Status, string) { return flagSet(rk(n), "encryption-provider-config") })
 	e.perNode("CIS-1.2.5", "API server verifies kubelet certificates (kubelet-certificate-authority)", "II", g, "kube-apiserver-arg: kubelet-certificate-authority=<ca>", nodes, func(n string) (Status, string) { return flagSet(rk(n), "kubelet-certificate-authority") })
-	e.perNode("CIS-1.2.23", "API server service-account-lookup enabled", "II", g, "kube-apiserver-arg: service-account-lookup=true", nodes, func(n string) (Status, string) {
+	e.perNode("CIS-1.2.21", "API server service-account-lookup enabled", "II", g, "kube-apiserver-arg: service-account-lookup=true", nodes, func(n string) (Status, string) {
 		if v, ok := rk(n)["service-account-lookup"]; !ok || v == "true" {
 			return Pass, ""
 		}
@@ -304,7 +316,7 @@ func (e *evaluator) cmRules() {
 	nodes := keys(e.cm)
 	g := "controller-manager"
 	rk := func(node string) map[string]string { return e.cm[node] }
-	e.perNode("V-242381", "Controller manager uses individual service account credentials", "II", g, "kube-controller-manager-arg: use-service-account-credentials=true", nodes, func(n string) (Status, string) { return flagEq(rk(n), "use-service-account-credentials", "true") })
+	e.perNode("V-242381", "Controller manager uses individual service account credentials", "I", g, "kube-controller-manager-arg: use-service-account-credentials=true", nodes, func(n string) (Status, string) { return flagEq(rk(n), "use-service-account-credentials", "true") })
 	e.perNode("V-242385", "Controller manager bound to localhost", "II", g, "kube-controller-manager-arg: bind-address=127.0.0.1", nodes, func(n string) (Status, string) {
 		v, ok := rk(n)["bind-address"]
 		if !ok || v == "127.0.0.1" || v == "::1" {
@@ -385,8 +397,8 @@ func (e *evaluator) etcdRules() {
 		}
 		return Fail, "--" + flag + "=" + v
 	}
-	e.perNode("V-242424", "etcd requires client certificate authentication", "I", g, "etcd --client-cert-auth=true (rke2 default)", list, func(n string) (Status, string) { return check(n, "client-cert-auth", "client-cert-auth", "true") })
-	e.perNode("V-242426", "etcd requires peer certificate authentication", "I", g, "etcd --peer-client-cert-auth=true (rke2 default)", list, func(n string) (Status, string) { return check(n, "peer-client-cert-auth", "client-cert-auth", "true") })
+	e.perNode("V-242423", "etcd requires client certificate authentication", "II", g, "etcd --client-cert-auth=true (rke2 default)", list, func(n string) (Status, string) { return check(n, "client-cert-auth", "client-cert-auth", "true") })
+	e.perNode("V-242426", "etcd requires peer certificate authentication", "II", g, "etcd --peer-client-cert-auth=true (rke2 default)", list, func(n string) (Status, string) { return check(n, "peer-client-cert-auth", "client-cert-auth", "true") })
 	e.perNode("V-242379", "etcd auto-tls disabled", "II", g, "etcd --auto-tls=false", list, func(n string) (Status, string) { return check(n, "auto-tls", "auto-tls", "false") })
 	e.perNode("V-242380", "etcd peer-auto-tls disabled", "II", g, "etcd --peer-auto-tls=false", list, func(n string) (Status, string) { return check(n, "peer-auto-tls", "auto-tls", "false") })
 }
@@ -451,13 +463,13 @@ func (e *evaluator) kubeletRules() {
 		}
 		return Pass, ""
 	})
-	e.perNode("V-242434", "kubelet protects kernel defaults", "II", g, "kubelet-arg: protect-kernel-defaults=true (requires the CIS sysctls, see node rules)", nodes, func(n string) (Status, string) {
+	e.perNode("V-242434", "kubelet protects kernel defaults", "I", g, "kubelet-arg: protect-kernel-defaults=true (requires the CIS sysctls, see node rules)", nodes, func(n string) (Status, string) {
 		if b, _ := cfg(n)["protectKernelDefaults"].(bool); b {
 			return Pass, ""
 		}
 		return Fail, "protectKernelDefaults=false"
 	})
-	e.perNode("CIS-4.2.7", "kubelet makes iptables util chains", "II", g, fix, nodes, func(n string) (Status, string) {
+	e.perNode("CIS-4.2.6", "kubelet makes iptables util chains", "II", g, fix, nodes, func(n string) (Status, string) {
 		v, ok := cfg(n)["makeIPTablesUtilChains"]
 		if !ok {
 			return Pass, ""
@@ -467,7 +479,7 @@ func (e *evaluator) kubeletRules() {
 		}
 		return Fail, "makeIPTablesUtilChains=false"
 	})
-	e.perNode("CIS-4.2.9", "kubelet event record QPS limited", "III", g, fix, nodes, func(n string) (Status, string) {
+	e.perNode("CIS-4.2.8", "kubelet event record QPS limited", "III", g, fix, nodes, func(n string) (Status, string) {
 		v, ok := cfg(n)["eventRecordQPS"]
 		if !ok {
 			return Pass, ""
@@ -477,20 +489,26 @@ func (e *evaluator) kubeletRules() {
 		}
 		return Pass, ""
 	})
-	e.perNode("CIS-4.2.13", "kubelet TLS cipher suites restricted", "II", g, "kubelet-arg: tls-cipher-suites=<approved list>", nodes, func(n string) (Status, string) {
+	e.perNode("CIS-4.2.12", "kubelet TLS cipher suites restricted", "II", g, "kubelet-arg: tls-cipher-suites=<approved list>", nodes, func(n string) (Status, string) {
 		v, ok := cfg(n)["tlsCipherSuites"]
 		if l, isList := v.([]any); ok && isList && len(l) > 0 {
 			return Pass, ""
 		}
 		return Fail, "tlsCipherSuites not set"
 	})
-	e.perNode("CIS-4.2.11", "kubelet client certificate rotation enabled", "II", g, fix, nodes, func(n string) (Status, string) {
+	e.perNode("CIS-4.2.10", "kubelet client certificate rotation enabled", "II", g, fix, nodes, func(n string) (Status, string) {
 		if b, _ := cfg(n)["rotateCertificates"].(bool); b {
 			return Pass, ""
 		}
 		return Fail, "rotateCertificates=false"
 	})
-	e.perNode("V-242420", "kubelet uses explicit TLS cert/key (or serving cert rotation)", "II", g, "kubelet-arg: tls-cert-file/tls-private-key-file, or serverTLSBootstrap", nodes, func(n string) (Status, string) {
+	e.perNode("V-242420", "kubelet client CA file set (authentication.x509.clientCAFile)", "II", g, "kubelet-arg: client-ca-file=<ca> (rke2 sets this)", nodes, func(n string) (Status, string) {
+		if v, _ := nested(cfg(n), "authentication", "x509", "clientCAFile"); v != nil && v != "" {
+			return Pass, ""
+		}
+		return Fail, "authentication.x509.clientCAFile not set"
+	})
+	e.perNode("V-242425", "kubelet uses explicit TLS cert/key (or serving cert rotation)", "II", g, "kubelet-arg: tls-cert-file/tls-private-key-file (V-242424/V-242425), or serverTLSBootstrap", nodes, func(n string) (Status, string) {
 		c := cfg(n)
 		if s, _ := c["tlsCertFile"].(string); s != "" {
 			return Pass, ""
@@ -549,7 +567,7 @@ func (e *evaluator) nodeRules() {
 	ni := func(n string) *nodeinfo.Info { return e.in.Nodes[n] }
 	isRKE := func(n string) bool { d := ni(n).Dist; return d == "rke2" || d == "k3s" }
 
-	e.perNode("RKE2-profile", "rke2 CIS/STIG profile enabled (profile: cis)", "II", g, "config.yaml: profile: cis (requires etcd user + sysctls before restart)", nodes, func(n string) (Status, string) {
+	e.perNode("V-254555", "rke2 CIS/STIG profile enabled (profile: cis)", "II", g, "config.yaml: profile: cis (requires etcd user + sysctls before restart); STIG also expects audit-policy-file and audit-log-mode=blocking-strict", nodes, func(n string) (Status, string) {
 		if !isRKE(n) {
 			return NA, ""
 		}
@@ -610,7 +628,7 @@ func (e *evaluator) nodeRules() {
 		}
 		return Fail, "no etcd user"
 	})
-	e.perNode("RKE2-config-perms", "rke2/k3s config.yaml is root-owned with mode 600", "II", g, "chmod 600 /etc/rancher/rke2/config.yaml; chown root:root", nodes, func(n string) (Status, string) {
+	e.perNode("V-254564", "rke2/k3s config.yaml is root-owned with mode 600", "II", g, "chmod 600 /etc/rancher/rke2/config.yaml; chown root:root", nodes, func(n string) (Status, string) {
 		info := ni(n)
 		if !isRKE(n) {
 			return NA, ""
@@ -631,7 +649,7 @@ func (e *evaluator) nodeRules() {
 		}
 		return Pass, ""
 	})
-	e.perNode("RKE2-kubeconfig-perms", "admin kubeconfig (rke2.yaml / admin.conf) not world-readable", "II", g, "rke2: write-kubeconfig-mode: \"0600\"; kubeadm: chmod 600 /etc/kubernetes/admin.conf", nodes, func(n string) (Status, string) {
+	e.perNode("V-242460", "admin kubeconfig (rke2.yaml / admin.conf) not world-readable", "II", g, "rke2: write-kubeconfig-mode: \"0600\"; kubeadm: chmod 600 /etc/kubernetes/admin.conf", nodes, func(n string) (Status, string) {
 		info := ni(n)
 		var probs []string
 		for _, path := range []string{"/etc/rancher/rke2/rke2.yaml", "/etc/rancher/k3s/k3s.yaml", "/etc/kubernetes/admin.conf"} {
@@ -724,14 +742,14 @@ func (e *evaluator) nodeRules() {
 		}
 		return Pass, ""
 	})
-	e.perNode("CIS-4.1.9", "CNI configuration files root-owned, mode 644 or stricter", "III", g, "chmod 644 /etc/cni/net.d/*", nodes, func(n string) (Status, string) {
+	e.perNode("CIS-1.1.9", "CNI configuration files root-owned, mode 600 or stricter", "III", g, "chmod 600 /etc/cni/net.d/*", nodes, func(n string) (Status, string) {
 		info := ni(n)
 		var probs []string
 		found := false
 		for _, p := range info.Perms {
 			if strings.Contains(p.Path, "/cni/net.d/") && p.Type == "regular file" {
 				found = true
-				if !modeAtMost(p.Mode, 0o644) || p.User != "root" {
+				if !modeAtMost(p.Mode, 0o600) || p.User != "root" {
 					probs = append(probs, fmt.Sprintf("%s %s %s", p.Path, p.Mode, p.User))
 				}
 			}
@@ -744,7 +762,7 @@ func (e *evaluator) nodeRules() {
 		}
 		return Pass, ""
 	})
-	e.perNode("RKE2-selinux", "SELinux enforcing (RKE2 STIG)", "III", g, "config.yaml: selinux: true and install rke2-selinux", nodes, func(n string) (Status, string) {
+	e.perNode("RKE2-selinux", "SELinux enforcing (rke2 hardening guide)", "III", g, "config.yaml: selinux: true and install rke2-selinux", nodes, func(n string) (Status, string) {
 		info := ni(n)
 		switch strings.ToLower(info.SELinux) {
 		case "enforcing":
@@ -883,7 +901,7 @@ func (e *evaluator) clusterRules() {
 			def = append(def, s.Pods[i].Name)
 		}
 	}
-	r := Result{ID: "V-242383", Title: "User workloads not deployed in the default namespace", Cat: "II", Group: g, Status: Pass, Detail: "no pods in default", Fix: "move workloads to dedicated namespaces"}
+	r := Result{ID: "V-242383", Title: "User workloads not deployed in the default namespace", Cat: "I", Group: g, Status: Pass, Detail: "no pods in default", Fix: "move workloads to dedicated namespaces"}
 	if len(def) > 0 {
 		r.Status = Fail
 		r.Detail = fmt.Sprintf("%d pod(s) in default: %s", len(def), truncList(def, 5))
@@ -906,7 +924,7 @@ func (e *evaluator) clusterRules() {
 			noPSA = append(noPSA, ns.Name)
 		}
 	}
-	r = Result{ID: "V-254800-ns", Title: "Namespaces enforce a Pod Security Standard", Cat: "II", Group: g, Status: Pass, Fix: "label namespaces: pod-security.kubernetes.io/enforce=restricted (or baseline), or use a cluster-wide admission config"}
+	r = Result{ID: "V-254800-ns", Title: "Namespaces enforce a Pod Security Standard", Cat: "I", Group: g, Status: Pass, Fix: "label namespaces: pod-security.kubernetes.io/enforce=restricted (or baseline), or use a cluster-wide admission config"}
 	switch {
 	case len(noPSA) == 0:
 		r.Detail = "all user namespaces labelled"
@@ -980,13 +998,13 @@ func (e *evaluator) clusterRules() {
 		r.Detail = fmt.Sprintf("%d pod(s): %s", len(priv), truncList(uniq(priv), 5))
 	}
 	e.add(r)
-	r = Result{ID: "CIS-5.2.3", Title: "No host network/PID/IPC pods outside system namespaces", Cat: "II", Group: g, Status: Pass, Detail: "none", Fix: "remove hostNetwork/hostPID/hostIPC"}
+	r = Result{ID: "CIS-5.2.3", Title: "No host PID/IPC/network pods outside system namespaces (CIS 5.2.3-5.2.5)", Cat: "II", Group: g, Status: Pass, Detail: "none", Fix: "remove hostNetwork/hostPID/hostIPC"}
 	if len(hostNS) > 0 {
 		r.Status = Fail
 		r.Detail = fmt.Sprintf("%d pod(s): %s", len(hostNS), truncList(uniq(hostNS), 5))
 	}
 	e.add(r)
-	r = Result{ID: "V-242415", Title: "Secrets are not exposed as environment variables", Cat: "II", Group: g, Status: Pass, Detail: "none", Fix: "mount secrets as files instead of env vars"}
+	r = Result{ID: "V-242415", Title: "Secrets are not exposed as environment variables", Cat: "I", Group: g, Status: Pass, Detail: "none", Fix: "mount secrets as files instead of env vars"}
 	if len(secretEnv) > 0 {
 		r.Status = Manual
 		r.Detail = fmt.Sprintf("%d pod(s) use secretKeyRef env: %s", len(secretEnv), truncList(uniq(secretEnv), 5))

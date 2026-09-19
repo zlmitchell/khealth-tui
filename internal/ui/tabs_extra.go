@@ -1169,7 +1169,7 @@ func hardeningCell(it nodeinfo.HardeningItem) string {
 func benchmarkLine() string {
 	var parts []string
 	for _, b := range stig.Benchmarks {
-		parts = append(parts, styleBold.Render(b.Name)+" "+b.Version+styleDim.Render(" ["+b.Prefix+"*]"))
+		parts = append(parts, styleBold.Render(b.Name)+" "+b.Version+styleDim.Render(" ["+strings.Join(b.Prefixes, "*,")+"*]"))
 	}
 	return kv("references", strings.Join(parts, "  ·  "))
 }
@@ -1186,7 +1186,7 @@ func (a *App) securityDetail(id string) (string, []string) {
 	w := a.width - 6
 	ref := "custom"
 	for _, b := range stig.Benchmarks {
-		if strings.HasPrefix(r.ID, b.Prefix) {
+		if b.Matches(r.ID) {
 			ref = b.Name + " " + b.Version
 		}
 	}

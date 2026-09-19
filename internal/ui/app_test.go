@@ -131,8 +131,13 @@ func TestRenderAllTabsAndDetails(t *testing.T) {
 	a.wlPods = true
 	_ = a.View()
 	a.wlPods = false
-	a.tab = tabCRDs
+	a.tab = tabWorkloads
+	a.sub[tabWorkloads] = 2 // CRDs
+	if !a.onCRDs() {
+		t.Errorf("CRDs sub-tab not active")
+	}
 	_ = a.View()
+	a.sub[tabWorkloads] = 0
 	a.overlay = ovNamespace
 	a.nsInput.SetValue("team")
 	if opts := a.nsOptions(); len(opts) != 2 || opts[1] != "team-a" {

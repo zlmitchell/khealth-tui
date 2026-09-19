@@ -41,18 +41,16 @@ const (
 	tabSecurity
 	tabLogs
 	tabRKE2
-	tabCRDs
 	tabCount
 )
 
-var tabNames = [...]string{"Overview", "Nodes", "Inspect", "etcd", "Storage", "Events", "Addons", "Helm", "Images", "Security", "Logs", "RKE2", "CRDs"}
-var tabKeys = [...]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "c"}
+var tabNames = [...]string{"Overview", "Nodes", "Inspect", "etcd", "Storage", "Events", "Addons", "Helm", "Images", "Security", "Logs", "RKE2"}
+var tabKeys = [...]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="}
 
 // subTabs are second-level views of a tab (h/l switch). "Inspect" renders
 // the object inspector in the body instead of an overlay.
 var subTabs = map[tab][]string{
-	tabWorkloads: {"Controllers", "Pods", "Object"},
-	tabCRDs:      {"Definitions", "Object"},
+	tabWorkloads: {"Controllers", "Pods", "CRDs", "Object"},
 	tabEvents:    {"Events", "Object"},
 	tabLogs:      {"Nodes", "Lines"},
 	tabSecurity:  {"Rules", "Node hardening"},
@@ -169,6 +167,9 @@ func (a *App) subName() string {
 	}
 	return st[i]
 }
+
+// onCRDs reports whether the CRDs sub-tab is showing.
+func (a *App) onCRDs() bool { return a.tab == tabWorkloads && a.subName() == "CRDs" }
 
 // inInspect reports whether the body currently shows the inspector.
 func (a *App) inInspect() bool { return a.subName() == subInspect }
@@ -601,7 +602,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.recompute()
 		a.recordSnapshot()
 		var crdCmd tea.Cmd
-		if a.tab == tabCRDs {
+		if a.onCRDs() {
 			crdCmd = a.crdCountCmd()
 		}
 		return a, tea.Batch(a.collectCmds(a.snap), a.helmCmd(a.snap), a.etcdExecCmd(a.snap), crdCmd, a.tickCmd())
@@ -690,7 +691,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	for i, k := range tabKeys {
 		if key == k {
 			a.tab = tab(i)
-			if a.tab == tabCRDs {
+			if a.onCRDs() {
 				return a, a.crdCountCmd()
 			}
 			return a, nil
@@ -751,18 +752,24 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	case "tab", "]":
 		a.tab = (a.tab + 1) % tabCount
-		if a.tab == tabCRDs {
+		if a.onCRDs() {
 			return a, a.crdCountCmd()
 		}
 	case "shift+tab", "[":
 		a.tab = (a.tab + tabCount - 1) % tabCount
-		if a.tab == tabCRDs {
+		if a.onCRDs() {
 			return a, a.crdCountCmd()
 		}
 	case "l", "right":
 		a.setSub(1)
+		if a.onCRDs() {
+			return a, a.crdCountCmd()
+		}
 	case "h", "left":
 		a.setSub(-1)
+		if a.onCRDs() {
+			return a, a.crdCountCmd()
+		}
 	case "n":
 		a.overlay = ovNamespace
 		a.nsInput.SetValue("")
@@ -820,11 +827,11 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if a.tab == tabWorkloads && a.snap != nil {
+			if a.onCRDs() {
+				return a, a.openCRDInstances(a.selectedID())
+			}
 			a.openWorkload(a.selectedID())
 			return a, nil
-		}
-		if a.tab == tabCRDs && a.snap != nil {
-			return a, a.openCRDInstances(a.selectedID())
 		}
 		if a.tab == tabEvents && a.snap != nil {
 			a.openEvent(a.selectedID())
@@ -1020,8 +1027,6 @@ func (a *App) currentContent() content {
 		return a.logsContent()
 	case tabRKE2:
 		return a.rke2Content()
-	case tabCRDs:
-		return a.crdsContent()
 	}
 	return content{}
 }
@@ -1351,7 +1356,7 @@ func (a *App) renderOverlay() string {
 func helpLines() []string {
 	return []string{
 		styleBold.Render("Navigation"),
-		"  tab / shift+tab / [ ]    next / previous tab        1-9 0 - = c   jump to tab",
+		"  tab / shift+tab / [ ]    next / previous tab        1-9 0 - =   jump to tab",
 		"  left / right or h / l    previous / next sub-tab inside the current tab",
 		"  j/k or arrows            move selection / scroll    g / G     top / bottom",
 		"  PgUp / PgDn / space      page                       enter     open detail for the selected row",
@@ -1371,7 +1376,7 @@ func helpLines() []string {
 		"  Nodes      conditions + live CPU/mem/disk/load from SSH (or metrics-server), certs, services",
 		"  Inspect    controllers (deploy/ds/sts/job/cronjob) then pods not owned by one; p = all pods; t = rollout restart;",
 		"             enter opens the Object sub-tab: owner/child/secret/configmap/PVC/SA references, enter again drills down, esc back",
-		"  CRDs       every CustomResourceDefinition with instance counts; enter lists instances, enter again inspects one",
+		"             CRDs sub-tab: every CustomResourceDefinition with instance counts; enter lists instances, enter again inspects one",
 		"  etcd       members, health, db size/quota/fragmentation, fsync latency, config source, snapshots/backups",
 		"  Storage    StorageClasses, CSI drivers, PVs/PVCs and node filesystems",
 		"  Events     warning events",

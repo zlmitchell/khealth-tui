@@ -34,9 +34,9 @@ func TestEvaluate(t *testing.T) {
 		Perms: []nodeinfo.Perm{{Path: "/etc/rancher/rke2/config.yaml", Mode: "644", User: "root", Group: "root", Type: "regular file"}, {Path: "/var/lib/rancher/rke2/server/db/etcd", Mode: "700", User: "etcd", Group: "etcd", Type: "directory"}}, KubeletFlags: map[string]string{"hostname-override": "cp-1"}}}
 	rs := Evaluate(Input{Snap: snap, Nodes: nodes})
 	expect := map[string]Status{
-		"V-242390": Pass, "V-242382": Pass, "V-242463": Fail, "V-242378": Fail, "CIS-1.2.18": Pass,
+		"V-242390": Pass, "V-242382": Pass, "V-242464": Fail, "V-242378": Fail, "CIS-1.2.15": Pass,
 		"V-242391": Pass, "V-242392": Pass, "V-242387": Pass, "V-245541": Fail, "V-242434": Pass, "V-242404": NA,
-		"RKE2-profile": Pass, "CIS-sysctl": Fail, "V-242445": Pass, "RKE2-etcd-user": Pass, "RKE2-config-perms": Fail,
+		"V-254555": Pass, "CIS-sysctl": Fail, "V-242445": Pass, "RKE2-etcd-user": Pass, "V-254564": Fail,
 		"V-242383": Fail, "V-254800-ns": Fail, "V-242395": Pass,
 	}
 	for id, want := range expect {

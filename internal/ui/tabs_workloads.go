@@ -24,8 +24,11 @@ var controllerKinds = map[string]bool{"ReplicaSet": true, "DaemonSet": true, "St
 
 // workloadsContent lists controllers, then pods not owned by a controller.
 func (a *App) workloadsContent() content {
-	if a.wlPods {
+	switch a.subName() {
+	case "Pods":
 		return a.podsContent()
+	case "CRDs":
+		return a.crdsContent()
 	}
 	s := a.snap
 	var hdr []string
