@@ -1093,7 +1093,24 @@ func (a *App) View() string {
 	}
 	b.WriteString("\n")
 	b.WriteString(a.renderFooter())
-	return b.String()
+	return fitScreen(b.String(), a.width, a.height)
+}
+
+// fitScreen guarantees the frame is exactly height lines of at most width
+// cells: a taller frame (or a line that wraps) makes the terminal scroll and
+// leaves stale rows behind.
+func fitScreen(frame string, width, height int) string {
+	lines := strings.Split(frame, "\n")
+	for i, l := range lines {
+		lines[i] = trunc(l, width)
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (a *App) renderHeader() string {
@@ -1186,23 +1203,27 @@ func (a *App) renderSubTabs() string {
 	}
 	active := a.subName()
 	var b strings.Builder
-	b.WriteString(styleDim.Render(" ┗ "))
-	for i, n := range st {
+	b.WriteString(styleSubBar.Render("   "))
+	for _, n := range st {
 		label := n
 		if n == subInspect && len(a.inspect) > 0 {
 			label = fmt.Sprintf("%s (%d)", n, len(a.inspect))
 		}
 		if n == active {
-			b.WriteString(styleSubOn.Render(" " + label + " "))
+			b.WriteString(styleSubOn.Render(label))
 		} else {
 			b.WriteString(styleSubOff.Render(" " + label + " "))
 		}
-		if i < len(st)-1 {
-			b.WriteString(styleDim.Render("│"))
-		}
+		b.WriteString(styleSubBar.Render(" "))
 	}
-	b.WriteString(styleDim.Render("   ←/→ or h/l switch"))
-	return trunc(b.String(), a.width)
+	hint := styleSubBar.Render(styleSubOff.Render("←/→ h/l switch"))
+	strip := b.String()
+	if w := ansi.StringWidth(strip) + ansi.StringWidth(hint) + 2; w < a.width {
+		strip += styleSubBar.Render(strings.Repeat(" ", a.width-w)) + hint + styleSubBar.Render("  ")
+	} else if w := ansi.StringWidth(strip); w < a.width {
+		strip += styleSubBar.Render(strings.Repeat(" ", a.width-w))
+	}
+	return trunc(strip, a.width)
 }
 
 // renderInspectBody renders the inspector stack in the body area.

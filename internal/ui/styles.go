@@ -33,12 +33,17 @@ var (
 	colorTabTxt = lipgloss.AdaptiveColor{Light: "#24292f", Dark: "#c9d1d9"}
 
 	// tab strip: a full-width band; active tab is an inverted accent block
-	styleTabBar    = lipgloss.NewStyle().Background(colorTabBar)
-	styleTabOn     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Background(colorAccent).Padding(0, 1)
-	styleTabOff    = lipgloss.NewStyle().Foreground(colorTabTxt).Background(colorTabBar)
-	styleTabKey    = lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Background(colorTabBar)
-	styleSubOn     = lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Underline(true)
-	styleSubOff    = lipgloss.NewStyle().Foreground(colorDim)
+	styleTabBar = lipgloss.NewStyle().Background(colorTabBar)
+	styleTabOn  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Background(colorAccent).Padding(0, 1)
+	styleTabOff = lipgloss.NewStyle().Foreground(colorTabTxt).Background(colorTabBar)
+	styleTabKey = lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Background(colorTabBar)
+	// sub-tab strip: same band treatment as the main strip, one shade lighter,
+	// active item inverted in the info colour so the two levels read differently
+	colorSubBar    = lipgloss.AdaptiveColor{Light: "#f0f2f5", Dark: "#161b22"}
+	styleSubBar    = lipgloss.NewStyle().Background(colorSubBar)
+	styleSubOn     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Background(colorInfo).Padding(0, 1)
+	styleSubOff    = lipgloss.NewStyle().Foreground(colorTabTxt).Background(colorSubBar)
+	styleSubKey    = lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Background(colorSubBar)
 	styleRule      = lipgloss.NewStyle().Foreground(colorAccent)
 	styleRuleTitle = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	styleBar       = lipgloss.NewStyle().Foreground(colorDim)
@@ -145,6 +150,10 @@ func age(t time.Time) string {
 func trunc(s string, w int) string {
 	if w <= 0 {
 		return ""
+	}
+	// control characters make the terminal wrap or move the cursor
+	if strings.ContainsAny(s, "\t\r\n") {
+		s = strings.NewReplacer("\t", "    ", "\r", "", "\n", " ").Replace(s)
 	}
 	if ansi.StringWidth(s) <= w {
 		return s

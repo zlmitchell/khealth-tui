@@ -159,6 +159,26 @@ func TestRenderAllTabsAndDetails(t *testing.T) {
 	}
 }
 
+func TestFrameNeverExceedsScreen(t *testing.T) {
+	a := testApp()
+	// a YAML dump with tabs, CRs and very long lines must not add rows
+	a.inspect = append(a.inspect, inspectLevel{title: "x", meta: []string{"a\tb\r"}, dump: []string{strings.Repeat("y", 500), "line\twith\ttabs"}})
+	a.tab = tabWorkloads
+	a.sub[tabWorkloads] = 3 // Object
+	for _, h := range []int{40, 12, 6} {
+		a.height = h
+		v := a.View()
+		if n := len(strings.Split(v, "\n")); n != h {
+			t.Errorf("height %d: frame has %d lines", h, n)
+		}
+		for _, l := range strings.Split(v, "\n") {
+			if w := ansi.StringWidth(l); w > a.width {
+				t.Errorf("line wider than screen (%d > %d): %q", w, a.width, l)
+			}
+		}
+	}
+}
+
 func TestKeyHandling(t *testing.T) {
 	a := testApp()
 	a.handleKey(tea.KeyMsg{Type: tea.KeyTab})
