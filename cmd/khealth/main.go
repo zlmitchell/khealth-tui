@@ -3,13 +3,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
 
 	"k8s-health-tui/internal/config"
+	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/ui"
 )
 
@@ -18,6 +21,17 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
+	}
+	if cfg.Diag {
+		client, err := k8s.New(cfg.Kubeconfig, cfg.Context)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		client.Diag(ctx, os.Stdout)
+		return
 	}
 	if cfg.SSH.Enabled && cfg.SSH.AskPass && cfg.SSH.Password == "" {
 		fmt.Fprintf(os.Stderr, "SSH/sudo password for %s@<nodes> (used only if public key auth fails): ", cfg.SSH.User)

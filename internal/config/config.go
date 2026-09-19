@@ -28,6 +28,8 @@ type Config struct {
 	Logs       Logs       `yaml:"logs"`
 	Actions    Actions    `yaml:"actions"`
 	Thresholds Thresholds `yaml:"thresholds"`
+
+	Diag bool `yaml:"-"` // --diag: print API/permission diagnostics and exit
 }
 
 // Actions configures the (opt-out) mutating operations run through CLIs.
@@ -163,6 +165,7 @@ func Load(args []string) (Config, error) {
 		insecureHK  = fs.Bool("insecure-host-key", false, "skip SSH host key verification")
 		helmUpdates = fs.Bool("helm-updates", false, "check Helm chart repos / Artifact Hub for newer chart versions")
 		readOnly    = fs.Bool("read-only", false, "disable mutating actions (helm rollback/upgrade)")
+		diag        = fs.Bool("diag", false, "run API/permission diagnostics (nodes/proxy, stats/summary, pods/exec, ...) and exit")
 		showVersion = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
@@ -233,6 +236,8 @@ func Load(args []string) (Config, error) {
 			cfg.Helm.CheckUpdates = *helmUpdates
 		case "read-only":
 			cfg.Actions.Enabled = !*readOnly
+		case "diag":
+			cfg.Diag = *diag
 		}
 	})
 
