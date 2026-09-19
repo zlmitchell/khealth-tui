@@ -171,7 +171,7 @@ func TestParseNoEtcd(t *testing.T) {
 }
 
 func TestScriptSanitises(t *testing.T) {
-	s := Script(config.Etcd{BackupDirs: []string{"/backup/etcd", "/bad'; rm -rf /"}, Endpoint: "https://10.0.0.5:2379"})
+	s := Script(config.Etcd{BackupDirs: []string{"/backup/etcd", "/bad'; rm -rf /"}, Endpoint: "https://10.0.0.5:2379"}, false)
 	if !strings.Contains(s, "EXTRA_DIRS='/backup/etcd /badrm-rf/'") {
 		t.Errorf("dirs not sanitised: %s", s[:200])
 	}
@@ -234,5 +234,47 @@ wal=1789789863 /var/lib/rancher/rke2/server/db/etcd/member/wal/0000000000000007-
 	}
 	if p.Raft.SnapTerm != 0x2a || p.Raft.SnapIndex != 0xa7d8c0 || p.Raft.WALSeq != 7 || p.Raft.WALIndex != 0xa7d000 || p.Raft.WALLastWrite.Unix() != 1789789863 {
 		t.Errorf("raft: %+v", *p.Raft)
+	}
+}
+
+func TestScriptFullFlagAndPerfFooter(t *testing.T) {
+	light := Script(config.Etcd{}, false)
+	full := Script(config.Etcd{}, true)
+	if !strings.Contains(light, `[ "0" = 1 ]`) || !strings.Contains(full, `[ "1" = 1 ]`) {
+		t.Errorf("__FULL__ not substituted")
+	}
+	for _, s := range []string{light, full} {
+		i, j := strings.Index(s, "sec PERF"), strings.Index(s, "sec END")
+		if i < 0 || j < 0 || i > j {
+			t.Errorf("PERF footer must precede END: perf=%d end=%d", i, j)
+		}
+		if !strings.Contains(s, "\ntimes\n") {
+			t.Errorf("times builtin missing")
+		}
+	}
+}
+
+func TestParsePerfAndLeaderLogSkip(t *testing.T) {
+	out := "===DIST\nrke2\n===HEALTH\n{\"health\":\"true\",\"reason\":\"\"}\n===LEADERLOG\nskipped=healthy\n===PERF\n0.10 0.20 0.30 2/300 12345\n0m0.010s 0m0.005s\n0m0.400s 0m0.100s\n===END\n"
+	p := Parse("cp-1", out)
+	if !p.LeaderLogSkipped {
+		t.Fatal("leader log skip not detected")
+	}
+	if !p.Cost.Parsed || p.Cost.CPU() < 0.51 || p.Cost.CPU() > 0.52 || p.Cost.Load1 != 0.10 {
+		t.Fatalf("cost %+v", p.Cost)
+	}
+	if p.OutBytes != len(out) {
+		t.Fatalf("out bytes %d", p.OutBytes)
+	}
+	prev := &Probe{LocalMemberID: "abcdef0123456789", LeaderEvents: []LeaderEvent{{Term: 7, Leader: "abcdef0123456789"}}}
+	p.MergeLeaderLog(prev)
+	if p.LocalMemberID != prev.LocalMemberID || len(p.LeaderEvents) != 1 {
+		t.Fatalf("merge did not carry leader log forward: %+v", p)
+	}
+	// a probe that did scan the log keeps its own (possibly empty) result
+	q := Parse("cp-1", "===LEADERLOG\nsource=/var/log/pods\n===END\n")
+	q.MergeLeaderLog(prev)
+	if q.LocalMemberID != "" {
+		t.Fatal("merge applied to a probe that scanned the log")
 	}
 }

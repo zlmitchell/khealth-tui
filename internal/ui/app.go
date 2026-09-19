@@ -23,6 +23,7 @@ import (
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/logs"
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/perf"
 	"k8s-health-tui/internal/sshrun"
 	"k8s-health-tui/internal/stig"
 )
@@ -154,6 +155,8 @@ type App struct {
 	etcdExec    *etcd.Probe
 	wlPods      bool
 	sub         [tabCount]int // active sub-tab per tab
+
+	fp footprint // the tool's own cost per cycle (P overlay, --perf-log)
 }
 
 // subName returns the active sub-tab name ("" when the tab has none).
@@ -225,6 +228,7 @@ type snapshotMsg struct {
 type nodeMsg struct {
 	seq  int
 	info *nodeinfo.Info
+	opts nodeinfo.Options // what the probe included (cost accounting)
 }
 type etcdMsg struct {
 	seq   int
@@ -245,7 +249,9 @@ type tickMsg struct{ seq int }
 
 // New creates the application model.
 func New(cfg config.Config) (*App, error) {
-	client, err := k8s.New(cfg.Kubeconfig, cfg.Context)
+	client, err := k8s.NewWithOptions(cfg.Kubeconfig, cfg.Context, k8s.Options{
+		WatchCache: cfg.Perf.WatchCache, Protobuf: cfg.Perf.Protobuf, DiscoveryTTL: cfg.Perf.DiscoveryTTL, ConfigzTTL: cfg.Perf.ConfigzTTL,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +267,14 @@ func New(cfg config.Config) (*App, error) {
 		logSum:     map[string]*logs.Summary{},
 		helmLatest: map[string]helmcheck.Latest{},
 		heavyNext:  true,
+		fp:         newFootprint(),
+	}
+	if cfg.Perf.Log != "" {
+		l, err := perf.OpenLogger(cfg.Perf.Log)
+		if err != nil {
+			return nil, fmt.Errorf("perf log: %w", err)
+		}
+		a.fp.logger = l
 	}
 	if cfg.SSH.Enabled {
 		r, err := sshrun.New(cfg.SSH)
@@ -344,6 +358,10 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 	// apiserver down (power outage, quorum lost): keep probing the nodes we
 	// knew, or the ssh.hosts map, and run the etcd probe on all of them
 	nodes, offline := a.sshTargets(snap)
+	if a.fp.cur != nil {
+		a.fp.cur.Heavy = heavy
+	}
+	etcdScript := etcd.Script(a.cfg.Etcd, heavy)
 	for i := range nodes {
 		n := &nodes[i]
 		if len(only) > 0 && !only[n.Name] {
@@ -351,12 +369,18 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 		}
 		host := a.nodeAddress(n)
 		name := n.Name
+		if a.skipProbe(name) != "" {
+			continue
+		}
 		opts := nodeinfo.Options{Heavy: heavy, LogLines: a.cfg.Logs.Lines, LogSince: a.cfg.Logs.Since, PVPaths: pvPaths}
 		// OS STIG facts are collected once per node (first contact) and on R,
 		// not every cycle: sysctl -a, package lists, find scans and config
-		// dumps are the most expensive part of the probe.
+		// dumps are the most expensive part of the probe. The config tier
+		// (certs, sysctls, config files, slow hardening commands) rides on
+		// the heavy cycles for the same reason.
 		prev := a.nodes[name]
 		opts.OSStig = a.stigNext || prev == nil || !prev.STIGProbed
+		opts.Config = heavy || prev == nil || !prev.ConfigProbed
 		if prev != nil {
 			opts.KnownTarballs = prev.TarballKeys()
 		}
@@ -367,6 +391,8 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 			res := runner.Run(ctx, host, nodeinfo.Script(opts))
 			info := nodeinfo.Parse(name, host, res.Stdout, res.Started)
 			info.Duration = res.Finished.Sub(res.Started)
+			info.ScriptSize = res.ScriptSize
+			info.STIGRun = opts.OSStig
 			if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
 				msg := res.Err.Error()
 				if s := strings.TrimSpace(res.Stderr); s != "" {
@@ -374,17 +400,18 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 				}
 				info.Err = fmt.Errorf("%s", msg)
 			}
-			return nodeMsg{seq: seq, info: info}
+			return nodeMsg{seq: seq, info: info, opts: opts}
 		})
 		if offline || k8s.IsEtcdNode(nodes, n) {
 			a.etcdPend[name] = true
-			script := etcd.Script(a.cfg.Etcd)
+			script := etcdScript
 			cmds = append(cmds, func() tea.Msg {
 				ctx, cancel := context.WithTimeout(context.Background(), timeout)
 				defer cancel()
 				res := runner.Run(ctx, host, script)
 				p := etcd.Parse(name, res.Stdout)
 				p.Duration = res.Finished.Sub(res.Started)
+				p.ScriptSize = res.ScriptSize
 				p.Stderr = strings.TrimSpace(res.Stderr)
 				if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
 					p.Err = fmt.Errorf("%s", firstLine(res.Err.Error()+" "+res.Stderr))
@@ -452,21 +479,27 @@ func (a *App) helmCmd(snap *k8s.Snapshot) tea.Cmd {
 	if a.helm == nil || snap == nil || len(snap.HelmReleases) == 0 {
 		return nil
 	}
-	seen := map[string]bool{}
-	var charts []string
+	var rels []helmcheck.Release
 	for _, r := range snap.HelmReleases {
-		if r.Chart != "" && !seen[r.Chart] {
-			seen[r.Chart] = true
-			charts = append(charts, r.Chart)
+		if r.Chart == "" {
+			continue
 		}
+		repo := r.ChartRepo
+		if i := strings.Index(repo, " "); i >= 0 { // "repo chart" as recorded by the HelmChart CR
+			repo = repo[:i]
+		}
+		rels = append(rels, helmcheck.Release{Key: helmKey(r), Chart: r.Chart, Repo: repo, Home: r.Home, Sources: r.Sources})
 	}
 	h := a.helm
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		return helmMsg{latest: h.Lookup(ctx, charts)}
+		return helmMsg{latest: h.Lookup(ctx, rels)}
 	}
 }
+
+// helmKey identifies a release in helmLatest.
+func helmKey(r k8s.HelmRelease) string { return r.Namespace + "/" + r.Name }
 
 func (a *App) s3Cmd(name string) tea.Cmd {
 	client := a.client
@@ -669,6 +702,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.refreshing = false
 		a.lastRefresh = time.Now()
 		a.cycle++
+		a.beginCycle(a.heavyNext || a.cycle%a.cfg.HeavyEvery == 0)
 		// drop nodes that no longer exist - only when the API actually
 		// answered; an empty list during an outage must not erase what we know
 		if len(a.snap.Nodes) > 0 {
@@ -687,8 +721,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.crdCounts = nil
 		a.crdCounting = false
-		a.recompute()
+		a.timedRecompute()
 		a.recordSnapshot()
+		if a.fp.logger != nil && a.status == "" {
+			if s := a.perfSummary(); s != "" {
+				a.setStatus(s)
+			}
+		}
 		var crdCmd tea.Cmd
 		if a.onCRDs() {
 			crdCmd = a.crdCountCmd()
@@ -700,27 +739,30 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.info.MergeHeavy(a.nodes[m.info.Node])
 		m.info.MergeSTIG(a.nodes[m.info.Node])
+		m.info.MergeConfig(a.nodes[m.info.Node])
 		a.nodes[m.info.Node] = m.info
 		delete(a.pending, m.info.Node)
-		a.recompute()
+		a.recordNodeProbe(m.info, m.opts)
+		a.noteProbeDuration(m.info.Node, m.info.Duration)
 		a.recordNode(m.info)
-		return a, nil
+		return a, a.scheduleRecompute()
 	case etcdMsg:
 		if m.seq != a.seq {
 			return a, nil
 		}
+		m.probe.MergeLeaderLog(a.etcd[m.probe.Node])
 		a.etcd[m.probe.Node] = m.probe
 		delete(a.etcdPend, m.probe.Node)
-		a.recompute()
+		a.recordEtcdProbe(m.probe)
+		a.noteProbeDuration(m.probe.Node, m.probe.Duration)
 		a.recordEtcd(m.probe)
 		if name := m.probe.RKE2Config["etcd-s3-config-secret"]; name != "" && (a.s3 == nil || a.s3.Name != name) {
-			return a, a.s3Cmd(name)
+			return a, tea.Batch(a.scheduleRecompute(), a.s3Cmd(name))
 		}
-		return a, a.s3CheckCmd(m.probe.Node)
+		return a, tea.Batch(a.scheduleRecompute(), a.s3CheckCmd(m.probe.Node))
 	case s3Msg:
 		a.s3 = m.info
-		a.recompute()
-		var cmds []tea.Cmd
+		cmds := []tea.Cmd{a.scheduleRecompute()}
 		for _, n := range sortedKeys(a.etcd) {
 			cmds = append(cmds, a.s3CheckCmd(n))
 		}
@@ -728,13 +770,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case s3CheckMsg:
 		if m.seq == a.seq {
 			a.s3Reach[m.check.Node] = m.check
-			a.recompute()
+			return a, a.scheduleRecompute()
 		}
 		return a, nil
 	case helmMsg:
 		a.helmLatest = m.latest
-		a.recompute()
-		return a, nil
+		return a, a.scheduleRecompute()
 	case actionDoneMsg:
 		return a, a.handleActionDone(m)
 	case etcdExecMsg:
@@ -742,7 +783,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.etcdExec = m.probe
-		a.recompute()
+		return a, a.scheduleRecompute()
+	case recomputeMsg:
+		a.fp.recomputeTimer = false
+		a.timedRecompute()
 		return a, nil
 	case inspectMsg:
 		a.handleInspectMsg(m)
@@ -876,7 +920,14 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "q":
 		a.closePodLogs()
+		a.endCycle()
+		a.fp.logger.Close()
 		return a, tea.Quit
+	case "P":
+		a.detailTitle = "Footprint: what khealth costs the cluster and this host"
+		a.detailLines = a.perfLines()
+		a.detailScroll = 0
+		a.overlay = ovDetail
 	case "tab", "]":
 		a.tab = (a.tab + 1) % tabCount
 		if a.onCRDs() {
@@ -1533,9 +1584,7 @@ func (a *App) renderBody() string {
 	for i := start; i < end; i++ {
 		t := trunc(rows[i].text, a.width)
 		if c.selectable && i == a.cursor[a.tab] {
-			// inner colour resets would cancel the reverse-video bar part way
-			// through the row, so highlight the plain text end to end
-			t = styleSel.Render(pad(ansi.Strip(t), a.width))
+			t = selectRow(t, a.width)
 		}
 		lines = append(lines, t)
 	}
@@ -1599,7 +1648,7 @@ func (a *App) renderOverlay() string {
 		lines = append(lines, "  "+pad(hdr, tw))
 		for i := start; i < len(rl) && i < start+visible; i++ {
 			if i == a.nsCursor {
-				lines = append(lines, styleSel.Render("> "+pad(rl[i], tw)))
+				lines = append(lines, selectRow("> "+rl[i], tw+2))
 			} else {
 				lines = append(lines, "  "+pad(rl[i], tw))
 			}
@@ -1656,6 +1705,7 @@ func helpLines() []string {
 		"  a      toggle problems-only view (Overview, Inspect, Events, Security, Resources)",
 		"  r      refresh now (API + light SSH collection)             R     full refresh: journal logs, images, tarballs, PV du, OS STIG facts",
 		"  s      toggle SSH collection on/off                        q     quit (steps back first when inside an object/log view)",
+		"  P      footprint: what khealth itself costs the API server, the nodes (remote CPU per probe) and this host",
 		"",
 		styleBold.Render("Tab-specific keys"),
 		"  Inspect    enter  open the object (references, YAML)      t   rollout restart (Deployment/DaemonSet/StatefulSet, confirmed)",
@@ -1693,7 +1743,7 @@ func helpLines() []string {
 		"             enter on a node lists its lines; enter on a line shows the full text + explanation; esc goes back; a shows info lines",
 		"  RKE2       config.yaml(.d), data-dir, server/manifests (HelmChartConfig etc.), static pod manifests, audit/PSS policies, config drift",
 		"",
-		styleDim.Render("Config: ~/.config/k8s-health-tui/config.yaml (see config.example.yaml)"),
+		styleDim.Render("Config: ~/.config/k8s-health-tui/config.yaml (khealth --init-config writes the annotated example)"),
 	}
 }
 

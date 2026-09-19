@@ -1,0 +1,177 @@
+# Performance: what khealth costs the systems it inspects
+
+khealth is used on clusters that are already unwell. A diagnostic tool that
+adds a quorum read to etcd every 30 s, or a second of CPU to every node it
+watches, makes the thing it is diagnosing worse. This document covers how the
+footprint is measured, what it is, how to run the benchmark against your own
+cluster, and the rules the collection follows to stay small.
+
+## Measuring
+
+Three vantage points, all built in:
+
+| Where | What is measured | How |
+|---|---|---|
+| **Nodes** | CPU seconds each probe and everything it spawned used, load average when it finished, output bytes | every script ends with a `PERF` section: `/proc/loadavg` and the POSIX `times` builtin (shell + children user/sys). Parsed into `Info.Cost` / `Probe.Cost` |
+| **API server** | requests, response bytes, request bytes, wall time per refresh | a counting `http.RoundTripper` wrapped around client-go (`Client.Stats()`); `Fetch` records the delta in `Snapshot.Traffic` / `FetchDuration` |
+| **This host** | CPU seconds per cycle, heap, goroutines, recompute count/time | `runtime/metrics` (`/cpu/classes/total` minus idle); works on Windows too |
+
+Ways to see it:
+
+- **`P`** in the TUI: last cycle per node/probe (wall, remote CPU, load, output),
+  API traffic, local CPU, and per-node averages over the last 20 cycles as a
+  share of one core.
+- **`--perf-log file.jsonl`** (`perf.log`): one JSON record per refresh cycle
+  with everything above; the status bar shows a one-line summary each cycle.
+- **`--pprof 127.0.0.1:6060`** (`perf.pprof`): `go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=30`
+  for the local side.
+- **`tools/perfbench`**: headless. Runs N refresh cycles (API snapshot, light
+  probes, one heavy+STIG+config first-contact cycle, etcd probes), prints per
+  probe wall / remote CPU / output and the equivalent share of one core at
+  the configured refresh, and with `-monitor` samples CPU and load on every
+  node once a second over a *separate* SSH session, before the probes start
+  (baseline) and while they run. `-api-compare` fetches the snapshot again
+  with the API-side reducers off. `-json` writes the full report.
+
+```sh
+go build -o perfbench ./tools/perfbench       # or ./build.sh with the tools path
+./perfbench -cycles 5 -monitor -baseline 15s -api-compare -json bench.json -- --kubeconfig ~/.kube/config --ssh-user ubuntu
+./perfbench -cycles 5 -- --no-nice            # A/B one knob: everything after -- is a khealth flag
+./perfbench -cycles 3 -no-ssh                 # API only
+```
+
+Per-section CPU of a probe script (to find what to move out of the light
+tier): run it with `times` at each section boundary, e.g.
+`go run ./tools/scriptdump -config=false | ssh root@node sh -s` with `sec()`
+redefined to `times >&2; echo "--- $1" >&2` - that is how the numbers below
+were obtained.
+
+## Measured (single-node RKE2 v1.34 / etcd 3.6.7 / Rocky 9, 72 pods, 30 s refresh)
+
+Per refresh cycle, steady state:
+
+| | before | after |
+|---|---|---|
+| API: bytes from the apiserver | 9.1 MB (JSON, quorum reads) | **2.3 MB** (protobuf, watch cache) |
+| API: fetch wall time | 1.1 s | **0.32 s** |
+| API: requests | 41 | 37 |
+| local CPU for the fetch | 1.0 s | **0.2 s** |
+| node: light probe remote CPU | 1.32 s (4.4 % of a core) | **0.20 s (0.7 %)** |
+| node: light probe wall / output | 2.3 s / 39 KB | **1.2 s / 15 KB** |
+| etcd probe remote CPU | 0.43 s | **0.34 s** (no log scan while healthy) |
+| **total remote CPU per node per cycle** | **1.75 s (5.8 % of a core)** | **0.54 s (1.8 %)** |
+
+One-off cycles:
+
+| | before | after |
+|---|---|---|
+| first contact (light + config + OS STIG + heavy) | 4.99 s CPU, 7.3 s wall, 1.3 MB | **2.3 s CPU**, ~7 s wall (the wall is `sleep 1` + `find` scans with `timeout 20`) |
+| first API snapshot (discovery + every CRD schema + helm payloads) | 18.7 MB | 18.7 MB, then cached (5 min / until a release changes) |
+| `find` scans in the OS STIG probe | 174 | **39** (same output) |
+
+The independent node sampler (1/s over a second SSH session) on that box:
+baseline 26 % CPU across all cores, 37 % while five probe cycles ran back to
+back with no pause, i.e. about +11 % during a burst that in normal operation
+is spread over 2.5 minutes.
+
+## What the collection does to stay small
+
+**On the nodes**
+
+- Every script runs under `renice -n 19` and `ionice -c 2 -n 7` (`ssh.nice`,
+  default on). It yields to kubelet, etcd and the workloads; on an idle node
+  nothing changes. The idle I/O class is not used because on a saturated disk
+  it can starve the probe past its timeout and lose the data that matters.
+- Three tiers instead of one script every cycle:
+  - **live** (every refresh, ~0.2 s CPU): `/proc` reads, `df`, one
+    `systemctl show` for every unit of interest, one `timedatectl`, kubelet
+    cmdline, cheap hardening facts;
+  - **config** (`heavy_every` cycles, first contact, `R`; ~1 s): certificates
+    (`openssl` per file), sysctls, file modes, rke2/k3s config and manifests,
+    registries, and the hardening commands that spawn real tools
+    (`needs-restarting` alone is 0.3 s of python);
+  - **heavy** (same cadence): journal, `crictl images/ps`, tarball manifests
+    (cached by path/size/mtime), `du` of hostPath PVs;
+  - **OS STIG** (first contact and `R` only): `sysctl -a`, package list, unit
+    files, `find` scans (de-duplicated across the RHEL 8/9/10 and Ubuntu
+    rule sets), config dumps.
+  Results of the non-live tiers are carried forward (`Info.MergeConfig`,
+  `MergeHeavy`, `MergeSTIG`) so nothing disappears from the UI in between.
+- systemd is queried once per script, not once per unit: each `systemctl show`
+  is a D-Bus round trip (10-40 ms CPU, up to 800 ms wall for `timedatectl`
+  while `timedated` activates). The old per-unit loop was also wrong on
+  systemd 252, which ignores `-p` order.
+- The etcd probe reads `/health` and `/metrics` from `--listen-metrics-urls`
+  (plain HTTP on 127.0.0.1:2381 on rke2/k3s) before the TLS client port: no
+  TLS handshake for etcd per refresh, and on etcd 3.6 the client port hands
+  curl's HTTP/2 request to gRPC and answers 415, so it is also the one that
+  works. The etcd container log (tens of MB) is only scanned for leader
+  elections when the member is unhealthy or on a full cycle; a healthy
+  member's previous result is carried forward.
+- A node whose previous probe is still running is **skipped**, never given a
+  second session. A node whose probe took longer than half the refresh
+  interval skips the next cycle (`ssh.backoff`), so a struggling host gets
+  half the rate instead of a queue of sessions. Both show up in `P` and the
+  perf log as `skipped`.
+
+**On the API server**
+
+- Lists use `resourceVersion=0` (`perf.watch_cache`): the apiserver answers
+  from its watch cache instead of doing a quorum read against etcd for each
+  of the ~25 lists. A dashboard does not need linearizable reads; etcd under
+  investigation does not need 50 extra range requests a minute.
+- Typed lists are requested as protobuf (`perf.protobuf`): 3-4x fewer bytes
+  and far cheaper for the apiserver to encode than JSON. Raw endpoints
+  (`/readyz`, `metrics.k8s.io`, kubelet proxy) stay JSON.
+- Discovery + CRD definitions (each carries its full OpenAPI schema; MBs on a
+  Rancher cluster) are cached for `perf.discovery_ttl` (5 min). Kubelet
+  `configz` per node for `perf.configz_ttl` (10 min). Helm release payloads
+  (every revision, gzipped+base64 in secrets) are re-read only when the
+  metadata-only secret/configmap list shows an `owner=helm` object changed.
+- Client-side rate limit stays at QPS 50 / burst 100 so a big cluster's
+  first snapshot cannot flood the apiserver.
+
+**On this host**
+
+- The STIG + checks evaluation over all nodes used to run once per node
+  message (O(nodes²) per cycle); node/etcd/helm/S3 messages now mark the state
+  dirty and one recompute runs 250 ms later.
+
+## Reading the numbers when troubleshooting
+
+- `remote CPU / refresh` is the steady-state share of one core the tool takes
+  on a node. 0.5 s per 30 s is 1.7 %. If a node shows several seconds per
+  cycle, look at which probe: `node+heavy` / `node+stig` are expected to be
+  large but rare; `node` should be well under a second.
+- `wall` much larger than `remote CPU` means the node is waiting, not
+  computing: D-Bus (`systemctl`/`timedatectl`), a slow disk under `du`, or the
+  SSH path. That is the case where backoff kicks in.
+- API `bytes in` grows with pods and events. If a cluster has tens of
+  thousands of events, `events` is the list to watch; the tool lists all
+  types because normal events are needed for context.
+- The Resources sub-tab (Inspect) counts instances of every API type with one
+  list per type while it is open; on a cluster with hundreds of CRDs that is
+  hundreds of cheap requests per refresh. Leave the tab when not needed.
+
+## Knobs
+
+```yaml
+refresh: 30s        # everything scales with this
+heavy_every: 6      # config + heavy tiers every N refreshes
+ssh:
+  nice: true        # renice/ionice the probes (--no-nice)
+  backoff: true     # skip cycles for slow / still-running nodes (--no-backoff)
+  nodes: [cp-1]     # limit SSH to the nodes being looked at
+  concurrency: 8    # parallel sessions (also caps parallel load on a bastion)
+perf:
+  watch_cache: true # --no-watch-cache for a quorum read (only if you suspect the watch cache itself)
+  protobuf: true    # --no-protobuf
+  discovery_ttl: 5m
+  configz_ttl: 10m
+  log: ""           # --perf-log
+  pprof: ""         # --pprof
+```
+
+`--no-ssh` / `s` turn the node side off entirely (API only). `R` is the
+expensive key: it re-runs the OS STIG facts, the config tier and the heavy
+tier on every node at once.

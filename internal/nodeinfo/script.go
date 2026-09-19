@@ -4,16 +4,20 @@
 package nodeinfo
 
 import (
+	_ "embed"
 	"fmt"
 	"regexp"
 	"strings"
 
+	"k8s-health-tui/internal/perf"
 	"k8s-health-tui/internal/stigdata"
 )
 
 // Options controls what the node script collects.
 type Options struct {
 	Heavy         bool     // include images, tarball manifests and journal
+	Config        bool     // include the config tier of the base script: certs, sysctls, file modes, slow hardening commands, rke2/k3s config, manifests, registries (heavy cycles / first contact / R; carried forward otherwise by Info.MergeConfig)
+	OSStig        bool     // include the OS STIG facts (sysctl -a, packages, units, mounts, sshd -T, audit rules, stat/find scans, config dumps)
 	LogLines      int      // journalctl -n
 	LogSince      string   // journalctl --since
 	KnownTarballs []string // "path|size|mtime" entries whose manifests are already known
@@ -43,9 +47,11 @@ func Script(o Options) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(baseScript)
-	b.WriteString(osStigScript)
-	b.WriteString(stigdata.ProbeScript())
+	b.WriteString(strings.ReplaceAll(baseScript, "__CONFIG__", map[bool]string{true: "1", false: "0"}[o.Config]))
+	if o.OSStig {
+		b.WriteString(osStigScript)
+		b.WriteString(stigdata.ProbeScript())
+	}
 	if o.Heavy {
 		h := strings.ReplaceAll(heavyScript, "__LINES__", fmt.Sprint(lines))
 		h = strings.ReplaceAll(h, "__SINCE__", since)
@@ -53,250 +59,20 @@ func Script(o Options) string {
 		h = strings.ReplaceAll(h, "__PVPATHS__", strings.Join(paths, " "))
 		b.WriteString(h)
 	}
-	b.WriteString("\necho '===END'\n")
+	b.WriteString(perf.Footer)
+	b.WriteString("echo '===END'\n")
 	return b.String()
 }
 
-const baseScript = `
-sec() { printf '\n===%s\n' "$1"; }
-export LC_ALL=C
-RKE2_DD=/var/lib/rancher/rke2; K3S_DD=/var/lib/rancher/k3s
-for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml; do
-  [ -f "$f" ] || continue
-  v=$(sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' "$f" | tail -1 | sed 's/[[:space:]]*$//')
-  [ -n "$v" ] && RKE2_DD=$v
-done
-for f in /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do
-  [ -f "$f" ] || continue
-  v=$(sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' "$f" | tail -1 | sed 's/[[:space:]]*$//')
-  [ -n "$v" ] && K3S_DD=$v
-done
-mask() { sed -E 's/^([[:space:]]*(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)[[:space:]]*:).*/\1 <masked>/' "$1"; }
-sec DATADIR; echo "rke2=$RKE2_DD"; echo "k3s=$K3S_DD"
-sec TIME; date +%s.%N 2>/dev/null || date +%s
-sec HOST; hostname; uname -r; uname -m
-sec UPTIME; cat /proc/uptime
-sec LOAD; cat /proc/loadavg
-sec NPROC; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo
-sec STAT1; head -1 /proc/stat
-sleep 1
-sec STAT2; head -1 /proc/stat
-sec MEM; cat /proc/meminfo
-sec DF; df -PkT -x tmpfs -x devtmpfs -x overlay -x squashfs -x nsfs -x efivarfs -x fuse.lxcfs -x shm 2>/dev/null || df -Pk
-sec PVMOUNTS; df -Pk 2>/dev/null | grep -E 'kubelet/(pods|plugins)/.*/volumes/' | awk '{print $2"|"$3"|"$4"|"$5"|"$6}'
-sec DFI; df -Pki -x tmpfs -x devtmpfs -x overlay -x squashfs -x nsfs -x efivarfs -x fuse.lxcfs -x shm 2>/dev/null
-sec SVC
-for s in kubelet containerd rke2-server rke2-agent k3s k3s-agent etcd docker crio rancher-system-agent chronyd chrony ntpd ntp systemd-timesyncd firewalld ufw nftables iptables apparmor; do
-  st=$(systemctl show -p LoadState,ActiveState,SubState --value "$s" 2>/dev/null | tr '\n' ' ')
-  case "$st" in loaded*) echo "$s $st";; esac
-done
-sec UNITS
-for s in rke2-server rke2-agent k3s k3s-agent kubelet containerd rancher-system-agent etcd; do
-  ls=$(systemctl show -p LoadState --value "$s" 2>/dev/null); [ "$ls" = loaded ] || continue
-  echo "$s|$(systemctl show -p ActiveState,SubState,NRestarts,ExecMainStartTimestamp,Result --value "$s" 2>/dev/null | tr '\n' '|')"
-done
-sec NTP
-timedatectl show -p NTPSynchronized --value 2>/dev/null
-timedatectl show -p NTP --value 2>/dev/null
-sec DIST
-for d in /etc/rancher/rke2 /var/lib/rancher/rke2/server /var/lib/rancher/rke2/agent /etc/rancher/k3s /var/lib/rancher/k3s/server /etc/kubernetes/manifests /etc/kubernetes/pki /var/lib/etcd /var/lib/rancher/rke2/server/db/etcd; do
-  [ -d "$d" ] && echo "$d"
-done
-sec CERTS
-if command -v openssl >/dev/null 2>&1; then
-  for f in /var/lib/rancher/rke2/server/tls/*.crt /var/lib/rancher/rke2/server/tls/etcd/*.crt /var/lib/rancher/rke2/agent/*.crt /var/lib/rancher/k3s/server/tls/*.crt /var/lib/rancher/k3s/agent/*.crt /etc/kubernetes/pki/*.crt /etc/kubernetes/pki/etcd/*.crt /var/lib/kubelet/pki/kubelet.crt /var/lib/kubelet/pki/kubelet-client-current.pem /etc/ssl/etcd/ssl/*.pem; do
-    [ -f "$f" ] || continue
-    case "$f" in *-key.pem) continue;; esac
-    e=$(openssl x509 -enddate -noout -in "$f" 2>/dev/null | sed 's/^notAfter=//')
-    [ -n "$e" ] && echo "$f|$e"
-  done
-fi
-sec KUBELETCMD
-p=$(pidof kubelet 2>/dev/null | cut -d' ' -f1)
-[ -n "$p" ] && tr '\0' '\n' < /proc/$p/cmdline
-sec SYSCTL
-for k in vm.overcommit_memory vm.panic_on_oom kernel.panic kernel.panic_on_oops kernel.keys.root_maxbytes kernel.keys.root_maxkeys net.ipv4.ip_forward net.bridge.bridge-nf-call-iptables fs.inotify.max_user_instances fs.inotify.max_user_watches kernel.randomize_va_space kernel.dmesg_restrict kernel.kptr_restrict kernel.yama.ptrace_scope kernel.core_pattern fs.protected_symlinks fs.protected_hardlinks net.ipv4.conf.all.accept_redirects net.ipv4.conf.default.accept_redirects net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.icmp_echo_ignore_broadcasts; do
-  echo "$k=$(sysctl -n $k 2>/dev/null)"
-done
-sec PERMS
-for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/registries.yaml /etc/rancher/rke2/rke2.yaml /etc/rancher/rke2/config.yaml.d /etc/rancher/k3s/config.yaml /etc/rancher/k3s/k3s.yaml /var/lib/rancher/rke2/server/db/etcd /var/lib/rancher/rke2/server/db /var/lib/rancher/rke2/agent/pod-manifests /var/lib/rancher/rke2/server/tls /var/lib/rancher/rke2/server/cred /var/lib/rancher/rke2/agent/etc/kubelet.conf.d /var/lib/rancher/rke2/agent/kubelet.kubeconfig /var/lib/rancher/rke2/agent/kubeproxy.kubeconfig /etc/kubernetes/manifests /etc/kubernetes/pki /etc/kubernetes/admin.conf /etc/kubernetes/scheduler.conf /etc/kubernetes/controller-manager.conf /etc/kubernetes/kubelet.conf /var/lib/kubelet/config.yaml /var/lib/kubelet/kubeconfig /var/lib/etcd /etc/cni/net.d /var/lib/rancher/rke2/agent/etc/cni/net.d /etc/rancher/rke2/audit-policy.yaml /etc/rancher/rke2/rke2-pss.yaml; do
-  [ -e "$f" ] && stat -c '%a|%U|%G|%F|%n' "$f" 2>/dev/null
-done
-for d in /var/lib/rancher/rke2/agent/pod-manifests /etc/kubernetes/manifests /etc/rancher/rke2/config.yaml.d /etc/cni/net.d /var/lib/rancher/rke2/agent/etc/cni/net.d; do
-  [ -d "$d" ] && stat -c '%a|%U|%G|%F|%n' "$d"/* 2>/dev/null
-done
-for d in /var/lib/rancher/rke2/server/tls /var/lib/rancher/rke2/server/tls/etcd /var/lib/rancher/rke2/agent /etc/kubernetes/pki /etc/kubernetes/pki/etcd; do
-  [ -d "$d" ] && stat -c '%a|%U|%G|%F|%n' "$d"/*.key "$d"/*.crt 2>/dev/null
-done
-sec ETCDUSER; id etcd 2>/dev/null
-sec SELINUX; getenforce 2>/dev/null
-sec OSREL; grep -E '^(ID|VERSION_ID|PRETTY_NAME|ID_LIKE)=' /etc/os-release 2>/dev/null
-sec HARDENING
-echo "selinux=$(getenforce 2>/dev/null)"
-echo "selinux_config=$(grep -E '^SELINUX=' /etc/selinux/config 2>/dev/null | cut -d= -f2)"
-echo "fips=$(cat /proc/sys/crypto/fips_enabled 2>/dev/null)"
-command -v fips-mode-setup >/dev/null 2>&1 && echo "fips_setup=$(fips-mode-setup --check 2>/dev/null | head -1)"
-[ -f /sys/module/apparmor/parameters/enabled ] && echo "apparmor=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)"
-command -v aa-status >/dev/null 2>&1 && echo "apparmor_enforced=$(aa-status --enforced 2>/dev/null)"
-for s in fapolicyd auditd firewalld ufw apparmor unattended-upgrades dnf-automatic.timer usbguard sssd chronyd chrony systemd-timesyncd; do
-  st=$(systemctl show -p LoadState,ActiveState,UnitFileState --value "$s" 2>/dev/null | tr '\n' ' ')
-  case "$st" in loaded*) echo "svc_$s=$st";; esac
-done
-echo "cmdline=$(cat /proc/cmdline 2>/dev/null)"
-grep -qsE '\bfips=1\b' /etc/default/grub /boot/loader/entries/*.conf /boot/grub2/grubenv /boot/grub/grub.cfg /etc/kernel/cmdline 2>/dev/null && echo "fips_boot=yes" || echo "fips_boot=no"
-[ -f /etc/ufw/ufw.conf ] && echo "ufw_config=$(grep -E '^ENABLED=' /etc/ufw/ufw.conf 2>/dev/null | cut -d= -f2)"
-[ -f /etc/apparmor.d ] || [ -d /etc/apparmor.d ] && echo "apparmor_installed=yes"
-[ -d /etc/fapolicyd/rules.d ] && echo "fapolicyd_rules=$(ls /etc/fapolicyd/rules.d 2>/dev/null | wc -l)"
-[ -f /sys/kernel/security/lockdown ] && echo "lockdown=$(cat /sys/kernel/security/lockdown 2>/dev/null)"
-command -v mokutil >/dev/null 2>&1 && echo "secureboot=$(mokutil --sb-state 2>/dev/null | head -1)"
-[ -f /var/run/reboot-required ] && echo "reboot_required=yes"
-if command -v needs-restarting >/dev/null 2>&1; then needs-restarting -r >/dev/null 2>&1 || echo "reboot_required=yes"; fi
-command -v ufw >/dev/null 2>&1 && echo "ufw=$(ufw status 2>/dev/null | head -1 | sed 's/^Status: //')"
-command -v pro >/dev/null 2>&1 && echo "ubuntu_pro=$(pro status 2>/dev/null | grep -iE '^(fips|fips-updates|esm-infra|usg) ' | tr -s ' ' | tr '\n' ';')"
-command -v auditctl >/dev/null 2>&1 && echo "audit_rules=$(auditctl -l 2>/dev/null | grep -vc 'No rules')"
-[ -f /etc/crypto-policies/config ] && echo "crypto_policy=$(cat /etc/crypto-policies/config 2>/dev/null)"
-[ -f /proc/sys/kernel/randomize_va_space ] && echo "aslr=$(cat /proc/sys/kernel/randomize_va_space)"
-sec RKE2CFG
-for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do
-  [ -f "$f" ] || continue
-  echo "--- $f"
-  grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | mask /dev/stdin
-done
-sec RKE2EXTRA
-for f in /etc/rancher/rke2/audit-policy.yaml /etc/rancher/rke2/rke2-pss.yaml /etc/rancher/rke2/psa.yaml /etc/rancher/rke2/rke2-cis-sysctl.conf /etc/rancher/rke2/rke2-cis.yaml /etc/rancher/k3s/audit-policy.yaml /etc/rancher/k3s/psa.yaml; do
-  [ -f "$f" ] || continue
-  echo "--- $f"
-  head -c 16384 "$f" | mask /dev/stdin
-done
-for d in /etc/rancher/rke2 /etc/rancher/k3s /etc/rancher/agent /etc/rancher/node; do
-  [ -d "$d" ] || continue
-  echo "--- listing $d"
-  ls -la "$d" 2>/dev/null | tail -n +2
-done
-sec MANIFESTS
-for d in "$RKE2_DD/server/manifests" "$K3S_DD/server/manifests"; do
-  [ -d "$d" ] || continue
-  for f in "$d"/*; do
-    [ -f "$f" ] || continue
-    sz=$(stat -c %s "$f" 2>/dev/null); mt=$(stat -c %Y "$f" 2>/dev/null)
-    kinds=$(grep -E '^kind:' "$f" 2>/dev/null | sed 's/kind:[[:space:]]*//' | sort | uniq -c | awk '{printf "%s x%s,", $2, $1}')
-    echo "--- $f|$sz|$mt|$kinds"
-    if [ "${sz:-0}" -le 65536 ] && ! grep -q 'chartContent:' "$f" 2>/dev/null; then
-      mask "$f"
-    else
-      echo "(content omitted: bundled chart tarball / >64KB)"
-    fi
-  done
-done
-sec STATICPODS
-for d in "$RKE2_DD/agent/pod-manifests" "$K3S_DD/agent/pod-manifests" /etc/kubernetes/manifests; do
-  [ -d "$d" ] || continue
-  for f in "$d"/*.yaml "$d"/*.yml; do
-    [ -f "$f" ] || continue
-    echo "--- $f|$(stat -c %s "$f" 2>/dev/null)|$(stat -c %Y "$f" 2>/dev/null)|"
-    grep -E '^[[:space:]]*(image:|- --)' "$f" 2>/dev/null | sed 's/^[[:space:]]*//'
-  done
-done
-sec RANCHER
-echo "system-agent=$(systemctl show -p LoadState,ActiveState,SubState --value rancher-system-agent 2>/dev/null | tr '\n' ' ')"
-[ -f /etc/rancher/agent/config.yaml ] && echo "agent-url=$(grep -E '^[[:space:]]*url:' /etc/rancher/agent/config.yaml 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*url:[[:space:]]*//')"
-[ -f /etc/rancher/rke2/config.yaml.d/50-rancher.yaml ] && echo "rancher-provisioned=yes"
-[ -f /etc/rancher/k3s/config.yaml.d/50-rancher.yaml ] && echo "rancher-provisioned=yes"
-[ -f /var/lib/rancher/agent/rancher2_connection_info.json ] && echo "connection-info=yes"
-[ -d /var/lib/rancher/agent/applied ] && echo "applied-plans=$(ls /var/lib/rancher/agent/applied 2>/dev/null | wc -l)"
-sec CNI
-for d in /var/lib/rancher/rke2/agent/etc/cni/net.d /var/lib/rancher/k3s/agent/etc/cni/net.d /etc/cni/net.d; do
-  [ -d "$d" ] || continue
-  for f in "$d"/*.conf "$d"/*.conflist; do [ -f "$f" ] || continue; echo "--- $f"; head -c 6000 "$f"; echo; done
-done
-sec REGISTRIES
-for f in /etc/rancher/rke2/registries.yaml /etc/rancher/k3s/registries.yaml; do
-  [ -f "$f" ] || continue
-  echo "--- $f"
-  sed -E 's/^([[:space:]]*(password|username|token|auth|identitytoken)[[:space:]]*:).*/\1 <masked>/' "$f"
-done
-sec CONTAINERDREG
-for d in /var/lib/rancher/rke2/agent/etc/containerd/certs.d /var/lib/rancher/k3s/agent/etc/containerd/certs.d /etc/containerd/certs.d; do
-  [ -d "$d" ] || continue
-  for h in "$d"/*; do [ -d "$h" ] || continue; echo "--- $h/hosts.toml"; grep -viE 'password|username' "$h/hosts.toml" 2>/dev/null; done
-done
-for f in /var/lib/rancher/rke2/agent/etc/containerd/config.toml /var/lib/rancher/k3s/agent/etc/containerd/config.toml /etc/containerd/config.toml; do
-  [ -f "$f" ] || continue
-  echo "--- $f"
-  grep -nE 'registry|mirrors|config_path|endpoint|sandbox_image|SystemdCgroup|snapshotter|default_runtime|disable_snapshot_annotations' "$f" 2>/dev/null | grep -viE 'password|username|auth' | head -80
-done
-`
+//go:embed scripts/base.sh
+var baseScript string
 
 // osStigScript collects the generic facts the OS STIG templates evaluate
 // (see internal/stigdata); the data-derived stat/find/dump sections are
 // appended by stigdata.ProbeScript.
-const osStigScript = `
-sec SYSCTLALL; sysctl -a 2>/dev/null
-sec PKGS
-if command -v rpm >/dev/null 2>&1; then rpm -qa --qf '%{NAME}
-' 2>/dev/null
-elif command -v dpkg-query >/dev/null 2>&1; then dpkg-query -W -f='${Package} ${db:Status-Status}
-' 2>/dev/null | awk '$2=="installed"{print $1}'; fi
-sec UNITFILES; systemctl list-unit-files --no-legend --plain --no-pager 2>/dev/null
-sec UNITSALL; systemctl list-units --all --no-legend --plain --no-pager --type=service,socket,timer 2>/dev/null
-sec FINDMNT; findmnt -rn -o TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null
-sec FSTAB; grep -vE '^[[:space:]]*(#|$)' /etc/fstab 2>/dev/null
-sec SSHD; sshd -T 2>/dev/null
-sec AUDITRULES; auditctl -l 2>/dev/null
-sec AUDITRULESD; cat /etc/audit/rules.d/*.rules /etc/audit/audit.rules 2>/dev/null | grep -vE '^[[:space:]]*(#|$)'
-sec MODPROBE; grep -hE '^[[:space:]]*(install|blacklist)[[:space:]]' /etc/modprobe.d/*.conf /etc/modprobe.conf 2>/dev/null
-sec LSMOD; lsmod 2>/dev/null | awk 'NR>1{print $1}'
-sec GRUBCFG
-grubby --info=ALL 2>/dev/null | grep '^args='
-grep -E '^GRUB_CMDLINE_LINUX' /etc/default/grub 2>/dev/null
-`
+//
+//go:embed scripts/os_stig.sh
+var osStigScript string
 
-const heavyScript = `
-sec CRICTL
-CRICTL=; CRI=
-if [ -x /var/lib/rancher/rke2/bin/crictl ]; then CRICTL=/var/lib/rancher/rke2/bin/crictl; CRI=unix:///run/k3s/containerd/containerd.sock
-elif command -v k3s >/dev/null 2>&1 && [ -S /run/k3s/containerd/containerd.sock ]; then CRICTL="k3s crictl"; CRI=
-elif command -v crictl >/dev/null 2>&1; then CRICTL=$(command -v crictl)
-  for s in /run/containerd/containerd.sock /var/run/crio/crio.sock /run/cri-dockerd.sock; do [ -S "$s" ] && { CRI="unix://$s"; break; }; done
-fi
-echo "crictl=$CRICTL cri=$CRI"
-runcri() { if [ -n "$CRI" ]; then $CRICTL -r "$CRI" "$@"; else $CRICTL "$@"; fi; }
-sec IMAGES
-[ -n "$CRICTL" ] && runcri images -o json 2>/dev/null
-sec CONTAINERS
-[ -n "$CRICTL" ] && runcri ps -o json 2>/dev/null
-sec TARBALLS
-KNOWN='|__KNOWN__|'
-for IMGDIR in /var/lib/rancher/rke2/agent/images /var/lib/rancher/k3s/agent/images; do
-  [ -d "$IMGDIR" ] || continue
-  for f in "$IMGDIR"/*; do
-    [ -f "$f" ] || continue
-    sz=$(stat -c %s "$f" 2>/dev/null); mt=$(stat -c %Y "$f" 2>/dev/null)
-    echo "--- $f|$sz|$mt"
-    case "$KNOWN" in *"|$f|$sz|$mt|"*) echo "(cached)"; continue;; esac
-    case "$f" in
-      *.txt) cat "$f";;
-      *.tar) tar -xOf "$f" manifest.json 2>/dev/null;;
-      *.tar.zst) command -v zstd >/dev/null 2>&1 && zstd -dc "$f" 2>/dev/null | tar -xO manifest.json 2>/dev/null;;
-      *.tar.gz|*.tgz) gzip -dc "$f" 2>/dev/null | tar -xO manifest.json 2>/dev/null;;
-    esac
-    echo
-  done
-done
-sec PVDU
-# hostPath/local PVs (e.g. local-path-provisioner): the kubelet has no metrics
-# for them, so measure the directories directly
-for d in __PVPATHS__; do
-  [ -d "$d" ] || continue
-  u=$(timeout 60 du -skx "$d" 2>/dev/null | cut -f1)
-  [ -n "$u" ] && echo "$u|$d"
-done
-sec JOURNAL
-journalctl --no-pager -o short-iso -q -n __LINES__ --since '__SINCE__' -u rke2-server -u rke2-agent -u k3s -u k3s-agent -u kubelet -u containerd -u rancher-system-agent -u etcd 2>/dev/null
-sec LOGFILES
-for f in /var/lib/rancher/rke2/agent/logs/kubelet.log /var/lib/rancher/rke2/agent/containerd/containerd.log /var/lib/rancher/k3s/agent/containerd/containerd.log; do
-  [ -f "$f" ] || continue
-  echo "--- $f"
-  tail -n 120 "$f" 2>/dev/null | grep -E ' [EW][0-9]{4} |level=(warn|error|fatal)|error|failed' | tail -n 80
-done
-`
+//go:embed scripts/heavy.sh
+var heavyScript string

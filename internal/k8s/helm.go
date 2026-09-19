@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
 )
@@ -83,7 +82,9 @@ type helmReleaseJSON struct {
 func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 	latest := map[string]HelmRelease{}
 	history := map[string][]HelmRevision{}
-	secrets, err := c.CS.CoreV1().Secrets("").List(ctx, metav1.ListOptions{FieldSelector: "type=helm.sh/release.v1"})
+	opts := c.listOpts()
+	opts.FieldSelector = "type=helm.sh/release.v1"
+	secrets, err := c.CS.CoreV1().Secrets("").List(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +102,9 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 		}
 	}
 	// releases stored in configmaps (HELM_DRIVER=configmap)
-	if cms, err := c.CS.CoreV1().ConfigMaps("").List(ctx, metav1.ListOptions{LabelSelector: "owner=helm"}); err == nil {
+	cmOpts := c.listOpts()
+	cmOpts.LabelSelector = "owner=helm"
+	if cms, err := c.CS.CoreV1().ConfigMaps("").List(ctx, cmOpts); err == nil {
 		for _, cm := range cms.Items {
 			raw, ok := cm.Data["release"]
 			if !ok {
@@ -122,7 +125,7 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 	}
 	// releases installed by the rke2/k3s HelmChart controller carry the CR name
 	bundled := map[string]string{}
-	if l, err := c.Dyn.Resource(helmChartGVR).List(ctx, metav1.ListOptions{}); err == nil {
+	if l, err := c.Dyn.Resource(helmChartGVR).List(ctx, c.listOpts()); err == nil {
 		for _, it := range l.Items {
 			ns, _, _ := unstructured.NestedString(it.Object, "spec", "targetNamespace")
 			if ns == "" {

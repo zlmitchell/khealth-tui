@@ -28,9 +28,9 @@ It uses two sources:
 | 5 | Storage | StorageClasses, CSI drivers (per-node registration), PVCs with **used capacity** (kubelet `stats/summary`), PVs, node filesystems |
 | 6 | Events | warning events, newest first |
 | 7 | Addons | CNI (daemonsets + `/etc/cni/net.d` + rke2 `cni:`), CSI, CoreDNS/ingress/metrics-server/…, **Rancher management** (server URL, cluster-agent, fleet-agent, provisioned vs imported, `rancher-system-agent` per node, join topology via `server:`), **registries.yaml** vs containerd `certs.d`, registries actually used by pods, rke2 bundled HelmCharts + HelmChartConfig overrides |
-| 8 | Helm | releases decoded from `sh.helm.release.v1` secrets (chart, version, status, revision, history); Enter: **values applied** + history; optional update check against repo `index.yaml` / Artifact Hub; `u` upgrades to the newest known version, `b` rolls back to a chosen revision (runs the `helm` CLI after a confirmation, `--read-only` disables) |
+| 8 | Helm | releases decoded from `sh.helm.release.v1` secrets (chart, version, status, revision, history); Enter: **values applied** + history; update check against the `index.yaml` of your `helm repo` list (credentials included) and `helm.repos`; `u` upgrades to the newest known version, `b` rolls back to a chosen revision (runs the `helm` CLI after a confirmation, `--read-only` disables) |
 | 9 | Images | per node: image count/size, running containers, **unused images**, airgap tarballs (`/var/lib/rancher/rke2/agent/images/*.tar[.zst\|.gz]`, `.txt`) and which tarball images are running / which running images are not in any tarball |
-| 0 | Security | sub-tabs `Rules` / `Node hardening`; reference releases shown in the header; **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap); `Node hardening` adds the DISA RHEL 8/9/10 and Ubuntu 20.04/22.04/24.04 STIG rules matched per node |
+| 0 | Security | sub-tabs `Rules` / `Node hardening` / `OS STIG`; reference releases shown in the header; **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap); `OS STIG` lists every rule of the DISA RHEL 8/9/10 or Ubuntu 20.04/22.04/24.04 STIG matched per node (~60% automated via ComplianceAsCode templates, the rest MANUAL with check text) |
 | = | RKE2 | **control-plane isolation** (taints, user pods on servers, requests vs allocatable, whether apiserver/etcd static pods carry `control-plane-resource-requests`);  `config.yaml`(.d) per node, data-dir, `server/manifests` (user vs bundled, HelmChartConfig contents), static pod manifests, audit/PSS policies, config drift between nodes |
 | - | Logs | journal of rke2-server/agent, kubelet, containerd, rancher-system-agent **classified** into normal-startup noise / warnings / errors with explanations (token mismatch, CA mismatch, cluster-id mismatch, NOSPACE, PLEG, pull failures, protect-kernel-defaults, …); persistent startup noise is escalated |
 
@@ -42,8 +42,8 @@ sparklines inline. History is kept in memory for the session (90 samples).
 **Node hardening** (per node, over SSH): SELinux runtime vs `/etc/selinux/config`, AppArmor, FIPS (`/proc/sys/crypto/fips_enabled` vs `fips=1` in grub / Ubuntu Pro), fapolicyd, auditd (+ rule count), firewalld/ufw (runtime vs unit-file / `ufw.conf`), Secure Boot, kernel lockdown, crypto policy, pending reboot. Runtime/boot mismatches are findings. The node detail (Enter on Nodes) opens with a dashboard of gauges and this table.
 
 Keys: `Tab`/`Shift+Tab` (or `[`/`]`, number keys) switch tabs, `←`/`→` or `h`/`l` switch sub-tabs inside a tab, `j/k` move, `Enter` detail, `n` namespace,
-`/` filter, `a` problems-only, `r` refresh, `R` full refresh (logs/images),
-`s` toggle SSH, `?` help, `q` quit.
+`/` filter, `a` problems-only, `m` hide manual STIG rules, `r` refresh, `R` full refresh (logs/images/OS STIG facts),
+`s` toggle SSH, `P` footprint (what khealth itself costs), `?` help, `q` quit.
 
 ## Install / build
 
@@ -55,7 +55,7 @@ No Go on the machine? Use Docker:
 ./build.sh darwin arm64
 ```
 
-With Go 1.24+: `go build -o khealth ./cmd/khealth` (or `make build`, `make test`).
+With Go 1.26+: `go build -o khealth ./cmd/khealth` (or `make build`, `make test`).
 
 ## Run
 
@@ -64,17 +64,26 @@ khealth                                   # current kubeconfig context, SSH as $
 khealth --context prod --ssh-user ubuntu --ssh-key ~/.ssh/prod.pem
 khealth --no-ssh                          # API-only view
 khealth --bastion jump@bastion.example.com --insecure-host-key
-khealth --helm-updates                    # also look up newer chart versions (your `helm repo` list, then Artifact Hub)
+khealth --helm-updates=false              # skip the chart update check (on by default from your `helm repo` list and helm.repos)
 khealth --ssh-user admin --ask-pass       # prompt for a password used when keys fail (and for sudo)
 ```
 
-Copy `config.example.yaml` to `~/.config/k8s-health-tui/config.yaml` (or
-`./k8s-health-tui.yaml`) for persistent settings, per-node address overrides,
-thresholds, extra etcd backup directories, Helm repos, etc.
+`khealth --init-config` writes the annotated example config to
+`~/.config/k8s-health-tui/config.yaml` (`%AppData%/k8s-health-tui/config.yaml`
+on Windows; `--config <path>` to put it elsewhere; it never overwrites) and
+`--print-config` prints it to stdout. `./k8s-health-tui.yaml` and
+`./khealth.yaml` in the working directory are also picked up. Every key is
+optional; flags override the file. The source of the example is
+`internal/config/config.example.yaml`.
 
 ### What SSH needs on the nodes
 
-* a user that can `sudo -n` (or root); the collection script is POSIX `sh` sent
+* a login that can become root: root itself, or a user with `sudo`, `dzdo`
+  (Centrify / Delinea) or `doas`. Each host is probed once (`become: auto`
+  tries them in that order) and the first that works is cached: NOPASSWD is
+  used when granted; otherwise the password is fed on stdin for `sudo` and
+  `dzdo` (`doas` has no such mode and needs `nopass`). Pin a tool with
+  `become: dzdo` / `--become dzdo`. The collection script is POSIX `sh` sent
   over stdin, no files are written on the node
 * standard tools: `df`, `stat`, `systemctl`, `journalctl`, `openssl`, `curl`
   (etcd health/metrics), `sysctl`; `crictl` is found automatically
@@ -84,13 +93,30 @@ thresholds, extra etcd backup directories, Helm repos, etc.
 * auth order: ssh-agent (incl. Windows OpenSSH agent) -> key file(s) ->
   password fallback. The password comes from `--ask-pass` (prompted, not
   echoed), `KHT_SSH_PASSWORD`, `ssh.password` in the config or `--ssh-password`;
-  it is also used for keyboard-interactive auth and fed to `sudo -S` when the
-  node's sudo is not `NOPASSWD`. Encrypted keys: `KHT_SSH_PASSPHRASE`.
+  it is also used for keyboard-interactive auth and, unless
+  `ssh.become_password` / `KHT_BECOME_PASSWORD` is set, for `sudo -S` /
+  `dzdo -S` when NOPASSWD is not granted. Encrypted keys: `KHT_SSH_PASSPHRASE`.
 
-Light collection runs every refresh (default 30s, ~2s per node, parallel);
-heavy collection (journal, `crictl images`, tarball manifests) runs every
-`heavy_every` refreshes or on `R`. Tarball manifests are cached by
-path/size/mtime so large `.tar.zst` files are only read once.
+Light collection runs every refresh (default 30s, ~1s wall / 0.2s CPU per
+node, parallel); the config tier (certificates, sysctls, file modes, rke2/k3s
+config, manifests, registries, slow hardening commands) and the heavy
+collection (journal, `crictl images`, tarball manifests) run every
+`heavy_every` refreshes or on `R` and are carried forward in between.
+Tarball manifests are cached by path/size/mtime so large `.tar.zst` files
+are only read once. The OS STIG facts (`sysctl -a`, package lists, `find`
+scans, config dumps) are collected once per node on first contact and again
+only on `R`. [docs/REFRESH.md](docs/REFRESH.md) lists every remote call and
+its cadence.
+
+The tool is meant to be run against clusters that are already in trouble,
+so it measures and minimises its own footprint: probes run under
+`renice`/`ionice`, API lists come from the apiserver watch cache in
+protobuf (no etcd quorum reads), a node whose probe is slow or still
+running is skipped rather than stacked, and `P` shows what the last cycles
+cost the API server, every node (remote CPU seconds per probe) and this
+host. `--perf-log file.jsonl` records it per cycle and
+`tools/perfbench` measures it headlessly with baseline-vs-during CPU
+sampling on the nodes. See [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ### RBAC needed (read-only)
 
@@ -172,12 +198,20 @@ benchmark numbering:
 | DISA RHEL STIG | 8 V2R8, 9 V2R9, 10 V1R2 (01 Jul 2026) | per node, matched from `/etc/os-release` |
 | DISA Ubuntu LTS STIG | 20.04 V2R4, 22.04 V2R9, 24.04 V1R6 | per node, matched from `/etc/os-release` |
 
-RHEL rebuilds (Rocky, Alma, CentOS Stream, Oracle) are audited against the
-RHEL STIG of the same major; nodes on other distributions fall back to generic
-`OS-*` IDs. The `Node hardening` sub-tab shows the OS STIG matched per node,
-a pass/fail summary column, and the per-rule results (FIPS, SELinux/AppArmor,
-fapolicyd, auditd, firewall, USBGuard, chrony, and the kernel sysctls the
-STIGs require) - enter on a rule row opens its detail and fix.
+The OS STIGs are evaluated in full: every rule of the matched release is
+listed on the `OS STIG` sub-tab. Checks come from [ComplianceAsCode](https://github.com/ComplianceAsCode/content)
+templates (sysctl, packages, services, mounts, `sshd -T`, file modes and
+owners, audit rules, kernel modules, grub arguments, pwquality/faillock,
+config-file values) joined to the DISA XCCDF by STIG ID and embedded as
+generated tables (`internal/stigdata/data`), plus hand-written checks for
+facts the probe reads directly (FIPS, SELinux/AppArmor, fapolicyd, auditd,
+firewall, USBGuard, chrony). About 60% of RHEL 8/9/10 and Ubuntu 22.04/24.04
+rules are automated; the rest are listed as MANUAL with the STIG's own check
+text in the detail view. RHEL rebuilds (Rocky, Alma, CentOS Stream, Oracle)
+use the RHEL STIG of the same major; other distributions fall back to generic
+`OS-*` IDs. `Node hardening` keeps the per-node runtime/boot facts and a
+pass/fail summary column. See [docs/STIG.md](docs/STIG.md) for sources,
+generation and how to add rules.
 
 The mapping is best-effort: verify it against the release you are audited
 against and treat `MANUAL` results as items to review. Secrets, tokens and
@@ -189,12 +223,16 @@ passwords are masked before any file content leaves the node.
 cmd/khealth            entry point
 internal/config        defaults, YAML file, flags
 internal/k8s           client-go snapshot, Helm decoding, helpers
-internal/sshrun        SSH runner (agent/key/password, bastion, sudo, known_hosts)
+internal/sshrun        SSH runner (agent/key/password, bastion, become: sudo/dzdo/doas, known_hosts)
 internal/nodeinfo      node collection script + parser (resources, perms, registries, images, logs)
 internal/etcd          etcd probe script + parser (config source, health, metrics, etcdctl, snapshots)
 internal/logs          log pattern knowledge base + classifier
 internal/stig          STIG/CIS rule engine (one file per reference: kubernetes, rke2, rancher, cis, os + rhel/ubuntu tables)
-internal/helmcheck     chart update lookup (repo index.yaml / Artifact Hub)
+internal/nodeinfo/scripts, internal/etcd/scripts
+                       the POSIX sh probes sent over SSH, embedded with //go:embed (edit the .sh, not Go)
+internal/stigdata      generated OS STIG tables (DISA XCCDF x ComplianceAsCode) + the probe fragment derived from them
+tools/stiggen          generator for internal/stigdata/data (see docs/STIG.md)
+internal/helmcheck     chart update lookup (repo index.yaml from your helm repos / helm.repos)
 internal/checks        findings engine (thresholds -> CRIT/WARN/INFO)
 internal/ui            Bubble Tea app, tabs, detail views
 ```

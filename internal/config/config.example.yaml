@@ -1,5 +1,7 @@
-# khealth configuration. Copy to ~/.config/k8s-health-tui/config.yaml
-# (or ./k8s-health-tui.yaml) - every key is optional, flags override the file.
+# khealth configuration. `khealth --init-config` writes this file to
+# ~/.config/k8s-health-tui/config.yaml (%AppData%/k8s-health-tui/config.yaml
+# on Windows); ./k8s-health-tui.yaml and ./khealth.yaml are also picked up.
+# Every key is optional and flags override the file (`khealth -h`).
 
 kubeconfig: ~/.kube/config        # default: $KUBECONFIG / ~/.kube/config
 context: ""                       # kubeconfig context (default: current-context)
@@ -13,9 +15,11 @@ ssh:
   key: ~/.ssh/id_ed25519          # default: ssh-agent, then ~/.ssh/id_{ed25519,ecdsa,rsa}
                                   # encrypted key: export KHT_SSH_PASSPHRASE; password auth: export KHT_SSH_PASSWORD
   password: ""                    # fallback if key auth fails; prefer --ask-pass (prompt) or KHT_SSH_PASSWORD
-  ask_pass: false                 # prompt for the password at startup (also fed to sudo -S when sudo needs it)
+  ask_pass: false                 # prompt for the password at startup (also used for sudo/dzdo -S when NOPASSWD is not granted)
   port: 22
-  sudo: true                      # runs the collection script with `sudo -n` (needs NOPASSWD)
+  sudo: true                      # false = never escalate (the user must be root)
+  become: auto                    # how to become root: auto (try sudo, dzdo, doas per host), sudo, dzdo, doas, none
+  become_password: ""             # only if the escalation password differs from the SSH one (or KHT_BECOME_PASSWORD)
   timeout: 20s
   address: InternalIP             # InternalIP | ExternalIP | Hostname (from the Node object)
   hosts:                          # per-node address overrides (node name -> host[:port])
@@ -26,6 +30,8 @@ ssh:
   strict_host_key: true           # verify against known_hosts (false = accept anything)
   known_hosts: ~/.ssh/known_hosts
   concurrency: 8
+  nice: true                      # run the probe scripts under renice 19 + ionice best-effort-lowest on the nodes
+  backoff: true                   # skip the next cycle for a node whose probe took > refresh/2 or is still running
 
 etcd:
   backup_dirs: []                 # extra directories scanned for snapshot files on control-plane nodes (upstream clusters)
@@ -37,18 +43,26 @@ etcd:
   client_key: ""
 
 helm:
-  check_updates: false            # look up newer chart versions (needs outbound HTTP)
-  artifacthub: true               # fall back to artifacthub.io search for charts not found in repos
+  check_updates: true             # look up newer chart versions (needs outbound HTTP; false for air-gapped)
   use_helm_repos: true            # also use the repos you added with `helm repo add` (repositories.yaml, incl. their
                                   # username/password, CA/client certs); helm's cached index is used when a fetch fails
-  repos:                          # extra name -> Helm repo URL (no credentials); index.yaml is fetched hourly
-    # bitnami: https://charts.bitnami.com/bitnami
-    # rancher-stable: https://releases.rancher.com/server-charts/stable
+  repos:                          # extra name -> Helm repo URL (no credentials) for repos not in your helm CLI list;
+                                  # index.yaml is fetched hourly. Same-named charts in several repos are only matched
+                                  # when the index entry's home/sources agree with the installed Chart.yaml
+    # harbor-lib: https://harbor.example.com/chartrepo/library
   timeout: 15s
 
 logs:
   lines: 400                      # journalctl -n per node
   since: "-24h"                   # journalctl --since
+
+perf:                             # the tool's own footprint (docs/PERFORMANCE.md; P shows it live)
+  log: ""                         # JSONL file, one record per refresh (--perf-log): API req/bytes, remote CPU per probe, local CPU
+  pprof: ""                       # net/http/pprof listen address, e.g. 127.0.0.1:6060 (--pprof)
+  watch_cache: true               # list with resourceVersion=0: served from the apiserver watch cache, no etcd quorum read
+  protobuf: true                  # protobuf instead of JSON for typed lists (3-4x fewer bytes, cheaper for the apiserver)
+  discovery_ttl: 5m               # cache API discovery + CRD definitions between refreshes (0 = every cycle)
+  configz_ttl: 10m                # cache the per-node kubelet configz (0 = every cycle)
 
 actions:
   enabled: true                   # Helm tab: u = helm upgrade, b = helm rollback (always confirmed); --read-only disables

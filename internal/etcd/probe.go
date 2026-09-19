@@ -6,6 +6,7 @@
 package etcd
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"k8s-health-tui/internal/config"
+	"k8s-health-tui/internal/perf"
 )
 
 // Probe is the result of probing etcd on one node.
@@ -23,6 +25,11 @@ type Probe struct {
 	Collected time.Time
 	Duration  time.Duration
 	Err       error
+
+	// Cost is what this probe cost the node (PERF section) and the session.
+	Cost       perf.RemoteCost
+	OutBytes   int
+	ScriptSize int
 
 	Dist       string
 	Hostname   string
@@ -50,9 +57,10 @@ type Probe struct {
 	DataDirFS     *FS
 
 	// on-disk raft evidence, readable even when etcd is down (power outage)
-	LocalMemberID string        // this node's member id from its own etcd log
-	LeaderEvents  []LeaderEvent // leader elections seen in the local etcd log, oldest first
-	Raft          *RaftOnDisk
+	LocalMemberID    string        // this node's member id from its own etcd log
+	LeaderEvents     []LeaderEvent // leader elections seen in the local etcd log, oldest first
+	LeaderLogSkipped bool          // the log scan was skipped this cycle (healthy member, not a full cycle)
+	Raft             *RaftOnDisk
 
 	SnapshotDirs []SnapshotDir
 	BackupHints  []string
@@ -161,8 +169,10 @@ var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9_./:@%=+,-]`)
 
 func clean(s string) string { return unsafeChars.ReplaceAllString(s, "") }
 
-// Script renders the probe script with config overrides.
-func Script(cfg config.Etcd) string {
+// Script renders the probe script with config overrides. full=true also
+// scans the etcd container log for leader elections on healthy members
+// (done every cycle on unhealthy ones); see LEADERLOG in scripts/probe.sh.
+func Script(cfg config.Etcd, full bool) string {
 	dirs := make([]string, 0, len(cfg.BackupDirs))
 	for _, d := range cfg.BackupDirs {
 		if c := clean(d); c != "" {
@@ -175,183 +185,21 @@ func Script(cfg config.Etcd) string {
 	s = strings.ReplaceAll(s, "__CA__", clean(cfg.CACert))
 	s = strings.ReplaceAll(s, "__CERT__", clean(cfg.ClientCert))
 	s = strings.ReplaceAll(s, "__KEY__", clean(cfg.ClientKey))
+	s = strings.ReplaceAll(s, "__FULL__", map[bool]string{true: "1", false: "0"}[full])
+	// PERF footer goes before the END marker the parsers look for
+	s = strings.Replace(s, "\nsec END\n", perf.Footer+"sec END\n", 1)
 	return s
 }
 
-const script = `
-sec() { printf '\n===%s\n' "$1"; }
-export LC_ALL=C
-EXTRA_DIRS='__EXTRA_DIRS__'
-EP_OVERRIDE='__EP__'; CA_OVERRIDE='__CA__'; CERT_OVERRIDE='__CERT__'; KEY_OVERRIDE='__KEY__'
-DIST=unknown; CA=; CERT=; KEY=; EP=https://127.0.0.1:2379; CRICTL=; CRI_EP=; DATADIR=; SNAPDIR=; ETCDCTL=
-H=$(hostname)
-# rke2/k3s data-dir may be customised in config.yaml
-RKE2_DD=/var/lib/rancher/rke2; K3S_DD=/var/lib/rancher/k3s
-for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml; do
-  [ -f "$f" ] || continue
-  v=$(sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' "$f" | tail -1 | sed 's/[[:space:]]*$//')
-  [ -n "$v" ] && RKE2_DD=$v
-done
-for f in /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do
-  [ -f "$f" ] || continue
-  v=$(sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' "$f" | tail -1 | sed 's/[[:space:]]*$//')
-  [ -n "$v" ] && K3S_DD=$v
-done
-if [ -d "$RKE2_DD/server/tls/etcd" ]; then
-  DIST=rke2
-  CA=$RKE2_DD/server/tls/etcd/server-ca.crt
-  CERT=$RKE2_DD/server/tls/etcd/server-client.crt
-  KEY=$RKE2_DD/server/tls/etcd/server-client.key
-  CRICTL=$RKE2_DD/bin/crictl
-  CRI_EP=unix:///run/k3s/containerd/containerd.sock
-  DATADIR=$RKE2_DD/server/db/etcd
-  SNAPDIR=$RKE2_DD/server/db/snapshots
-elif [ -d "$K3S_DD/server/tls/etcd" ]; then
-  DIST=k3s
-  CA=$K3S_DD/server/tls/etcd/server-ca.crt
-  CERT=$K3S_DD/server/tls/etcd/server-client.crt
-  KEY=$K3S_DD/server/tls/etcd/server-client.key
-  DATADIR=$K3S_DD/server/db/etcd
-  SNAPDIR=$K3S_DD/server/db/snapshots
-elif [ -d /etc/kubernetes/pki/etcd ]; then
-  DIST=kubeadm
-  CA=/etc/kubernetes/pki/etcd/ca.crt
-  if [ -f /etc/kubernetes/pki/etcd/healthcheck-client.crt ]; then
-    CERT=/etc/kubernetes/pki/etcd/healthcheck-client.crt; KEY=/etc/kubernetes/pki/etcd/healthcheck-client.key
-  elif [ -f /etc/kubernetes/pki/apiserver-etcd-client.crt ]; then
-    CERT=/etc/kubernetes/pki/apiserver-etcd-client.crt; KEY=/etc/kubernetes/pki/apiserver-etcd-client.key
-  fi
-  CRICTL=$(command -v crictl 2>/dev/null)
-  for s in /run/containerd/containerd.sock /var/run/crio/crio.sock /run/cri-dockerd.sock; do [ -S "$s" ] && { CRI_EP="unix://$s"; break; }; done
-  DATADIR=/var/lib/etcd
-  DD=$(grep -o -- '--data-dir=[^ "]*' /etc/kubernetes/manifests/etcd.yaml 2>/dev/null | head -1 | cut -d= -f2)
-  [ -n "$DD" ] && DATADIR=$DD
-elif [ -f /etc/ssl/etcd/ssl/ca.pem ]; then
-  DIST=kubespray
-  CA=/etc/ssl/etcd/ssl/ca.pem
-  for n in "admin-$H" "node-$H" "member-$H"; do
-    if [ -f "/etc/ssl/etcd/ssl/$n.pem" ]; then CERT="/etc/ssl/etcd/ssl/$n.pem"; KEY="/etc/ssl/etcd/ssl/$n-key.pem"; break; fi
-  done
-  DATADIR=/var/lib/etcd
-fi
-[ -n "$EP_OVERRIDE" ] && EP=$EP_OVERRIDE
-[ -n "$CA_OVERRIDE" ] && CA=$CA_OVERRIDE
-[ -n "$CERT_OVERRIDE" ] && CERT=$CERT_OVERRIDE
-[ -n "$KEY_OVERRIDE" ] && KEY=$KEY_OVERRIDE
-command -v etcdctl >/dev/null 2>&1 && ETCDCTL=$(command -v etcdctl)
-
-sec DIST; echo "$DIST"
-sec HOST; echo "$H"
-sec PATHS
-echo "ca=$CA"; echo "cert=$CERT"; echo "key=$KEY"; echo "endpoint=$EP"; echo "datadir=$DATADIR"
-for f in "$CA" "$CERT" "$KEY"; do [ -n "$f" ] && [ ! -r "$f" ] && echo "missing=$f"; done
-[ -n "$CRICTL" ] && [ ! -x "$CRICTL" ] && echo "missing=$CRICTL"
-sec SOURCE
-[ -f "$RKE2_DD/agent/pod-manifests/etcd.yaml" ] && echo "static-pod $RKE2_DD/agent/pod-manifests/etcd.yaml"
-[ -f /etc/kubernetes/manifests/etcd.yaml ] && echo "static-pod /etc/kubernetes/manifests/etcd.yaml"
-if [ "$(systemctl show -p LoadState --value etcd 2>/dev/null)" = loaded ]; then echo "systemd etcd.service ($(systemctl is-active etcd 2>/dev/null))"; fi
-[ "$DIST" = k3s ] && echo "embedded k3s etcd (in-process)"
-for m in /etc/kubernetes/manifests/kube-apiserver.yaml "$RKE2_DD/agent/pod-manifests/kube-apiserver.yaml"; do
-  [ -f "$m" ] && grep -o -- '--etcd-servers=[^ "]*' "$m" 2>/dev/null | head -1 | sed "s|^|apiserver $m: |"
-done
-if [ "$DIST" = rke2 ] || [ "$DIST" = k3s ]; then
-  for f in /etc/rancher/$DIST/config.yaml /etc/rancher/$DIST/config.yaml.d/*.yaml; do [ -f "$f" ] && echo "$DIST-config $f"; done
-  [ -f "$DATADIR/config" ] && echo "etcd-config $DATADIR/config (generated by $DIST)"
-fi
-for f in /etc/etcd/etcd.conf /etc/etcd/etcd.conf.yml /etc/etcd/etcd.conf.yaml /etc/etcd.env /etc/default/etcd /etc/sysconfig/etcd; do [ -f "$f" ] && echo "etcd-config $f"; done
-sec RKE2CONFIG
-if [ "$DIST" = rke2 ] || [ "$DIST" = k3s ]; then
-  for f in /etc/rancher/$DIST/config.yaml /etc/rancher/$DIST/config.yaml.d/*.yaml; do
-    [ -f "$f" ] || continue
-    grep -E '^[[:space:]]*(etcd-|cluster-init|disable-etcd|server:|profile:|secrets-encryption)' "$f" 2>/dev/null | grep -viE 'token' | sed -E -e "s/^([[:space:]]*[^:]*(access-key|secret-key)[^:]*:)[[:space:]]*(\"\"|'')[[:space:]]*$/\1/" -e 's/^([[:space:]]*[^:]*(access-key|secret-key)[^:]*:)[[:space:]]*[^[:space:]#].*/\1 <set>/' | sed "s|^|$f: |"
-  done
-fi
-sec CONFIGDUMP
-dump() { [ -f "$1" ] || return; echo "--- $1"; grep -viE 'token|password|secret-key|access-key' "$1" 2>/dev/null | head -200; }
-if [ "$DIST" = rke2 ] || [ "$DIST" = k3s ]; then dump "$DATADIR/config"; fi
-if [ -f /etc/kubernetes/manifests/etcd.yaml ]; then echo "--- /etc/kubernetes/manifests/etcd.yaml (args)"; grep -E '^[[:space:]]*- --|image:' /etc/kubernetes/manifests/etcd.yaml; fi
-if [ -f "$RKE2_DD/agent/pod-manifests/etcd.yaml" ]; then echo "--- $RKE2_DD/agent/pod-manifests/etcd.yaml (args)"; grep -E '^[[:space:]]*- --|image:' "$RKE2_DD/agent/pod-manifests/etcd.yaml"; fi
-for f in /etc/etcd/etcd.conf /etc/etcd/etcd.conf.yml /etc/etcd/etcd.conf.yaml /etc/etcd.env /etc/default/etcd /etc/sysconfig/etcd; do dump "$f"; done
-if [ "$(systemctl show -p LoadState --value etcd 2>/dev/null)" = loaded ]; then echo "--- systemctl cat etcd"; systemctl cat etcd 2>/dev/null | grep -E '^(ExecStart|Environment|EnvironmentFile|User|WorkingDirectory)'; fi
-CURL="curl -sS -m 8"
-[ -n "$CA" ] && CURL="$CURL --cacert $CA"
-[ -n "$CERT" ] && CURL="$CURL --cert $CERT --key $KEY"
-sec HEALTH
-if command -v curl >/dev/null 2>&1; then $CURL "$EP/health" 2>&1; else echo "curl-missing"; fi
-sec METRICS
-command -v curl >/dev/null 2>&1 && $CURL "$EP/metrics" 2>/dev/null | grep -E '^(etcd_server_has_leader|etcd_server_is_leader|etcd_server_leader_changes_seen_total|etcd_mvcc_db_total_size_in_bytes|etcd_mvcc_db_total_size_in_use_in_bytes|etcd_server_quota_backend_bytes|etcd_disk_wal_fsync_duration_seconds_(sum|count)|etcd_disk_backend_commit_duration_seconds_(sum|count)|etcd_server_proposals_failed_total|etcd_server_proposals_pending|etcd_server_slow_apply_total|etcd_server_slow_read_indexes_total|etcd_server_version|etcd_cluster_version|etcd_debugging_mvcc_keys_total|etcd_server_snapshot_apply_in_progress_total|etcd_network_peer_round_trip_time_seconds_(sum|count)|etcd_server_health_failures|etcd_server_read_indexes_failed_total)'
-sec ETCDCTL
-CID=; DIAG=
-if [ -z "$ETCDCTL" ] && [ -n "$CRICTL" ] && [ -x "$CRICTL" ] && [ -n "$CRI_EP" ]; then
-  CID=$("$CRICTL" -r "$CRI_EP" ps -q --name '^etcd$' 2>/dev/null | head -1)
-  if [ -z "$CID" ]; then
-    PID=$("$CRICTL" -r "$CRI_EP" pods -q --name '^etcd-' 2>/dev/null | head -1)
-    [ -n "$PID" ] && CID=$("$CRICTL" -r "$CRI_EP" ps -q --pod "$PID" 2>/dev/null | head -1)
-  fi
-  [ -z "$CID" ] && DIAG="no running etcd container found via $CRICTL -r $CRI_EP"
-elif [ -z "$ETCDCTL" ]; then
-  DIAG="no etcdctl on host and no usable crictl (crictl=$CRICTL cri=$CRI_EP)"
-fi
-run_ctl() {
-  if [ -n "$ETCDCTL" ]; then ETCDCTL_API=3 "$ETCDCTL" --endpoints="$EP" --cacert="$CA" --cert="$CERT" --key="$KEY" "$@" 2>&1
-  elif [ -n "$CID" ]; then "$CRICTL" -r "$CRI_EP" exec "$CID" etcdctl --endpoints="$EP" --cacert="$CA" --cert="$CERT" --key="$KEY" "$@" 2>&1
-  fi
-}
-GW=
-if [ -n "$ETCDCTL" ]; then echo "via=host $ETCDCTL"; elif [ -n "$CID" ]; then echo "via=crictl $CID"; else echo "via=grpc-gateway"; GW=1; fi
-[ -n "$DIAG" ] && echo "diag=$DIAG"
-if [ -z "$GW" ]; then
-  echo "---MEMBERS"; run_ctl member list -w json
-  echo; echo "---STATUS"; run_ctl endpoint status --cluster -w json
-  echo; echo "---ALARMS"; run_ctl alarm list -w json
-  echo
-fi
-if [ -n "$GW" ] && command -v curl >/dev/null 2>&1; then
-  # etcd gRPC gateway: same certs as /health, no etcdctl needed
-  echo "---MEMBERS"; $CURL -X POST "$EP/v3/cluster/member/list" -H 'Content-Type: application/json' -d '{}' 2>&1
-  echo; echo "---GWSTATUS"; $CURL -X POST "$EP/v3/maintenance/status" -H 'Content-Type: application/json' -d '{}' 2>&1
-  echo; echo "---GWALARMS"; $CURL -X POST "$EP/v3/maintenance/alarm" -H 'Content-Type: application/json' -d '{"action":"GET"}' 2>&1
-  echo
-fi
-sec LEADERLOG
-LOGRE='became leader at term|elected leader|changed leader from'
-ETCDLOGS=$(ls -tr /var/log/pods/kube-system_etcd-*/etcd/* 2>/dev/null)
-if [ -n "$ETCDLOGS" ]; then
-  echo "source=/var/log/pods/kube-system_etcd-*/etcd"
-  cat $ETCDLOGS 2>/dev/null | grep -oE '"local-member-id":"[0-9a-f]+"' | tail -1 | cut -d'"' -f4 | sed 's/^/local-member-id=/'
-  cat $ETCDLOGS 2>/dev/null | grep -E "$LOGRE" | tail -30
-elif [ "$DIST" = k3s ]; then
-  echo "source=journalctl -u k3s"
-  journalctl -u k3s -q --no-pager -n 50000 -o short-iso 2>/dev/null | grep -oE '"local-member-id":"[0-9a-f]+"|local-member-id=[0-9a-f]+' | tail -1 | grep -oE '[0-9a-f]{16}' | sed 's/^/local-member-id=/'
-  journalctl -u k3s -q --no-pager -n 50000 -o short-iso 2>/dev/null | grep -E "$LOGRE" | tail -30
-elif [ "$(systemctl show -p LoadState --value etcd 2>/dev/null)" = loaded ]; then
-  echo "source=journalctl -u etcd"
-  journalctl -u etcd -q --no-pager -n 50000 -o short-iso 2>/dev/null | grep -oE '"local-member-id":"[0-9a-f]+"' | tail -1 | cut -d'"' -f4 | sed 's/^/local-member-id=/'
-  journalctl -u etcd -q --no-pager -n 50000 -o short-iso 2>/dev/null | grep -E "$LOGRE" | tail -30
-fi
-sec RAFT
-[ -d "$DATADIR/member/snap" ] && ls "$DATADIR/member/snap"/*.snap 2>/dev/null | sort | tail -1 | sed 's|^|snap=|'
-[ -d "$DATADIR/member/wal" ] && stat -c '%Y %n' "$DATADIR/member/wal"/*.wal 2>/dev/null | sort -n | tail -1 | sed 's|^|wal=|'
-sec DATADIR
-echo "$DATADIR"
-[ -d "$DATADIR" ] && du -sk "$DATADIR" 2>/dev/null | cut -f1
-[ -d "$DATADIR" ] && df -Pk "$DATADIR" 2>/dev/null | tail -1
-sec SNAPSHOTS
-for d in $SNAPDIR $EXTRA_DIRS /var/lib/etcd-backup /var/lib/etcd/backup /var/backups/etcd /opt/etcd-backup /opt/etcd/backup /backup/etcd /var/lib/rancher/rke2/server/db/snapshots /var/lib/rancher/k3s/server/db/snapshots; do
-  [ -d "$d" ] || continue
-  echo "--- $d"
-  for f in "$d"/*; do [ -f "$f" ] && stat -c '%s|%Y|%n' "$f" 2>/dev/null; done
-done
-sec BACKUPHINTS
-systemctl list-timers --all --no-pager --no-legend 2>/dev/null | grep -i etcd | sed 's/^/timer: /'
-grep -rlisE 'etcd' /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/crontab /var/spool/cron 2>/dev/null | sed 's/^/cron: /'
-sec END
-`
+//go:embed scripts/probe.sh
+var script string
 
 // Parse converts the script output into a Probe.
 func Parse(node, out string) *Probe {
 	p := &Probe{Node: node, Collected: time.Now(), RKE2Config: map[string]string{}, Raw: out}
 	secs := splitSections(out)
+	p.OutBytes = len(out)
+	p.Cost = perf.ParseSection(secs["PERF"])
 	p.Dist = strings.TrimSpace(secs["DIST"])
 	p.Hostname = strings.TrimSpace(secs["HOST"])
 	for _, l := range lines(secs["PATHS"]) {
@@ -452,6 +300,10 @@ func parseLeaderLog(p *Probe, raw string) {
 		if strings.HasPrefix(l, "source=") {
 			continue
 		}
+		if l == "skipped=healthy" {
+			p.LeaderLogSkipped = true
+			return
+		}
 		if strings.HasPrefix(l, "local-member-id=") {
 			p.LocalMemberID = strings.TrimPrefix(l, "local-member-id=")
 			continue
@@ -507,6 +359,20 @@ func parseRaft(raw string) *RaftOnDisk {
 		}
 	}
 	return r
+}
+
+// MergeLeaderLog carries the previous probe's leader-log facts forward when
+// this probe skipped the scan (healthy member on a light cycle).
+func (p *Probe) MergeLeaderLog(prev *Probe) {
+	if prev == nil || !p.LeaderLogSkipped {
+		return
+	}
+	if p.LocalMemberID == "" {
+		p.LocalMemberID = prev.LocalMemberID
+	}
+	if len(p.LeaderEvents) == 0 {
+		p.LeaderEvents = prev.LeaderEvents
+	}
 }
 
 // LastLeader returns the most recent leader election this node's log knows

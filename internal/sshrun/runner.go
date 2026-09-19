@@ -28,25 +28,36 @@ type Runner struct {
 	hostKey ssh.HostKeyCallback
 	notes   []string
 
-	mu       sync.Mutex
-	clients  map[string]*ssh.Client
-	bastion  *ssh.Client
-	sem      chan struct{}
-	sudoPass bool // sudo needed a password on at least one host; use sudo -S from now on
+	mu      sync.Mutex
+	clients map[string]*ssh.Client
+	bastion *ssh.Client
+	sem     chan struct{}
+	become  map[string]becomeMethod // per host: how to run as root (see become.go)
 }
 
 // Result is the outcome of running a script on a node.
 type Result struct {
-	Stdout   string
-	Stderr   string
-	Err      error
-	Started  time.Time
-	Finished time.Time
+	Stdout     string
+	Stderr     string
+	Err        error
+	Started    time.Time
+	Finished   time.Time
+	ScriptSize int // bytes sent on stdin (prologue included)
 }
+
+// Prologue is prepended to every script when ssh.nice is on: the probe and
+// everything it spawns run at the lowest CPU priority and in the lowest
+// best-effort I/O class, so on a node that is already struggling the
+// collection yields to the workloads and to etcd/kubelet instead of
+// competing with them. Idle I/O class (-c 3) is deliberately not used: on a
+// saturated disk it can starve the probe past its timeout, which loses the
+// data exactly when it matters.
+const Prologue = "command -v renice >/dev/null 2>&1 && renice -n 19 -p $$ >/dev/null 2>&1\n" +
+	"command -v ionice >/dev/null 2>&1 && ionice -c 2 -n 7 -p $$ >/dev/null 2>&1\n"
 
 // New prepares authentication and host key verification. It does not connect.
 func New(cfg config.SSH) (*Runner, error) {
-	r := &Runner{cfg: cfg, clients: map[string]*ssh.Client{}, sem: make(chan struct{}, cfg.Concurrency)}
+	r := &Runner{cfg: cfg, clients: map[string]*ssh.Client{}, become: map[string]becomeMethod{}, sem: make(chan struct{}, cfg.Concurrency)}
 	if cfg.User == "" {
 		return nil, errors.New("ssh user is not set (ssh.user / --ssh-user)")
 	}
@@ -241,11 +252,31 @@ func (r *Runner) drop(host string) {
 		c.Close()
 		delete(r.clients, addr)
 	}
+	delete(r.become, addr)
 	r.mu.Unlock()
 }
 
+// Become reports how the runner escalates on a host once it has been
+// probed ("root", "sudo (NOPASSWD)", "dzdo (password)", ...), or "".
+func (r *Runner) Become(host string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if m, ok := r.become[r.addr(host)]; ok {
+		return m.String()
+	}
+	return ""
+}
+
+func (r *Runner) addr(host string) string {
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		return net.JoinHostPort(host, strconv.Itoa(r.cfg.Port))
+	}
+	return host
+}
+
 // Run executes a POSIX sh script on the host (via stdin, so no quoting
-// issues), optionally under passwordless sudo.
+// issues) as root, escalating with sudo / dzdo / doas as the host allows
+// (see become.go).
 func (r *Runner) Run(ctx context.Context, host, script string) Result {
 	select {
 	case r.sem <- struct{}{}:
@@ -254,6 +285,9 @@ func (r *Runner) Run(ctx context.Context, host, script string) Result {
 	}
 	defer func() { <-r.sem }()
 
+	if r.cfg.Nice {
+		script = Prologue + script
+	}
 	res := r.runOnce(ctx, host, script)
 	if res.Err != nil && isConnErr(res.Err) {
 		// stale cached connection: reconnect once
@@ -264,7 +298,7 @@ func (r *Runner) Run(ctx context.Context, host, script string) Result {
 }
 
 func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
-	res := Result{Started: time.Now()}
+	res := Result{Started: time.Now(), ScriptSize: len(script)}
 	c, err := r.client(host)
 	if err != nil {
 		res.Err = err
@@ -279,22 +313,30 @@ func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
 	}
 	defer sess.Close()
 
+	// how to become root on this host (probed once, cached until reconnect)
+	addr := r.addr(host)
+	r.mu.Lock()
+	method, known := r.become[addr]
+	r.mu.Unlock()
+	if !known {
+		method, err = r.detectBecome(ctx, c)
+		if err != nil {
+			res.Err = err
+			res.Finished = time.Now()
+			return res
+		}
+		r.mu.Lock()
+		r.become[addr] = method
+		r.mu.Unlock()
+	}
+	cmd, needPass := method.command()
+
 	var stdout, stderr bytes.Buffer
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
 	sess.Stdin = strings.NewReader(script)
-
-	cmd := "/bin/sh -s"
-	if r.cfg.Sudo && r.cfg.User != "root" {
-		cmd = "sudo -n /bin/sh -s"
-		r.mu.Lock()
-		usePass := r.sudoPass
-		r.mu.Unlock()
-		if usePass {
-			// sudo needs a password on this host: feed it on stdin ahead of the script
-			cmd = "sudo -S -p '' /bin/sh -s"
-			sess.Stdin = strings.NewReader(r.cfg.Password + "\n" + script)
-		}
+	if needPass {
+		sess.Stdin = strings.NewReader(r.becomePassword() + "\n" + script)
 	}
 	res.Started = time.Now()
 	done := make(chan error, 1)
@@ -310,18 +352,13 @@ func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
 	res.Stdout = stdout.String()
 	res.Stderr = stderr.String()
 	if err != nil {
-		if strings.Contains(res.Stderr, "sudo") && strings.Contains(res.Stderr, "password") {
+		if method.tool != "" && strings.Contains(strings.ToLower(res.Stderr), "password") {
+			// the cached method stopped working (sudo timestamp policy changed,
+			// password rotated): probe again on the next call
 			r.mu.Lock()
-			retry := r.cfg.Password != "" && !r.sudoPass
-			if retry {
-				r.sudoPass = true
-			}
+			delete(r.become, addr)
 			r.mu.Unlock()
-			if retry {
-				// retry once with the SSH password fed to sudo -S
-				return r.runOnce(ctx, host, script)
-			}
-			err = fmt.Errorf("sudo requires a password (configure NOPASSWD, use --ask-pass, or ssh.sudo: false)")
+			err = fmt.Errorf("%s: %s (escalation will be re-probed)", method, firstLine(res.Stderr))
 		}
 		res.Err = err
 	}

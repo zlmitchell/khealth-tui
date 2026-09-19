@@ -122,6 +122,9 @@ func (b *OSBenchmark) String() string { return b.Name + " " + b.Version }
 // OVAL) check is reported Manual when its automated part passes, because
 // only part of it was verified.
 func evalTemplated(info *nodeinfo.Info, rule stigdata.Rule) (Status, string) {
+	if !info.STIGProbed {
+		return Manual, "node probe has no OS STIG facts (collected by an older probe?)"
+	}
 	var fails, manuals, custom []string
 	passes, nas := 0, 0
 	for i, c := range rule.Checks {

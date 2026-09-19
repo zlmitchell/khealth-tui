@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"k8s-health-tui/internal/perf"
 )
 
 // Info is everything collected from one node.
@@ -16,6 +18,17 @@ type Info struct {
 	Duration  time.Duration
 	Err       error
 	Heavy     bool
+	STIGRun   bool // this probe included the OS STIG sections (cost accounting)
+	// ConfigProbed: the config tier (certs, sysctls, perms, slow hardening
+	// facts, rke2/k3s config, manifests, registries) is present, from this
+	// probe or carried forward from an earlier one by MergeConfig.
+	ConfigProbed    bool
+	ConfigCollected time.Time
+
+	// Cost is what this probe cost the node (PERF section) and the session.
+	Cost       perf.RemoteCost
+	OutBytes   int // script output size
+	ScriptSize int // script size sent
 
 	Hostname, Kernel, Arch string
 	Uptime                 time.Duration
@@ -72,7 +85,8 @@ type Info struct {
 	STIGStat       map[string]Perm
 	STIGViol       map[string][]string // check id -> violating paths (find scans)
 	STIGFiles      []ConfigFile        // config files the templates read (masked)
-	STIGProbed     bool                // probe sections present (newer script)
+	STIGProbed     bool                // OS STIG facts present (collected by this or a previous probe)
+	STIGCollected  time.Time           // when the OS STIG facts were collected
 
 	// heavy
 	Images     []Image
@@ -210,6 +224,8 @@ type Tarball struct {
 func Parse(node, host, out string, sentAt time.Time) *Info {
 	info := &Info{Node: node, Host: host, Collected: time.Now(), KubeletFlags: map[string]string{}, Sysctl: map[string]string{}, Settings: map[string]string{}, Hardening: map[string]string{}}
 	secs := splitSections(out)
+	info.OutBytes = len(out)
+	info.Cost = perf.ParseSection(secs["PERF"])
 
 	if v := strings.TrimSpace(secs["TIME"]); v != "" {
 		if f, err := strconv.ParseFloat(strings.TrimSuffix(v, "N"), 64); err == nil {
@@ -259,12 +275,19 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 			info.Units = append(info.Units, u)
 		}
 	}
-	if lines := nonEmpty(secs["NTP"]); len(lines) > 0 {
-		b := lines[0] == "yes"
-		info.NTPSynced = &b
-		if len(lines) > 1 {
-			e := lines[1] == "yes"
-			info.NTPEnabled = &e
+	for idx, l := range nonEmpty(secs["NTP"]) {
+		// "NTPSynchronized=yes" / "NTP=yes" (one timedatectl call); older
+		// probes printed the bare values in that order
+		k, v, ok := strings.Cut(l, "=")
+		if !ok {
+			k, v = map[int]string{0: "NTPSynchronized", 1: "NTP"}[idx], l
+		}
+		b := strings.TrimSpace(v) == "yes"
+		switch k {
+		case "NTPSynchronized":
+			info.NTPSynced = &b
+		case "NTP":
+			info.NTPEnabled = &b
 		}
 	}
 	dist := nonEmpty(secs["DIST"])
@@ -342,6 +365,10 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 				info.Hardening[k] = v
 			}
 		}
+	}
+	if _, ok := secs["CERTS"]; ok || info.Hardening["config_probed"] == "yes" {
+		info.ConfigProbed, info.ConfigCollected = true, info.Collected
+		delete(info.Hardening, "config_probed")
 	}
 	for _, l := range nonEmpty(secs["DATADIR"]) {
 		if k, v, ok := strings.Cut(l, "="); ok && v != "" {
@@ -678,6 +705,7 @@ func parseOSStig(info *Info, secs map[string]string) {
 		return
 	}
 	info.STIGProbed = true
+	info.STIGCollected = info.Collected
 	info.SysctlAll = map[string]string{}
 	for _, l := range nonEmpty(secs["SYSCTLALL"]) {
 		if k, v, ok := strings.Cut(l, "="); ok {
@@ -1154,6 +1182,42 @@ func (i *Info) TarballKeys() []string {
 
 // MergeHeavy copies heavy-mode results from a previous collection when the
 // current one did not include them.
+// MergeSTIG carries the OS STIG facts of a previous collection into this
+// one when the probe did not re-collect them (they are gathered on the first
+// collection and on demand, not every cycle).
+func (i *Info) MergeSTIG(prev *Info) {
+	if i.STIGProbed || prev == nil || !prev.STIGProbed {
+		return
+	}
+	i.STIGProbed, i.STIGCollected = true, prev.STIGCollected
+	i.SysctlAll, i.Packages, i.UnitFiles, i.UnitStates = prev.SysctlAll, prev.Packages, prev.UnitFiles, prev.UnitStates
+	i.Findmnt, i.Fstab, i.SSHD = prev.Findmnt, prev.Fstab, prev.SSHD
+	i.AuditRules, i.AuditRuleFiles, i.Modprobe, i.LoadedModules, i.GrubArgs = prev.AuditRules, prev.AuditRuleFiles, prev.Modprobe, prev.LoadedModules, prev.GrubArgs
+	i.STIGStat, i.STIGViol, i.STIGFiles = prev.STIGStat, prev.STIGViol, prev.STIGFiles
+}
+
+// MergeConfig carries the config tier forward from the previous probe when
+// this one ran without it (light cycle). Hardening keys the live part
+// printed win; the slow ones (fips_setup, secureboot, audit_rules, ...) are
+// copied.
+func (i *Info) MergeConfig(prev *Info) {
+	if i.ConfigProbed || prev == nil || !prev.ConfigProbed {
+		return
+	}
+	i.ConfigProbed, i.ConfigCollected = true, prev.ConfigCollected
+	i.Certs, i.Sysctl, i.Perms = prev.Certs, prev.Sysctl, prev.Perms
+	i.ConfigFiles, i.ExtraFiles, i.Manifests, i.StaticPods, i.Settings = prev.ConfigFiles, prev.ExtraFiles, prev.Manifests, prev.StaticPods, prev.Settings
+	i.CNI, i.Registries, i.RegistryMirrors, i.ContainerdHosts, i.ContainerdConfig = prev.CNI, prev.Registries, prev.RegistryMirrors, prev.ContainerdHosts, prev.ContainerdConfig
+	if i.Hardening == nil {
+		i.Hardening = map[string]string{}
+	}
+	for k, v := range prev.Hardening {
+		if _, ok := i.Hardening[k]; !ok {
+			i.Hardening[k] = v
+		}
+	}
+}
+
 func (i *Info) MergeHeavy(prev *Info) {
 	if prev == nil || i.Heavy {
 		if prev != nil && i.Heavy {

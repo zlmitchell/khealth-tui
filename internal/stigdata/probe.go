@@ -179,10 +179,27 @@ func ProbeScript() string {
 		b.WriteString("done\n")
 	}
 	b.WriteString("sec STIGVIOL\n")
+	// The RHEL 8/9/10 and Ubuntu rule sets ask for the same scans under
+	// different rule ids; run each (dir, expression) once and print a VIOL
+	// line per id that shares it. Cuts the find calls by ~4x.
+	type key struct{ dir, expr string }
+	ids := map[key][]string{}
+	var order []key
 	for _, s := range d.Scans {
 		for _, dir := range s.Dirs {
-			fmt.Fprintf(&b, "[ -d '%s' ] && timeout 20 find '%s' -xdev %s 2>/dev/null | head -20 | sed 's#^#VIOL|%s|#'\n", dir, dir, s.Expr, s.ID)
+			k := key{dir, s.Expr}
+			if _, ok := ids[k]; !ok {
+				order = append(order, k)
+			}
+			ids[k] = append(ids[k], s.ID)
 		}
+	}
+	for _, k := range order {
+		var awk []string
+		for _, id := range ids[k] {
+			awk = append(awk, fmt.Sprintf(`print "VIOL|%s|"$0`, id))
+		}
+		fmt.Fprintf(&b, "[ -d '%s' ] && timeout 20 find '%s' -xdev %s 2>/dev/null | head -20 | awk '{%s}'\n", k.dir, k.dir, k.expr, strings.Join(awk, "; "))
 	}
 	b.WriteString("sec STIGFILES\n")
 	b.WriteString("for f in " + strings.Join(d.Dumps, " ") + "; do\n")

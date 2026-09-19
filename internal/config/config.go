@@ -3,6 +3,7 @@
 package config
 
 import (
+	_ "embed"
 	"flag"
 	"fmt"
 	"os"
@@ -29,7 +30,26 @@ type Config struct {
 	Actions    Actions    `yaml:"actions"`
 	Thresholds Thresholds `yaml:"thresholds"`
 
+	// Perf tunes and records the tool's own footprint (docs/PERFORMANCE.md).
+	Perf Perf `yaml:"perf"`
+
 	Diag bool `yaml:"-"` // --diag: print API/permission diagnostics and exit
+}
+
+// Perf configures footprint measurement and the API-side load reducers.
+type Perf struct {
+	Log   string `yaml:"log"`   // JSONL file: one record per refresh cycle (--perf-log)
+	Pprof string `yaml:"pprof"` // listen address for net/http/pprof, e.g. 127.0.0.1:6060 (--pprof)
+	// WatchCache lists with resourceVersion=0 so the apiserver answers from
+	// its watch cache instead of doing a quorum read against etcd per list.
+	WatchCache bool `yaml:"watch_cache"`
+	// Protobuf asks for application/vnd.kubernetes.protobuf on typed lists
+	// (smaller, cheaper for the apiserver to encode than JSON).
+	Protobuf bool `yaml:"protobuf"`
+	// DiscoveryTTL / ConfigzTTL cache API discovery + CRD definitions and the
+	// per-node kubelet configz between refreshes (0 = fetch every cycle).
+	DiscoveryTTL time.Duration `yaml:"discovery_ttl"`
+	ConfigzTTL   time.Duration `yaml:"configz_ttl"`
 }
 
 // Actions configures the (opt-out) mutating operations run through CLIs.
@@ -40,21 +60,39 @@ type Actions struct {
 
 // SSH configures how nodes are reached over SSH.
 type SSH struct {
-	Enabled       bool              `yaml:"enabled"`
-	User          string            `yaml:"user"`
-	Key           string            `yaml:"key"`
-	Password      string            `yaml:"password"` // fallback when public key auth fails (prefer --ask-pass / KHT_SSH_PASSWORD)
-	AskPass       bool              `yaml:"ask_pass"` // prompt for the password at startup
-	Port          int               `yaml:"port"`
-	Sudo          bool              `yaml:"sudo"`
-	Timeout       time.Duration     `yaml:"timeout"`
-	Address       string            `yaml:"address"` // InternalIP | ExternalIP | Hostname
-	Hosts         map[string]string `yaml:"hosts"`   // node name -> address override
-	Nodes         []string          `yaml:"nodes"`   // only collect from these node names (empty = all)
-	Bastion       string            `yaml:"bastion"` // user@host:port
-	StrictHostKey bool              `yaml:"strict_host_key"`
-	KnownHosts    string            `yaml:"known_hosts"`
-	Concurrency   int               `yaml:"concurrency"`
+	Enabled  bool   `yaml:"enabled"`
+	User     string `yaml:"user"`
+	Key      string `yaml:"key"`
+	Password string `yaml:"password"` // fallback when public key auth fails (prefer --ask-pass / KHT_SSH_PASSWORD)
+	AskPass  bool   `yaml:"ask_pass"` // prompt for the password at startup
+	Port     int    `yaml:"port"`
+	// Sudo: false disables privilege escalation entirely (same as become: none).
+	Sudo bool `yaml:"sudo"`
+	// Become is the tool used to run the probes as root when User is not
+	// root: "auto" (default: probe sudo, dzdo, doas in that order and keep
+	// the first that works on each host), "sudo", "dzdo", "doas" or "none".
+	// NOPASSWD is used when granted; otherwise the password (BecomePassword,
+	// then Password / --ask-pass) is fed on stdin for sudo and dzdo (doas
+	// cannot read one).
+	Become string `yaml:"become"`
+	// BecomePassword is the escalation password when it differs from the SSH
+	// password (KHT_BECOME_PASSWORD).
+	BecomePassword string            `yaml:"become_password"`
+	Timeout        time.Duration     `yaml:"timeout"`
+	Address        string            `yaml:"address"` // InternalIP | ExternalIP | Hostname
+	Hosts          map[string]string `yaml:"hosts"`   // node name -> address override
+	Nodes          []string          `yaml:"nodes"`   // only collect from these node names (empty = all)
+	Bastion        string            `yaml:"bastion"` // user@host:port
+	StrictHostKey  bool              `yaml:"strict_host_key"`
+	KnownHosts     string            `yaml:"known_hosts"`
+	Concurrency    int               `yaml:"concurrency"`
+	// Nice runs the probe scripts under renice 19 / ionice best-effort-lowest
+	// so they yield to the node's workloads (see docs/PERFORMANCE.md).
+	Nice bool `yaml:"nice"`
+	// Backoff skips the next cycle for a node whose probe took longer than
+	// half the refresh interval, or whose previous probe is still running,
+	// instead of stacking sessions on a slow node.
+	Backoff bool `yaml:"backoff"`
 }
 
 // Etcd configures etcd probing and backup expectations.
@@ -70,7 +108,6 @@ type Etcd struct {
 // Helm configures Helm release inspection and optional update checks.
 type Helm struct {
 	CheckUpdates bool              `yaml:"check_updates"`
-	ArtifactHub  bool              `yaml:"artifacthub"`
 	Repos        map[string]string `yaml:"repos"`          // name -> repo URL (index.yaml is fetched)
 	UseHelmRepos bool              `yaml:"use_helm_repos"` // also consult the helm CLI's repositories.yaml (with its credentials)
 	Timeout      time.Duration     `yaml:"timeout"`
@@ -114,9 +151,12 @@ func Default() Config {
 			Address:       "InternalIP",
 			StrictHostKey: true,
 			Concurrency:   8,
+			Nice:          true,
+			Backoff:       true,
 		},
+		Perf:    Perf{WatchCache: true, Protobuf: true, DiscoveryTTL: 5 * time.Minute, ConfigzTTL: 10 * time.Minute},
 		Etcd:    Etcd{MaxBackupAge: 24 * time.Hour},
-		Helm:    Helm{Timeout: 15 * time.Second, UseHelmRepos: true},
+		Helm:    Helm{CheckUpdates: true, UseHelmRepos: true, Timeout: 15 * time.Second},
 		Logs:    Logs{Lines: 400, Since: "-24h"},
 		Actions: Actions{Enabled: true, HelmBinary: "helm"},
 		Thresholds: Thresholds{
@@ -148,26 +188,35 @@ func Load(args []string) (Config, error) {
 
 	fs := flag.NewFlagSet("khealth", flag.ContinueOnError)
 	var (
-		cfgPath     = fs.String("config", "", "config file (default: $XDG_CONFIG_HOME/k8s-health-tui/config.yaml or ./k8s-health-tui.yaml)")
-		kubeconfig  = fs.String("kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
-		kctx        = fs.String("context", "", "kubeconfig context to use")
-		ns          = fs.String("n", "", "initial namespace filter (empty = all)")
-		refresh     = fs.Duration("refresh", 0, "refresh interval")
-		sshUser     = fs.String("ssh-user", "", "SSH user for nodes")
-		sshKey      = fs.String("ssh-key", "", "SSH private key file")
-		sshPort     = fs.Int("ssh-port", 0, "SSH port")
-		sshPass     = fs.String("ssh-password", "", "SSH password fallback (prefer --ask-pass or KHT_SSH_PASSWORD; also used for sudo)")
-		askPass     = fs.Bool("ask-pass", false, "prompt for the SSH/sudo password at startup")
-		sshAddr     = fs.String("ssh-address", "", "node address type: InternalIP, ExternalIP or Hostname")
-		bastion     = fs.String("bastion", "", "SSH jump host (user@host[:port])")
-		sshNodes    = fs.String("ssh-nodes", "", "comma-separated node names to collect from (default: all)")
-		noSSH       = fs.Bool("no-ssh", false, "disable SSH collection")
-		noSudo      = fs.Bool("no-sudo", false, "do not use sudo on nodes")
-		insecureHK  = fs.Bool("insecure-host-key", false, "skip SSH host key verification")
-		helmUpdates = fs.Bool("helm-updates", false, "check Helm chart repos / Artifact Hub for newer chart versions")
-		readOnly    = fs.Bool("read-only", false, "disable mutating actions (helm rollback/upgrade)")
-		diag        = fs.Bool("diag", false, "run API/permission diagnostics (nodes/proxy, stats/summary, pods/exec, ...) and exit")
-		showVersion = fs.Bool("version", false, "print version and exit")
+		cfgPath      = fs.String("config", "", "config file (default: $XDG_CONFIG_HOME/k8s-health-tui/config.yaml or ./k8s-health-tui.yaml)")
+		kubeconfig   = fs.String("kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
+		kctx         = fs.String("context", "", "kubeconfig context to use")
+		ns           = fs.String("n", "", "initial namespace filter (empty = all)")
+		refresh      = fs.Duration("refresh", 0, "refresh interval")
+		sshUser      = fs.String("ssh-user", "", "SSH user for nodes")
+		sshKey       = fs.String("ssh-key", "", "SSH private key file")
+		sshPort      = fs.Int("ssh-port", 0, "SSH port")
+		sshPass      = fs.String("ssh-password", "", "SSH password fallback (prefer --ask-pass or KHT_SSH_PASSWORD; also used for sudo)")
+		askPass      = fs.Bool("ask-pass", false, "prompt for the SSH/sudo password at startup")
+		sshAddr      = fs.String("ssh-address", "", "node address type: InternalIP, ExternalIP or Hostname")
+		bastion      = fs.String("bastion", "", "SSH jump host (user@host[:port])")
+		sshNodes     = fs.String("ssh-nodes", "", "comma-separated node names to collect from (default: all)")
+		noSSH        = fs.Bool("no-ssh", false, "disable SSH collection")
+		noSudo       = fs.Bool("no-sudo", false, "do not escalate privileges on nodes (same as --become none)")
+		become       = fs.String("become", "", "privilege escalation on nodes: auto (sudo, dzdo, doas), sudo, dzdo, doas or none")
+		insecureHK   = fs.Bool("insecure-host-key", false, "skip SSH host key verification")
+		helmUpdates  = fs.Bool("helm-updates", true, "check your helm repos / helm.repos for newer chart versions (--helm-updates=false to disable)")
+		readOnly     = fs.Bool("read-only", false, "disable mutating actions (helm rollback/upgrade)")
+		diag         = fs.Bool("diag", false, "run API/permission diagnostics (nodes/proxy, stats/summary, pods/exec, ...) and exit")
+		perfLog      = fs.String("perf-log", "", "append one JSON line per refresh cycle with the tool's own footprint (remote CPU, API bytes, local CPU) to this file")
+		pprofAddr    = fs.String("pprof", "", "serve net/http/pprof on this address (e.g. 127.0.0.1:6060)")
+		noNice       = fs.Bool("no-nice", false, "do not renice/ionice the probe scripts on the nodes")
+		noBackoff    = fs.Bool("no-backoff", false, "do not skip cycles for nodes whose probes are slow or still running")
+		noWatchCache = fs.Bool("no-watch-cache", false, "list with a quorum read (resourceVersion unset) instead of the apiserver watch cache")
+		noProtobuf   = fs.Bool("no-protobuf", false, "use JSON instead of protobuf for typed API lists")
+		showVersion  = fs.Bool("version", false, "print version and exit")
+		initConfig   = fs.Bool("init-config", false, "write the annotated example config to --config (default: the user config path) and exit; never overwrites")
+		printConfig  = fs.Bool("print-config", false, "print the annotated example config to stdout and exit")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "khealth - Kubernetes / RKE2 cluster health TUI\n\nUsage: khealth [flags]\n\n")
@@ -178,6 +227,19 @@ func Load(args []string) (Config, error) {
 	}
 	if *showVersion {
 		fmt.Println("khealth", Version)
+		os.Exit(0)
+	}
+	if *printConfig {
+		fmt.Print(ExampleConfig)
+		os.Exit(0)
+	}
+	if *initConfig {
+		target, err := WriteExampleConfig(*cfgPath)
+		if err != nil {
+			return cfg, err
+		}
+		fmt.Println("wrote", target)
+		fmt.Println("edit it, then run khealth (it is found automatically) or pass --config", target)
 		os.Exit(0)
 	}
 
@@ -231,6 +293,8 @@ func Load(args []string) (Config, error) {
 			cfg.SSH.Enabled = !*noSSH
 		case "no-sudo":
 			cfg.SSH.Sudo = !*noSudo
+		case "become":
+			cfg.SSH.Become = *become
 		case "insecure-host-key":
 			cfg.SSH.StrictHostKey = !*insecureHK
 		case "helm-updates":
@@ -239,10 +303,23 @@ func Load(args []string) (Config, error) {
 			cfg.Actions.Enabled = !*readOnly
 		case "diag":
 			cfg.Diag = *diag
+		case "perf-log":
+			cfg.Perf.Log = *perfLog
+		case "pprof":
+			cfg.Perf.Pprof = *pprofAddr
+		case "no-nice":
+			cfg.SSH.Nice = !*noNice
+		case "no-backoff":
+			cfg.SSH.Backoff = !*noBackoff
+		case "no-watch-cache":
+			cfg.Perf.WatchCache = !*noWatchCache
+		case "no-protobuf":
+			cfg.Perf.Protobuf = !*noProtobuf
 		}
 	})
 
 	cfg.Kubeconfig = expand(cfg.Kubeconfig)
+	cfg.Perf.Log = expand(cfg.Perf.Log)
 	cfg.SSH.Key = expand(cfg.SSH.Key)
 	cfg.SSH.KnownHosts = expand(cfg.SSH.KnownHosts)
 	if cfg.SSH.Password == "" {
@@ -260,6 +337,20 @@ func Load(args []string) (Config, error) {
 	if cfg.HeavyEvery < 1 {
 		cfg.HeavyEvery = 1
 	}
+	cfg.SSH.Become = strings.ToLower(strings.TrimSpace(cfg.SSH.Become))
+	switch cfg.SSH.Become {
+	case "":
+		cfg.SSH.Become = "auto"
+	case "auto", "sudo", "dzdo", "doas", "none":
+	default:
+		return cfg, fmt.Errorf("ssh.become: %q is not auto, sudo, dzdo, doas or none", cfg.SSH.Become)
+	}
+	if !cfg.SSH.Sudo {
+		cfg.SSH.Become = "none"
+	}
+	if cfg.SSH.BecomePassword == "" {
+		cfg.SSH.BecomePassword = os.Getenv("KHT_BECOME_PASSWORD")
+	}
 	if cfg.SSH.Concurrency < 1 {
 		cfg.SSH.Concurrency = 1
 	}
@@ -273,6 +364,49 @@ func Load(args []string) (Config, error) {
 		cfg.Helm.Timeout = 15 * time.Second
 	}
 	return cfg, nil
+}
+
+// ExampleConfig is the annotated configuration shipped in the binary
+// (--print-config / --init-config).
+//
+//go:embed config.example.yaml
+var ExampleConfig string
+
+// DefaultConfigPath is where --init-config writes and the first user-level
+// place the config is looked for: $XDG_CONFIG_HOME/k8s-health-tui/config.yaml
+// (%AppData%/k8s-health-tui/config.yaml on Windows).
+func DefaultConfigPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		home, herr := os.UserHomeDir()
+		if herr != nil {
+			return "", err
+		}
+		dir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(dir, "k8s-health-tui", "config.yaml"), nil
+}
+
+// WriteExampleConfig writes ExampleConfig to path (or DefaultConfigPath when
+// empty), creating parent directories and refusing to overwrite.
+func WriteExampleConfig(path string) (string, error) {
+	if path == "" {
+		var err error
+		if path, err = DefaultConfigPath(); err != nil {
+			return "", err
+		}
+	}
+	path = expand(path)
+	if _, err := os.Stat(path); err == nil {
+		return "", fmt.Errorf("%s already exists; edit it or pass --config <new path>", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(ExampleConfig), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func findConfigFile() string {

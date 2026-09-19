@@ -264,7 +264,7 @@ func (a *App) renderInspect() (string, []string) {
 		}
 		for i := start; i < len(rl) && i < start+maxRows; i++ {
 			if i == top.cursor {
-				lines = append(lines, styleSel.Render("> "+pad(rl[i], w-2)))
+				lines = append(lines, selectRow("> "+rl[i], w))
 			} else {
 				lines = append(lines, "  "+rl[i])
 			}

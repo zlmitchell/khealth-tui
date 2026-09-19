@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -234,7 +235,7 @@ func (a *App) logVisibleLines() []string {
 			if width < 20 {
 				width = 20
 			}
-			frags := strings.Split(ansi.Wrap(hl(rest), width, ""), "\n")
+			frags := wrapStyled(hl(rest), width)
 			for i, fr := range frags {
 				if i == 0 {
 					out = append(out, prefix+fr)
@@ -248,6 +249,33 @@ func (a *App) logVisibleLines() []string {
 	}
 	return out
 }
+
+// wrapStyled wraps a coloured line and carries the open SGR style over the
+// break: ansi.Wrap keeps escape codes in place, but a colour opened on one
+// fragment would otherwise stop at the newline and not resume on the next.
+func wrapStyled(s string, width int) []string {
+	frags := strings.Split(ansi.Wrap(s, width, ""), "\n")
+	open := ""
+	for i, fr := range frags {
+		if open != "" {
+			fr = open + fr
+		}
+		for _, m := range reSGR.FindAllString(fr, -1) {
+			if m == "\x1b[0m" || m == "\x1b[m" {
+				open = ""
+			} else {
+				open = m
+			}
+		}
+		if open != "" {
+			fr += "\x1b[0m"
+		}
+		frags[i] = fr
+	}
+	return frags
+}
+
+var reSGR = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func prefixPlain(p string) string {
 	if p == "" {

@@ -84,9 +84,9 @@ func (a *App) startHelmUpgrade() {
 		a.setStatus("release is managed by the rke2/k3s HelmChart controller: change its HelmChartConfig or upgrade rke2 instead")
 		return
 	}
-	l, ok := a.helmLatest[rel.Chart]
+	l, ok := a.helmLatest[helmKey(*rel)]
 	if !ok || l.Version == "" {
-		a.setStatus("no newer version known for " + rel.Chart + " (enable helm.check_updates with helm.repos / artifacthub)")
+		a.setStatus("no newer version known for " + rel.Chart + " (helm repo add its repository, or add it under helm.repos)")
 		return
 	}
 	if helmcheck.CompareVersions(l.Version, rel.Version) <= 0 {
@@ -282,7 +282,7 @@ func (a *App) renderActionOverlay() (string, []string) {
 		lines = append(lines, "  "+h)
 		for i, l := range tl {
 			if i == a.revCursor {
-				lines = append(lines, styleSel.Render("> "+l))
+				lines = append(lines, selectRow("> "+l, a.width-6))
 			} else {
 				lines = append(lines, "  "+l)
 			}

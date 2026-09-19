@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	_ "net/http/pprof" // --pprof: CPU/heap profiles of the running TUI
 	"os"
 	"time"
 
@@ -70,6 +72,10 @@ func main() {
 	// top of the alt-screen; silence it while the TUI owns the terminal.
 	klog.SetOutput(io.Discard)
 	klog.LogToStderr(false)
+	if cfg.Perf.Pprof != "" {
+		// go tool pprof http://<addr>/debug/pprof/profile?seconds=30
+		go func() { _ = http.ListenAndServe(cfg.Perf.Pprof, nil) }()
+	}
 	app, err := ui.New(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

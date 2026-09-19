@@ -77,6 +77,11 @@ type Snapshot struct {
 	Rancher       *RancherInfo
 
 	Errors []string
+
+	// FetchDuration / Traffic are what this refresh cost: wall time and the
+	// API server requests/bytes it took (docs/PERFORMANCE.md).
+	FetchDuration time.Duration
+	Traffic       Stats
 }
 
 // APICheck is one line of /readyz?verbose or /livez?verbose.
@@ -190,6 +195,7 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	var helmFPs []string
 	fail := func(what string, err error) {
 		mu.Lock()
 		s.Errors = append(s.Errors, what+": "+err.Error())
@@ -204,8 +210,10 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 			}
 		}()
 	}
-	all := metav1.ListOptions{}
+	all := c.listOpts()
 	cs := c.CS
+	fetchStart := time.Now()
+	statsStart := c.Stats()
 
 	run("version", func() error {
 		v, err := cs.Discovery().ServerVersion()
@@ -386,16 +394,26 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		go func() { // metadata-only, so cheap even with large secrets; optional
 			defer wg.Done()
 			gvr := schema.GroupVersionResource{Version: "v1", Resource: spec.res}
-			l, err := c.Meta.Resource(gvr).List(ctx, metav1.ListOptions{})
+			l, err := c.Meta.Resource(gvr).List(ctx, all)
 			if err != nil {
 				return
 			}
 			names := make(map[string]bool, len(l.Items))
+			var helm []string
 			for _, it := range l.Items {
 				names[it.Namespace+"/"+it.Name] = true
+				if it.Labels["owner"] == "helm" {
+					// helm release storage: the fingerprint decides whether the
+					// (large) release payloads need to be re-read below
+					helm = append(helm, it.Namespace+"/"+it.Name+"@"+it.ResourceVersion)
+				}
 			}
+			sort.Strings(helm)
 			mu.Lock()
 			*spec.dest = names
+			if spec.res != "serviceaccounts" {
+				helmFPs = append(helmFPs, spec.res+":"+strings.Join(helm, ","))
+			}
 			mu.Unlock()
 		}()
 	}
@@ -457,16 +475,6 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		s.HelmCharts = charts
 		mu.Unlock()
 	}()
-	run("helm-releases", func() error {
-		rels, err := c.helmReleases(ctx)
-		if err != nil {
-			return err
-		}
-		mu.Lock()
-		s.HelmReleases = rels
-		mu.Unlock()
-		return nil
-	})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -478,7 +486,7 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		res, err := c.ListResources(ctx)
+		res, err := c.cachedResources(ctx)
 		mu.Lock()
 		if err == nil {
 			s.CRDs = res
@@ -486,6 +494,25 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		mu.Unlock()
 	}()
 	wg.Wait()
+
+	// Helm release payloads (every revision of every release, gzipped and
+	// base64'd) are the largest secrets in most clusters. Re-read them only
+	// when the metadata list shows a release secret/configmap changed.
+	sort.Strings(helmFPs)
+	fp := strings.Join(helmFPs, ";")
+	c.cacheMu.Lock()
+	cached, fpOK := c.helmCache, fp != "" && fp == c.helmFP
+	c.cacheMu.Unlock()
+	if fpOK {
+		s.HelmReleases = cached
+	} else if rels, err := c.helmReleases(ctx); err != nil {
+		fail("helm-releases", err)
+	} else {
+		s.HelmReleases = rels
+		c.cacheMu.Lock()
+		c.helmFP, c.helmCache = fp, rels
+		c.cacheMu.Unlock()
+	}
 
 	// kubelet configz needs the node list first
 	var kwg sync.WaitGroup
@@ -496,7 +523,7 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 			defer kwg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			cfg, err := c.kubeletConfigz(ctx, name)
+			cfg, err := c.cachedConfigz(ctx, name)
 			usage, uerr := c.kubeletVolumeStats(ctx, name)
 			mu.Lock()
 			defer mu.Unlock()
@@ -535,7 +562,46 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 	})
 	sort.Strings(s.Errors)
 	s.Distribution = detectDistribution(s.Nodes)
+	s.FetchDuration = time.Since(fetchStart)
+	s.Traffic = c.Stats().Sub(statsStart)
 	return s
+}
+
+// cachedResources serves ListResources (discovery + every CRD definition,
+// which carries its whole OpenAPI schema) from a TTL cache.
+func (c *Client) cachedResources(ctx context.Context) ([]CRDInfo, error) {
+	c.cacheMu.Lock()
+	if c.discovery != nil && c.Opts.DiscoveryTTL > 0 && time.Since(c.discoveryAt) < c.Opts.DiscoveryTTL {
+		res := c.discovery
+		c.cacheMu.Unlock()
+		return res, nil
+	}
+	c.cacheMu.Unlock()
+	res, err := c.ListResources(ctx)
+	if err == nil {
+		c.cacheMu.Lock()
+		c.discovery, c.discoveryAt = res, time.Now()
+		c.cacheMu.Unlock()
+	}
+	return res, err
+}
+
+// cachedConfigz serves the kubelet configz (static for the life of the
+// kubelet process) from a TTL cache; kubelet restarts show up within the TTL.
+func (c *Client) cachedConfigz(ctx context.Context, node string) (map[string]any, error) {
+	c.cacheMu.Lock()
+	if e, ok := c.configz[node]; ok && c.Opts.ConfigzTTL > 0 && time.Since(e.at) < c.Opts.ConfigzTTL {
+		c.cacheMu.Unlock()
+		return e.cfg, nil
+	}
+	c.cacheMu.Unlock()
+	cfg, err := c.kubeletConfigz(ctx, node)
+	if err == nil {
+		c.cacheMu.Lock()
+		c.configz[node] = configzEntry{cfg: cfg, at: time.Now()}
+		c.cacheMu.Unlock()
+	}
+	return cfg, err
 }
 
 func (c *Client) healthz(ctx context.Context, path string) ([]APICheck, error) {
@@ -558,7 +624,7 @@ func (c *Client) healthz(ctx context.Context, path string) ([]APICheck, error) {
 }
 
 func (c *Client) nodeMetrics(ctx context.Context) (map[string]NodeMetric, error) {
-	raw, err := c.CS.Discovery().RESTClient().Get().AbsPath("/apis/metrics.k8s.io/v1beta1/nodes").Do(ctx).Raw()
+	raw, err := c.CS.Discovery().RESTClient().Get().AbsPath("/apis/metrics.k8s.io/v1beta1/nodes").SetHeader("Accept", "application/json").Do(ctx).Raw()
 	if err != nil {
 		return nil, err
 	}
@@ -588,7 +654,7 @@ func (c *Client) nodeMetrics(ctx context.Context) (map[string]NodeMetric, error)
 }
 
 func (c *Client) kubeletConfigz(ctx context.Context, node string) (map[string]any, error) {
-	raw, err := c.CS.CoreV1().RESTClient().Get().Resource("nodes").Name(node).SubResource("proxy").Suffix("configz").Do(ctx).Raw()
+	raw, err := c.CS.CoreV1().RESTClient().Get().Resource("nodes").Name(node).SubResource("proxy").Suffix("configz").SetHeader("Accept", "application/json").Do(ctx).Raw()
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +673,7 @@ func (c *Client) kubeletConfigz(ctx context.Context, node string) (map[string]an
 // kubeletVolumeStats reads /stats/summary through the API proxy and returns
 // usage for every volume backed by a PVC.
 func (c *Client) kubeletVolumeStats(ctx context.Context, node string) (map[string]VolumeUsage, error) {
-	raw, err := c.CS.CoreV1().RESTClient().Get().Resource("nodes").Name(node).SubResource("proxy").Suffix("stats/summary").Do(ctx).Raw()
+	raw, err := c.CS.CoreV1().RESTClient().Get().Resource("nodes").Name(node).SubResource("proxy").Suffix("stats/summary").SetHeader("Accept", "application/json").Do(ctx).Raw()
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +721,7 @@ func (c *Client) rke2Snapshots(ctx context.Context) []EtcdSnapshotRecord {
 	seen := map[string]bool{}
 	var out []EtcdSnapshotRecord
 
-	if l, err := c.Dyn.Resource(etcdSnapshotGVR).List(ctx, metav1.ListOptions{}); err == nil {
+	if l, err := c.Dyn.Resource(etcdSnapshotGVR).List(ctx, c.listOpts()); err == nil {
 		for _, it := range l.Items {
 			r := EtcdSnapshotRecord{Source: "crd"}
 			r.Name, _, _ = unstructured.NestedString(it.Object, "spec", "snapshotName")
@@ -748,12 +814,12 @@ func (c *Client) S3Secret(ctx context.Context, name string) *S3SecretInfo {
 }
 
 func (c *Client) helmCharts(ctx context.Context) []HelmChartCR {
-	l, err := c.Dyn.Resource(helmChartGVR).List(ctx, metav1.ListOptions{})
+	l, err := c.Dyn.Resource(helmChartGVR).List(ctx, c.listOpts())
 	if err != nil {
 		return nil
 	}
 	configs := map[string]string{}
-	if cl, err := c.Dyn.Resource(helmChartConfigGVR).List(ctx, metav1.ListOptions{}); err == nil {
+	if cl, err := c.Dyn.Resource(helmChartConfigGVR).List(ctx, c.listOpts()); err == nil {
 		for _, it := range cl.Items {
 			v, _, _ := unstructured.NestedString(it.Object, "spec", "valuesContent")
 			configs[it.GetNamespace()+"/"+it.GetName()] = v

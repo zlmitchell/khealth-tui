@@ -31,7 +31,7 @@ func testApp() *App {
 		etcd:       map[string]*etcd.Probe{},
 		etcdPend:   map[string]bool{},
 		logSum:     map[string]*logs.Summary{},
-		helmLatest: map[string]helmcheck.Latest{"nginx": {Version: "99.0.0", Source: "repo"}},
+		helmLatest: map[string]helmcheck.Latest{"default/web": {Version: "99.0.0", Source: "repo"}},
 		sshEnabled: true,
 		width:      140,
 		height:     40,
@@ -232,8 +232,9 @@ func TestPodLogsViewer(t *testing.T) {
 	lv.lines = append(lv.lines, `2024-09-18T10:00:01Z {"level":"info","msg":"`+strings.Repeat("x", 300)+`","k":1}`)
 	v = a.View()
 	// lipgloss emits no escape codes without a TTY, so check that wrapping keeps
-	// the text intact (the highlighter is exercised by TestLogHighlighting)
-	if joined := strings.Join(strings.Fields(ansi.Strip(v)), ""); !strings.Contains(joined, strings.Repeat("x", 300)) {
+	// the text intact once the box borders between fragments are dropped (the
+	// highlighter is exercised by TestLogHighlighting)
+	if joined := strings.ReplaceAll(strings.Join(strings.Fields(ansi.Strip(v)), ""), "│", ""); !strings.Contains(joined, strings.Repeat("x", 300)) {
 		t.Errorf("wrapped line lost content")
 	}
 	for _, l := range strings.Split(v, "\n") {
@@ -383,7 +384,7 @@ via=crictl x
 func TestHelmActionOverlays(t *testing.T) {
 	a := testApp()
 	a.cfg.Actions.HelmBinary = "sh" // exists in the test environment
-	a.helmLatest["nginx"] = helmcheck.Latest{Version: "99.0.0", Source: "repo", RepoURL: "https://charts.example.com"}
+	a.helmLatest["default/web"] = helmcheck.Latest{Version: "99.0.0", Source: "repo", RepoURL: "https://charts.example.com"}
 	a.snap.HelmReleases[0].History = []k8s.HelmRevision{{Revision: 2, Status: "deployed", Chart: "nginx", Version: "15.0.0"}, {Revision: 1, Status: "superseded", Chart: "nginx", Version: "14.0.0"}}
 	a.tab = tabHelm
 	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})

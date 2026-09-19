@@ -6,6 +6,7 @@ package logs
 import (
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -67,6 +68,18 @@ var patterns = []Pattern{
 	{Name: "rke2-up", Class: ClassInfo, Re: regexp.MustCompile(`(rke2|k3s) is up and running`), Explain: "Startup completed: the supervisor finished bootstrapping."},
 	{Name: "kubelet-started", Class: ClassInfo, Re: regexp.MustCompile(`Started kubelet|Starting kubelet`), Explain: "kubelet process launched."},
 
+	// ---- rancher-system-agent (Rancher-provisioned downstream nodes) ----
+	// Rancher delivers node config as plans; the agent rewrites
+	// config.yaml.d/50-rancher.yaml, runs the installer and restarts rke2, so
+	// these lines explain config changes that did not come from the node.
+	{Name: "rancher-plan-failed", Class: ClassError, Re: regexp.MustCompile(`\[Applyinator\] .*finished with err: (exit status|signal|context)|\[Applyinator\] .*exit code: [1-9]|error (while )?applying plan|\[K8s\] error (while )?(applying|processing) (the )?plan`), Explain: "A Rancher plan step failed on this node (installer script, restart or one-time instruction). The node's config may be half-applied: compare config.yaml.d/50-rancher.yaml with the cluster (RKE2 tab) and read the command output in the full line."},
+	{Name: "rancher-plan-applied", Class: ClassWarn, Re: regexp.MustCompile(`\[Applyinator\] Applying one-time instructions|Detected first start, force-applying one-time instruction set`), Explain: "Rancher applied a new plan on this node: config.yaml.d/50-rancher.yaml and the rke2 unit were (re)written and rke2 restarted. Expected after a Rancher-side change (upgrade, cluster config edit, registration); unexpected = Rancher's cluster spec differs from what the node ran before. The RKE2 tab shows drift between nodes."},
+	{Name: "rancher-plan-received", Class: ClassInfo, Re: regexp.MustCompile(`\[K8s\] Processing secret .*machine-plan|\[K8s\] Received secret to process|\[K8s\] updated plan secret`), Explain: "rancher-system-agent received or acknowledged its plan secret from Rancher (fleet-default/*-machine-plan). Normal periodic traffic."},
+	{Name: "rancher-plan-periodic", Class: ClassInfo, Re: regexp.MustCompile(`\[Applyinator\] Applying periodic instructions|\[Applyinator\] Running command|\[Applyinator\] Command .* finished with err: <nil>`), Explain: "Rancher's periodic plan instructions (etcd snapshot listing, cert checks) or a successful command. Normal."},
+	{Name: "rancher-probe-fail", Class: ClassWarn, Re: regexp.MustCompile(`error while running probe|\[Prober\].*(fail|error)|probe (kubelet|kube-apiserver|kube-scheduler|kube-controller-manager|etcd|calico|canal|cilium) .*(fail|error)`), Explain: "A rancher-system-agent health probe (kubelet/apiserver/etcd/scheduler/controller-manager) is failing; Rancher will show the machine as unhealthy and may not proceed with plans. Check the component on this node."},
+	{Name: "rancher-agent-start", Class: ClassInfo, Re: regexp.MustCompile(`Rancher System Agent version .* is starting`), Explain: "rancher-system-agent process started (boot, or Rancher upgraded the agent)."},
+	{Name: "rancher-connect", Class: ClassStartup, Re: regexp.MustCompile(`error while connecting to Rancher|\[K8s\] error while (listing|watching)|Waiting for (Rancher|the cattle)|cattle-cluster-agent .*(error|failed)|rancher2_connection_info`), Explain: "rancher-system-agent (re)connecting to Rancher to fetch plans. Brief at start; persistent = the node cannot reach the Rancher URL (agent-url on the RKE2 tab): proxy, DNS, CA or the cattle-cluster-agent tunnel.", Persist: 5 * time.Minute},
+
 	// ---- normal startup noise (only a problem if it persists) ----
 	{Name: "wait-apiserver", Class: ClassStartup, Re: regexp.MustCompile(`Waiting for API server to become available|Waiting to retrieve (kube-proxy|agent) configuration|Waiting for cloud-controller-manager privileges|Waiting for control-plane node .* startup`), Explain: "The supervisor is waiting for kube-apiserver / etcd. Normal for 30-120s after start; persistent = apiserver or etcd is not coming up (check etcd tab, container images, ports 6443/9345).", Persist: 5 * time.Minute},
 	{Name: "wait-etcd", Class: ClassStartup, Re: regexp.MustCompile(`Waiting for etcd server to become available|Waiting for etcd (to become|cluster)`), Explain: "Waiting for the local etcd member. Normal during boot; persistent = etcd cannot start or cannot reach peers on 2380.", Persist: 5 * time.Minute},
@@ -126,47 +139,120 @@ func Patterns() []Pattern { return patterns }
 
 var journalTime = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:?\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s+\S+\s+([^\[:\s]+)`)
 
-// Classify runs every line through the knowledge base.
+// klogTime: "I0918 10:22:00.123456    1234 file.go:12] msg" (kubelet.log has no year)
+var klogTime = regexp.MustCompile(`^[IWEF](\d{2})(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?\s`)
+
+// logfmtTime: containerd.log lines start with time="RFC3339"
+var logfmtTime = regexp.MustCompile(`^time="([^"]+)"`)
+
+// Source is one stream of lines. The journal has Unit "" (each line carries
+// its own unit); a log file such as rke2's kubelet.log names the unit it
+// belongs to and carries klog/logfmt timestamps instead of the journal prefix.
+type Source struct {
+	Unit  string
+	Lines []string
+}
+
+// Classify runs journal lines through the knowledge base.
 func Classify(lines []string, now time.Time) *Summary {
+	return ClassifySources([]Source{{Lines: lines}}, now)
+}
+
+// ClassifySources classifies several streams into one summary, ordered by
+// time so file and journal lines interleave.
+func ClassifySources(srcs []Source, now time.Time) *Summary {
 	s := &Summary{Counts: map[Class]int{}, ByName: map[string]int{}}
-	for _, line := range lines {
-		t := strings.TrimSpace(line)
-		if t == "" {
-			continue
-		}
-		s.Total++
-		m := Match{Line: line, Class: ClassInfo}
-		if g := journalTime.FindStringSubmatch(t); g != nil {
-			m.Unit = g[2]
-			ts := g[1]
-			if len(ts) > 5 && ts[len(ts)-3] != ':' && ts[len(ts)-1] != 'Z' {
-				ts = ts[:len(ts)-2] + ":" + ts[len(ts)-2:]
+	for _, src := range srcs {
+		for _, line := range src.Lines {
+			t := strings.TrimSpace(line)
+			if t == "" {
+				continue
 			}
-			if pt, err := time.Parse(time.RFC3339, ts); err == nil {
-				m.Time = pt
-				if pt.After(s.LastLine) {
-					s.LastLine = pt
+			s.Total++
+			m := Match{Line: line, Class: ClassInfo, Unit: src.Unit}
+			if src.Unit == "" {
+				if g := journalTime.FindStringSubmatch(t); g != nil {
+					m.Unit = g[2]
+					m.Time = parseISO(g[1])
 				}
+			} else {
+				m.Time = fileTime(t, now)
 			}
-		}
-		for i := range patterns {
-			p := &patterns[i]
-			if p.Re.MatchString(t) {
-				m.Pattern = p
-				m.Class = p.Class
-				if p.Name == "rke2-up" && m.Time.After(s.Startup) {
-					s.Startup = m.Time
-				}
-				break
+			if m.Time.After(s.LastLine) {
+				s.LastLine = m.Time
 			}
+			s.classify(&m)
 		}
-		if m.Pattern != nil {
-			s.ByName[m.Pattern.Name]++
-		}
-		s.Counts[m.Class]++
-		s.Matches = append(s.Matches, m)
 	}
-	// escalate persistent startup noise: seen after the "up and running" marker (or in the last 10 minutes when no marker)
+	if len(srcs) > 1 {
+		sort.SliceStable(s.Matches, func(i, j int) bool {
+			a, b := s.Matches[i].Time, s.Matches[j].Time
+			return !a.IsZero() && !b.IsZero() && a.Before(b)
+		})
+	}
+	s.escalate(now)
+	return s
+}
+
+// parseISO reads a journalctl short-iso timestamp (offset may lack the colon).
+func parseISO(ts string) time.Time {
+	if len(ts) > 5 && ts[len(ts)-3] != ':' && ts[len(ts)-1] != 'Z' {
+		ts = ts[:len(ts)-2] + ":" + ts[len(ts)-2:]
+	}
+	pt, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return time.Time{}
+	}
+	return pt
+}
+
+// fileTime reads a klog or logfmt timestamp from the start of a log-file line.
+// klog has no year: assume the current one, unless that lands in the future.
+func fileTime(t string, now time.Time) time.Time {
+	if g := klogTime.FindStringSubmatch(t); g != nil {
+		n := func(s string) int { v, _ := strconv.Atoi(s); return v }
+		nanos := 0
+		if g[6] != "" {
+			nanos = n(g[6] + strings.Repeat("0", 9-len(g[6])))
+		}
+		pt := time.Date(now.Year(), time.Month(n(g[1])), n(g[2]), n(g[3]), n(g[4]), n(g[5]), nanos, now.Location())
+		if pt.After(now.Add(24 * time.Hour)) {
+			pt = pt.AddDate(-1, 0, 0)
+		}
+		return pt
+	}
+	if g := logfmtTime.FindStringSubmatch(t); g != nil {
+		if pt, err := time.Parse(time.RFC3339Nano, g[1]); err == nil {
+			return pt
+		}
+	}
+	return time.Time{}
+}
+
+// classify matches one line against the knowledge base and records it.
+func (s *Summary) classify(m *Match) {
+	t := strings.TrimSpace(m.Line)
+	for i := range patterns {
+		p := &patterns[i]
+		if p.Re.MatchString(t) {
+			m.Pattern = p
+			m.Class = p.Class
+			if p.Name == "rke2-up" && m.Time.After(s.Startup) {
+				s.Startup = m.Time
+			}
+			break
+		}
+	}
+	if m.Pattern != nil {
+		s.ByName[m.Pattern.Name]++
+	}
+	s.Counts[m.Class]++
+	s.Matches = append(s.Matches, *m)
+}
+
+// escalate turns persistent startup noise into warnings: seen after the "up
+// and running" marker (or in the last 10 minutes when no marker).
+func (s *Summary) escalate(now time.Time) {
 	for i := range s.Matches {
 		m := &s.Matches[i]
 		if m.Class != ClassStartup || m.Pattern == nil || m.Pattern.Persist == 0 || m.Time.IsZero() {
@@ -182,7 +268,6 @@ func Classify(lines []string, now time.Time) *Summary {
 			s.Counts[ClassWarn]++
 		}
 	}
-	return s
 }
 
 // TopPatterns returns the most frequent named patterns of the given class.
@@ -208,6 +293,17 @@ func (s *Summary) TopPatterns(class Class, n int) []string {
 		out = append(out, e.name)
 	}
 	return out
+}
+
+// Last returns the newest match of a named pattern (zero Match when unseen).
+func (s *Summary) Last(name string) Match {
+	var last Match
+	for _, m := range s.Matches {
+		if m.Pattern != nil && m.Pattern.Name == name && !m.Time.Before(last.Time) {
+			last = m
+		}
+	}
+	return last
 }
 
 // Find returns the pattern by name.

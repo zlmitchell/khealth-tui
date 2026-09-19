@@ -1056,7 +1056,7 @@ func (a *App) helmContent() content {
 			st = styleWarn.Render(st)
 		}
 		latest := styleDim.Render("-")
-		if l, ok := a.helmLatest[r.Chart]; ok {
+		if l, ok := a.helmLatest[helmKey(r)]; ok {
 			switch {
 			case l.Err != "":
 				latest = styleDim.Render(firstLine(l.Err))
@@ -1086,18 +1086,29 @@ func (a *App) helmContent() content {
 		default:
 			hsegs[2].n++
 		}
-		if l, ok := a.helmLatest[r.Chart]; ok && l.Version != "" && helmcheck.CompareVersions(l.Version, r.Version) > 0 {
+		if l, ok := a.helmLatest[helmKey(r)]; ok && l.Version != "" && helmcheck.CompareVersions(l.Version, r.Version) > 0 {
 			hsegs[3].n++
 		}
 	}
 	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope; enter = values, ", len(rows))) + styleKey.Render("u") + styleDim.Render(" upgrade to latest, ") + styleKey.Render("b") + styleDim.Render(" rollback. Update check: ")}
 	if a.helm != nil {
 		hdr[0] += styleOK.Render("on")
+		status := map[string]helmcheck.RepoStatus{}
+		for _, st := range a.helm.Status() {
+			status[st.Name] = st
+		}
 		var names []string
 		for _, r := range a.helm.Repos() {
 			n := r.Name
-			if r.FromHelm {
-				n += styleDim.Render(" (helm)")
+			switch status[r.Name].State {
+			case "index":
+				n = styleOK.Render(n)
+			case "cache":
+				n = styleWarn.Render(n) + styleDim.Render(" (offline, helm cache)")
+			case "offline":
+				n = styleCrit.Render(n) + styleDim.Render(" (offline)")
+			default:
+				n = styleDim.Render(n + " (checking)")
 			}
 			names = append(names, n)
 		}
@@ -1130,8 +1141,12 @@ func (a *App) helmDetail(id string) (string, []string) {
 			kv("updated", r.Updated.Format(time.RFC3339)) + "  " + kv("storage", r.Storage),
 			kv("description", r.Description),
 		}
-		if l, ok := a.helmLatest[r.Chart]; ok && l.Version != "" {
-			out = append(out, kv("latest available", l.Version+" ("+l.Source+")"))
+		if l, ok := a.helmLatest[helmKey(r)]; ok {
+			if l.Version != "" {
+				out = append(out, kv("latest available", l.Version+" ("+l.Source+")"))
+			} else if l.Err != "" {
+				out = append(out, kv("latest available", styleDim.Render(l.Err)))
+			}
 		}
 		out = append(out, "", styleTitle.Render("Origin")+styleDim.Render("  helm does not record the repository a chart was pulled from; this is the evidence in the release's Chart.yaml"))
 		if r.ChartRepo != "" {

@@ -28,7 +28,10 @@ var (
 	styleBold   = lipgloss.NewStyle().Bold(true)
 	styleTitle  = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	styleHeader = lipgloss.NewStyle().Bold(true).Foreground(colorDim).Underline(true)
-	styleSel    = lipgloss.NewStyle().Reverse(true)
+	// selection: a background band rather than reverse video so coloured cells
+	// (severity text, bars, sparklines) keep their colours on the selected row
+	colorSelBg  = lipgloss.AdaptiveColor{Light: "#d0d7de", Dark: "#30363d"}
+	styleSel    = lipgloss.NewStyle().Background(colorSelBg).Bold(true)
 	colorTabBar = lipgloss.AdaptiveColor{Light: "#e4e6ea", Dark: "#21262d"}
 	colorTabTxt = lipgloss.AdaptiveColor{Light: "#24292f", Dark: "#c9d1d9"}
 
@@ -170,6 +173,18 @@ func pad(s string, w int) string {
 		return trunc(s, w)
 	}
 	return s + strings.Repeat(" ", w-sw)
+}
+
+// selectRow highlights a (possibly coloured) row end to end. Inner colour
+// resets would cancel the selection band part way through, so the band is
+// re-applied after each one.
+func selectRow(s string, width int) string {
+	s = pad(s, width)
+	on, off, _ := strings.Cut(styleSel.Render("|"), "|")
+	if on == "" {
+		return s
+	}
+	return on + strings.ReplaceAll(s, "\x1b[0m", "\x1b[0m"+on) + off
 }
 
 func padLeft(s string, w int) string {

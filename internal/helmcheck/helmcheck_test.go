@@ -2,7 +2,9 @@ package helmcheck
 
 import (
 	"context"
+	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,20 +51,41 @@ repositories:
 	}
 }
 
-func TestLatestPrefersConfigRepoAndCarriesAlias(t *testing.T) {
-	c := &Checker{repos: []Repo{{Name: "mine", URL: "https://a"}, {Name: "harbor", URL: "https://b", FromHelm: true}}, indexes: map[string]map[string][]string{
-		"mine":   {"nginx": {"1.0.0", "1.2.0-rc1"}},
-		"harbor": {"nginx": {"1.1.0"}, "redis": {"3.0.0"}},
-	}}
-	l, ok := c.fromIndexes("nginx")
+func TestForReleaseUsesOriginNotJustName(t *testing.T) {
+	c := New(config.Helm{Timeout: time.Second})
+	c.repos = []Repo{{Name: "mine", URL: "https://a"}, {Name: "harbor", URL: "https://b", FromHelm: true}}
+	c.indexes = map[string]map[string][]indexEntry{
+		"mine":                    {"nginx": {{Version: "9.0.0", Home: "https://other.example"}}, "redis": {{Version: "3.0.0"}}},
+		"harbor":                  {"nginx": {{Version: "1.1.0", Sources: []string{"https://github.com/acme/nginx-chart"}}, {Version: "1.2.0-rc1"}}},
+		"https://charts.internal": {"nginx": {{Version: "1.0.5"}}},
+	}
+	c.extra["https://charts.internal"] = Repo{Name: "https://charts.internal", URL: "https://charts.internal"}
+
+	// same chart name in two repos: the one whose sources match the installed Chart.yaml wins, even at a lower version
+	l, ok := c.forRelease(Release{Chart: "nginx", Sources: []string{"https://github.com/acme/nginx-chart.git"}})
 	if !ok || l.Version != "1.1.0" || l.Source != "harbor" || l.Alias != "harbor" {
-		t.Fatalf("highest stable across repos with alias for helm repos: %+v", l)
+		t.Fatalf("origin match should win: %+v", l)
 	}
-	l, _ = c.fromIndexes("redis")
-	if l.Alias != "harbor" || l.RepoURL != "https://b" {
-		t.Fatalf("alias/url: %+v", l)
+	// no origin evidence matches either repo: refuse to guess
+	l, ok = c.forRelease(Release{Chart: "nginx", Home: "https://nowhere"})
+	if !ok || l.Version != "" || !strings.Contains(l.Err, "ambiguous") {
+		t.Fatalf("ambiguous chart should carry an error, got %+v", l)
 	}
-	if _, ok := c.fromIndexes("nope"); ok {
+	// only one repo has it: fine without origin evidence
+	l, ok = c.forRelease(Release{Chart: "redis"})
+	if !ok || l.Version != "3.0.0" || l.Source != "mine" || l.Alias != "" {
+		t.Fatalf("unique repo: %+v", l)
+	}
+	// recorded install repo (rke2 HelmChart spec.repo) is authoritative
+	l, ok = c.forRelease(Release{Chart: "nginx", Repo: "https://charts.internal/"})
+	if !ok || l.Version != "1.0.5" || l.RepoURL != "https://charts.internal" || l.Alias != "" {
+		t.Fatalf("recorded repo: %+v", l)
+	}
+	l, _ = c.forRelease(Release{Chart: "nginx", Repo: "https://never-fetched"})
+	if l.Version != "" || !strings.Contains(l.Err, "offline") {
+		t.Fatalf("unfetched recorded repo: %+v", l)
+	}
+	if _, ok := c.forRelease(Release{Chart: "nope"}); ok {
 		t.Fatalf("unknown chart should not be found")
 	}
 }
@@ -89,8 +112,48 @@ func TestNoHelmCLIIsFine(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	// no repos, artifact hub off: lookup returns nothing and does not panic
-	if got := c.Lookup(ctx, []string{"nginx"}); len(got) != 0 {
+	// no repos: lookup returns nothing and does not panic
+	if got := c.Lookup(ctx, []Release{{Key: "x", Chart: "nginx"}}); len(got) != 0 {
 		t.Fatalf("expected no results, got %+v", got)
+	}
+}
+
+func TestOfflineRepoIsProbedOnceThenBackedOff(t *testing.T) {
+	// a closed port: the connect probe fails fast, the HTTP fetch is never attempted
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := l.Addr().String()
+	l.Close()
+	cache := t.TempDir()
+	os.WriteFile(cache+"/harbor-index.yaml", []byte("entries:\n  nginx:\n  - version: 1.0.0\n"), 0o600)
+	c := New(config.Helm{Timeout: time.Second})
+	c.repos = []Repo{{Name: "harbor", URL: "http://" + addr, FromHelm: true}, {Name: "cfg", URL: "http://" + addr}}
+	c.cacheDir = cache
+	ctx := context.Background()
+
+	start := time.Now()
+	got := c.Lookup(ctx, []Release{{Key: "r", Chart: "nginx"}})
+	if time.Since(start) > reachProbe*2 {
+		t.Fatalf("offline lookup took %s", time.Since(start))
+	}
+	if got["r"].Version != "1.0.0" || got["r"].Source != "harbor" {
+		t.Fatalf("helm cache should answer while offline: %+v", got)
+	}
+	st := map[string]RepoStatus{}
+	for _, s := range c.Status() {
+		st[s.Name] = s
+	}
+	if st["harbor"].State != "cache" || st["cfg"].State != "offline" {
+		t.Fatalf("status: %+v", st)
+	}
+	// within the backoff the hosts are not probed again
+	c.mu.Lock()
+	first := c.status["cfg"].At
+	c.mu.Unlock()
+	c.Lookup(ctx, []Release{{Key: "r", Chart: "nginx"}})
+	c.mu.Lock()
+	again := c.status["cfg"].At
+	c.mu.Unlock()
+	if !again.Equal(first) {
+		t.Fatalf("offline repo was re-probed inside the backoff")
 	}
 }

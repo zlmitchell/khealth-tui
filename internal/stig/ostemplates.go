@@ -374,10 +374,10 @@ func fileCheck(info *nodeinfo.Info, c stigdata.Check, id string, pred func(p nod
 	if !info.STIGProbed {
 		return Manual, "node probe predates the OS STIG facts"
 	}
-	if viol := info.STIGViol[id]; len(viol) > 0 {
+	scanned := c.Bool("RECURSIVE") || c.Str("FILE_REGEX") != ""
+	if viol := info.STIGViol[id]; scanned && len(viol) > 0 {
 		return Fail, truncList(viol, 5)
 	}
-	scanned := c.Bool("RECURSIVE") || c.Str("FILE_REGEX") != ""
 	var probs []string
 	for _, fp := range c.List("FILEPATH") {
 		if scanned {

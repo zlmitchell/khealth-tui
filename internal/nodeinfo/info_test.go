@@ -1,6 +1,7 @@
 package nodeinfo
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -290,5 +291,91 @@ func TestScriptOptions(t *testing.T) {
 	}
 	if strings.Contains(Script(Options{}), "===JOURNAL") {
 		t.Errorf("light script should not include journal")
+	}
+}
+
+func TestOSStigOptionAndMerge(t *testing.T) {
+	if s := Script(Options{}); strings.Contains(s, "sec SYSCTLALL") || strings.Contains(s, "sec STIGSTAT") {
+		t.Errorf("light probe must not carry the OS STIG sections")
+	}
+	if s := Script(Options{OSStig: true}); !strings.Contains(s, "sec SYSCTLALL") || !strings.Contains(s, "sec STIGSTAT") || !strings.Contains(s, "sec STIGFILES") {
+		t.Errorf("OSStig probe missing sections")
+	}
+	out := "===SYSCTLALL\nkernel.dmesg_restrict = 1\n===PKGS\naide\n===STIGSTAT\n644|root|root|0|0|regular file|/etc/passwd\n===STIGVIOL\nVIOL|V-1:0|/var/log/x\n===STIGFILES\n--- /etc/audit/auditd.conf\nlog_file = /var/log/audit/audit.log\n===END\n"
+	first := Parse("n1", "h", out, time.Now())
+	if !first.STIGProbed || first.SysctlAll["kernel.dmesg_restrict"] != "1" || !first.Packages["aide"] || first.STIGStat["/etc/passwd"].Mode != "644" || len(first.STIGViol["V-1:0"]) != 1 || len(first.STIGFiles) != 1 || first.STIGCollected.IsZero() {
+		t.Fatalf("parse: %+v", first)
+	}
+	later := Parse("n1", "h", "===HOST\nn1\n===END\n", time.Now())
+	if later.STIGProbed {
+		t.Fatalf("light probe output must not claim STIG facts")
+	}
+	later.MergeSTIG(first)
+	if !later.STIGProbed || later.STIGCollected != first.STIGCollected || later.SysctlAll["kernel.dmesg_restrict"] != "1" || len(later.STIGFiles) != 1 {
+		t.Errorf("merge lost facts: %+v", later)
+	}
+	fresh := Parse("n1", "h", out, time.Now().Add(time.Minute))
+	fresh.MergeSTIG(first)
+	if fresh.STIGCollected == first.STIGCollected {
+		t.Errorf("a re-collection must keep its own facts")
+	}
+}
+
+func TestScriptPerfFooterAndCost(t *testing.T) {
+	s := Script(Options{})
+	i, j := strings.Index(s, "sec PERF"), strings.Index(s, "echo '===END'")
+	if i < 0 || j < 0 || i > j {
+		t.Fatalf("PERF footer must precede END: perf=%d end=%d", i, j)
+	}
+	info := Parse("n1", "10.0.0.1", "===HOST\nn1\n===PERF\n1.5 1.0 0.5 3/400 999\n0m0.020s 0m0.010s\n0m0.800s 0m0.300s\n===END\n", time.Now())
+	if !info.Cost.Parsed || math.Abs(info.Cost.User-0.82) > 1e-9 || math.Abs(info.Cost.Sys-0.31) > 1e-9 || info.Cost.Load1 != 1.5 {
+		t.Fatalf("cost %+v", info.Cost)
+	}
+	if info.OutBytes == 0 {
+		t.Fatal("out bytes not recorded")
+	}
+	if Parse("n1", "h", "===HOST\nn1\n===END\n", time.Now()).Cost.Parsed {
+		t.Fatal("cost parsed without a PERF section")
+	}
+}
+
+func TestConfigTierScriptAndMerge(t *testing.T) {
+	full, light := Script(Options{Config: true}), Script(Options{})
+	if strings.Contains(full, "__CONFIG__") || strings.Contains(light, "__CONFIG__") {
+		t.Fatal("__CONFIG__ not substituted")
+	}
+	if !strings.Contains(full, `[ "1" = 1 ]`) || !strings.Contains(light, `[ "0" = 1 ]`) {
+		t.Fatal("config tier flag wrong")
+	}
+	// single systemctl call for every unit, no per-unit loop
+	if strings.Count(light, "systemctl show") != 1 || strings.Count(light, "timedatectl show") != 1 {
+		t.Fatalf("expected one systemctl show and one timedatectl call: %d / %d", strings.Count(light, "systemctl show"), strings.Count(light, "timedatectl show"))
+	}
+
+	fullOut := "===CERTS\n/etc/kubernetes/pki/ca.crt|Jan  1 00:00:00 2030 GMT\n===HARDENING\nselinux=Enforcing\nfips_setup=FIPS mode is enabled.\nsecureboot=SecureBoot enabled\nconfig_probed=yes\n===SYSCTL\nvm.overcommit_memory=1\n===NTP\nNTP=yes\nNTPSynchronized=no\n===END\n"
+	prev := Parse("n1", "h", fullOut, time.Now())
+	if !prev.ConfigProbed || len(prev.Certs) != 1 || prev.Sysctl["vm.overcommit_memory"] != "1" || prev.Hardening["config_probed"] != "" {
+		t.Fatalf("full parse: %+v", prev)
+	}
+	if prev.NTPEnabled == nil || !*prev.NTPEnabled || prev.NTPSynced == nil || *prev.NTPSynced {
+		t.Fatalf("NTP key=value form not parsed: %v %v", prev.NTPEnabled, prev.NTPSynced)
+	}
+	cur := Parse("n1", "h", "===HARDENING\nselinux=Permissive\n===END\n", time.Now())
+	if cur.ConfigProbed {
+		t.Fatal("light probe must not claim the config tier")
+	}
+	cur.MergeConfig(prev)
+	if !cur.ConfigProbed || len(cur.Certs) != 1 || cur.Sysctl["vm.overcommit_memory"] != "1" {
+		t.Fatalf("config tier not carried forward: %+v", cur)
+	}
+	if cur.Hardening["selinux"] != "Permissive" || cur.Hardening["secureboot"] != "SecureBoot enabled" {
+		t.Fatalf("hardening merge wrong: %v", cur.Hardening)
+	}
+	// a probe that ran the tier keeps its own result
+	again := Parse("n1", "h", fullOut, time.Now())
+	again.Certs = nil
+	again.MergeConfig(prev)
+	if again.Certs != nil {
+		t.Fatal("merge overwrote a fresh config tier")
 	}
 }
