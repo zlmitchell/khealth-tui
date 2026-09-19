@@ -44,16 +44,19 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 			total += s.SizeKB
 			devs = append(devs, s.Name)
 		}
-		allowed := ni.KubeletFlags["fail-swap-on"] == "false"
-		for _, cf := range ni.ConfigFiles {
-			if strings.Contains(cf.Content, "fail-swap-on=false") || strings.Contains(cf.Content, "failSwapOn: false") {
-				allowed = true
-			}
+		// rke2/k3s write failSwapOn: false into 00-rke2-defaults.conf, so
+		// swap only stops kubeadm nodes and kubelets whose config overrides it
+		allowed := p.FailSwapOn == "false" || ni.KubeletFlags["fail-swap-on"] == "false"
+		if ni.KubeletFlags["fail-swap-on"] == "true" {
+			allowed = false
+		}
+		if p.Probed && p.FailSwapOn == "" && !allowed && isRancher && ni.KubeletFlags["fail-swap-on"] == "" {
+			allowed = true // rke2/k3s default when the drop-in was not readable
 		}
 		switch {
 		case allowed:
 			if ni.SwapTotal-ni.SwapFree > 0 {
-				add(SevInfo, "node", name, "swap in use (fail-swap-on=false)", "kubelet tolerates it; make sure NodeSwap/memorySwap is what you intend")
+				add(SevInfo, "node", name, fmt.Sprintf("swap in use (%s of %s): the kubelet runs with failSwapOn=false (%s default) so it tolerates it, but the kernel swaps system daemons and STIG images usually expect swap off", human(float64(ni.SwapTotal-ni.SwapFree)), human(float64(ni.SwapTotal)), ni.Dist), "swapoff -a and drop the fstab entry unless memorySwap.swapBehavior=LimitedSwap is intended")
 			}
 		case kubeletUp:
 			add(SevCrit, "node", name, fmt.Sprintf("swap active (%s on %s): the running kubelet started before it was enabled and refuses to start with swap on - it will not come back after the next restart or reboot", human(float64(total)*1024), strings.Join(devs, ",")), "swapoff -a and remove the swap line from /etc/fstab (or kubelet-arg fail-swap-on=false)")
@@ -154,10 +157,13 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		}
 		dir := logFile[:strings.LastIndex(logFile, "/")+1]
 		if m := ni.MountFor(dir); m != nil {
+			// halt/single take the node down; suspend only stops audit logging
+			// (a compliance gap, not an outage)
 			fatal := func(action string) bool {
 				a := strings.ToLower(p.Auditd[action])
-				return a == "halt" || a == "single" || a == "suspend"
+				return a == "halt" || a == "single"
 			}
+			suspends := func(action string) bool { return strings.EqualFold(p.Auditd[action], "suspend") }
 			adminMB := auditMB(p.Auditd["admin_space_left"], m.SizeKB)
 			spaceMB := auditMB(p.Auditd["space_left"], m.SizeKB)
 			freeMB := m.AvailKB / 1024
@@ -181,6 +187,8 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				} else if fatal("space_left_action") {
 					add(SevWarn, "node", name, msg, hint)
 				}
+			} else if (suspends("admin_space_left_action") || suspends("disk_full_action")) && (m.UsePct >= thr.DiskWarnPct || (adminMB > 0 && freeMB < adminMB*4)) {
+				add(SevWarn, "security", name, fmt.Sprintf("auditd suspends logging when %s runs out of space (%s free, %d%% used): audit records are lost silently", m.Mountpoint, human(float64(freeMB)*1024*1024), m.UsePct), "free space on "+m.Mountpoint+" or rotate audit logs")
 			}
 		}
 	}
@@ -243,6 +251,9 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 					}
 					add(s, "security", name, fmt.Sprintf("password of %s %s expires in %d days%s", role, a.Name, left, grace), "chage -l "+a.Name+"; rotate it or exempt the account from PASS_MAX_DAYS")
 				}
+			}
+			if a.PW == "set" && a.LastChange == 0 && role != "user" {
+				add(sev, "security", name, fmt.Sprintf("%s %s must change the password at next login (shadow lastchg=0): PAM forces an interactive passwd, so ssh/sudo automation fails", role, a.Name), "chage -d $(date +%Y-%m-%d) "+a.Name+" after setting a password, or -d -1 to disable aging")
 			}
 			if a.Expire > 0 && a.Expire <= p.Today {
 				s := sev
@@ -307,7 +318,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		seed := ci.Seed()
 		var disabled []string
 		for _, m := range p.Modprobe {
-			if m.Module == "cdrom" || m.Module == "sr_mod" || m.Module == "isofs" {
+			if (m.Module == "cdrom" || m.Module == "sr_mod" || m.Module == "isofs") && m.Disables() {
 				if m.Directive == "blacklist" && p.Modules[m.Module] {
 					continue // blacklist only stops autoload; it is loaded anyway
 				}
@@ -415,7 +426,11 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				add(SevCrit, "images", name, fmt.Sprintf("registries.yaml configs %s: %s %s does not exist, TLS to that registry fails", f.Key, f.Kind, f.Path), "restore the file or fix the path in registries.yaml, then restart "+ni.Dist)
 			}
 		}
+		mismatches, badKeys := registryKeyMismatches(ni.Registries)
 		for _, r := range p.RegProbes {
+			if badKeys[r.Host] {
+				continue // the key names no endpoint; the mismatch finding below explains it
+			}
 			if msg, hint, sev, ok := regVerdict(r); ok {
 				add(sev, "images", name, msg, hint)
 			}
@@ -423,7 +438,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		if p.CurlMissing && len(ni.RegistryMirrors) > 0 {
 			add(SevInfo, "images", name, "curl is not installed on the node: registry credentials in registries.yaml were not probed", "")
 		}
-		for _, m := range registryKeyMismatches(ni.Registries) {
+		for _, m := range mismatches {
 			add(SevWarn, "images", name, m, "the configs key must equal the endpoint host:port exactly, port included, or containerd never sends the credentials/TLS settings")
 		}
 	}
@@ -571,8 +586,9 @@ func regVerdict(r nodeinfo.RegProbe) (msg, hint string, sev Severity, ok bool) {
 // registryKeyMismatches finds configs keys that differ from a mirror
 // endpoint host only by the port (the classic "credentials never used"
 // registries.yaml mistake).
-func registryKeyMismatches(files []nodeinfo.ConfigFile) []string {
+func registryKeyMismatches(files []nodeinfo.ConfigFile) ([]string, map[string]bool) {
 	var out []string
+	bad := map[string]bool{}
 	for _, cf := range files {
 		var endpoints, keys []string
 		top, reg := "", ""
@@ -616,12 +632,13 @@ func registryKeyMismatches(files []nodeinfo.ConfigFile) []string {
 				eh, _, _ := strings.Cut(e, ":")
 				if eh == kh && e != k {
 					out = append(out, fmt.Sprintf("registries.yaml configs key %q does not match mirror endpoint %q (port differs): its auth/TLS settings are never applied", k, e))
+					bad[k] = true
 					break
 				}
 			}
 		}
 	}
-	return out
+	return out, bad
 }
 
 // preflightNodeRows summarises the preflight facts for the node detail view:
@@ -777,7 +794,7 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 			v, st = v+", errors: "+truncList(p.CloudInit.Errors, 1), "warn"
 		}
 		for _, m := range p.Modprobe {
-			if m.Module == "cdrom" || m.Module == "sr_mod" || m.Module == "isofs" {
+			if (m.Module == "cdrom" || m.Module == "sr_mod" || m.Module == "isofs") && m.Disables() {
 				v, st = v+", "+m.File+" "+m.Line, "crit"
 				break
 			}

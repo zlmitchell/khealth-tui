@@ -99,10 +99,10 @@ func TestOSRulesPerBenchmark(t *testing.T) {
 	snap := &k8s.Snapshot{Distribution: "rke2"}
 	synced := true
 	nodes := map[string]*nodeinfo.Info{
-		"rhel-1": {Node: "rhel-1", Dist: "rke2", OS: nodeinfo.OSRelease{ID: "rhel", VersionID: "9.4"}, NTPSynced: &synced,
+		"rhel-1": {Node: "rhel-1", Dist: "rke2", STIGProbed: true, OS: nodeinfo.OSRelease{ID: "rhel", VersionID: "9.4"}, NTPSynced: &synced,
 			Hardening: map[string]string{"fips": "1", "fips_boot": "yes", "selinux": "Enforcing", "selinux_config": "enforcing", "svc_fapolicyd": "loaded active enabled", "svc_auditd": "loaded active enabled", "svc_firewalld": "loaded inactive disabled", "svc_usbguard": "loaded active enabled", "svc_chronyd": "loaded active enabled"},
 			Sysctl:    map[string]string{"kernel.randomize_va_space": "2", "kernel.dmesg_restrict": "0", "kernel.core_pattern": "|/bin/false"}},
-		"ubu-1": {Node: "ubu-1", Dist: "rke2", OS: nodeinfo.OSRelease{ID: "ubuntu", IDLike: "debian", VersionID: "22.04"}, NTPSynced: &synced,
+		"ubu-1": {Node: "ubu-1", Dist: "rke2", STIGProbed: true, OS: nodeinfo.OSRelease{ID: "ubuntu", IDLike: "debian", VersionID: "22.04"}, NTPSynced: &synced,
 			Hardening: map[string]string{"fips": "0", "fips_boot": "no", "apparmor": "Y", "apparmor_enforced": "12", "svc_auditd": "loaded active enabled", "ufw": "active", "svc_chrony": "loaded active enabled"},
 			Sysctl:    map[string]string{"kernel.randomize_va_space": "2", "kernel.dmesg_restrict": "1"}},
 		"sles-1": {Node: "sles-1", Dist: "rke2", OS: nodeinfo.OSRelease{ID: "sles", IDLike: "suse", VersionID: "15.5"},
@@ -153,11 +153,20 @@ func TestOSRulesPerBenchmark(t *testing.T) {
 		t.Errorf("ref/per-node bookkeeping: %+v", r)
 	}
 	counts, ref := OSSummary(rs, "ubu-1")
-	if counts[Pass] == 0 || counts[Fail] != 1 || ref == "" {
+	if counts[Pass] == 0 || counts[Fail] == 0 || ref == "" {
 		t.Errorf("OSSummary ubu-1: %v %q", counts, ref)
 	}
 	if find(rs, "OS-fips").Ref != "" {
 		t.Errorf("generic OS rules carry no Ref")
+	}
+	// facts not collected yet (S not pressed): no table rows for that node
+	nodes["rhel-1"].STIGProbed = false
+	rs = Evaluate(Input{Snap: snap, Nodes: nodes})
+	if r := find(rs, "V-258230"); r != nil {
+		t.Errorf("unprobed RHEL node must produce no OS STIG rows, got %+v", r)
+	}
+	if r := find(rs, "V-260650"); r == nil {
+		t.Errorf("probed Ubuntu node must still produce its rows")
 	}
 }
 

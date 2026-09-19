@@ -39,10 +39,12 @@ refreshes for CPU/memory/disk/etcd db size/fragmentation/fsync, pod and
 findings distribution); Nodes/Storage/Images/Security/Logs use bars and
 sparklines inline. History is kept in memory for the session (90 samples).
 
+**Node preflight** (per node, over SSH; "Preflight" table in the node detail, findings on the Overview): what stops rke2/k3s from restarting or the node from being re-provisioned although it looks healthy. Swap active or still in `/etc/fstab` (vs the kubelet's `failSwapOn`; rke2 writes `false`), fapolicyd enforcing without rules for the data-dir / `/opt/cni` / `/run/k3s` / `/var/lib/kubelet` or for the CSI host dirs (Longhorn `/var/lib/longhorn/engine-binaries`, Portworx `/opt/pwx/bin`, FlexVolume `volumeplugins`), stale `compiled.rules`, rule-file ordering vs the catch-all deny, today's `FANOTIFY` denials; auditd `admin_space_left_action`/`disk_full_action=halt|single` against the free space on the audit partition (`keep_logs` noted); `noexec` on the mount holding the data-dir or `/opt/cni`; password/account expiry and `pam_faillock` lockouts for the SSH user and root (from shadow ages, never the hash); `HTTP_PROXY` without a `NO_PROXY` covering the node IPs; on VMware VMs, `modprobe.d` disabling `cdrom`/`sr_mod`/`isofs` while cloud-init reads its NoCloud seed from `/dev/sr0` (Rancher's vSphere driver delivers user-data as an ISO), cloud-init errors, `open-vm-tools` missing; firewalld with Canal/Calico, NetworkManager without `unmanaged-devices`, `nm-cloud-setup`, iptables 1.8.0-1.8.4, SELinux enforcing without `rke2-selinux`, `ip_forward=0`, low inotify limits; and `registries.yaml`: each mirror endpoint and configs key is probed with `curl` using the configured credentials and TLS files (plus the bearer token realm), missing `ca_file`/`cert_file`/`key_file`, and configs keys that differ from the endpoint by port (credentials never sent).
+
 **Node hardening** (per node, over SSH): SELinux runtime vs `/etc/selinux/config`, AppArmor, FIPS (`/proc/sys/crypto/fips_enabled` vs `fips=1` in grub / Ubuntu Pro), fapolicyd, auditd (+ rule count), firewalld/ufw (runtime vs unit-file / `ufw.conf`), Secure Boot, kernel lockdown, crypto policy, pending reboot. Runtime/boot mismatches are findings. The node detail (Enter on Nodes) opens with a dashboard of gauges and this table.
 
 Keys: `Tab`/`Shift+Tab` (or `[`/`]`, number keys) switch tabs, `←`/`→` or `h`/`l` switch sub-tabs inside a tab, `j/k` move, `Enter` detail, `n` namespace,
-`/` filter, `a` problems-only, `m` hide manual STIG rules, `r` refresh, `R` full refresh (logs/images/OS STIG facts),
+`/` filter, `a` problems-only, `m` hide manual STIG rules, `r` refresh, `R` full refresh (logs/images), `S` collect OS STIG facts (OS STIG sub-tab),
 `s` toggle SSH, `P` footprint (what khealth itself costs), `?` help, `q` quit.
 
 ## Install / build
@@ -104,9 +106,9 @@ collection (journal, `crictl images`, tarball manifests) run every
 `heavy_every` refreshes or on `R` and are carried forward in between.
 Tarball manifests are cached by path/size/mtime so large `.tar.zst` files
 are only read once. The OS STIG facts (`sysctl -a`, package lists, `find`
-scans, config dumps) are collected once per node on first contact and again
-only on `R`. [docs/REFRESH.md](docs/REFRESH.md) lists every remote call and
-its cadence.
+scans, config dumps) are never collected unless you go to Security / OS STIG
+and press `S`; later cycles reuse them until the next `S`.
+[docs/REFRESH.md](docs/REFRESH.md) lists every remote call and its cadence.
 
 The tool is meant to be run against clusters that are already in trouble,
 so it measures and minimises its own footprint: probes run under

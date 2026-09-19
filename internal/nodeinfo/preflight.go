@@ -17,6 +17,8 @@ type Preflight struct {
 	Units        map[string]PFUnit // NetworkManager, nm-cloud-setup, vmtoolsd, cloud-init, multipathd, fapolicyd, auditd, firewalld
 	Probed       bool
 	FstabSwap    []string
+	FailSwapOn   string // kubelet config failSwapOn from the drop-ins ("" when not set: upstream default true)
+	SwapBehavior string // kubelet memorySwap.swapBehavior
 	MountOpts    []MountOpt
 	Modprobe     []ModprobeLine  // install/blacklist lines from modprobe.d for the modules that matter
 	Modules      map[string]bool // loaded kernel modules among the ones that matter
@@ -92,6 +94,22 @@ func (m MountOpt) Has(opt string) bool {
 // ModprobeLine is an install/blacklist directive.
 type ModprobeLine struct {
 	File, Directive, Module, Line string
+}
+
+// Disables reports whether the directive keeps the module from loading:
+// a blacklist (no autoload) or an install line that runs /bin/false or
+// /bin/true instead of modprobe. Wrappers like firewalld's
+// "install nf_conntrack /sbin/modprobe --ignore-install ..." load it.
+func (m ModprobeLine) Disables() bool {
+	if m.Directive == "blacklist" {
+		return true
+	}
+	f := strings.Fields(m.Line)
+	if len(f) < 3 {
+		return false
+	}
+	cmd := f[2]
+	return cmd == "/bin/false" || cmd == "/bin/true" || cmd == "/usr/bin/false" || cmd == "/usr/bin/true" || cmd == "false" || cmd == "true"
 }
 
 // VirtInfo is the DMI vendor/product and the VMware tooling on the node.
@@ -260,6 +278,14 @@ func parsePreflight(info *Info, secs map[string]string) {
 	}
 	p.Probed = true
 	p.FstabSwap = nonEmpty(secs["FSTABSWAP"])
+	for k, v := range kvLines(strings.ReplaceAll(secs["KUBELETSWAP"], ":", "=")) {
+		switch k {
+		case "failSwapOn":
+			p.FailSwapOn = strings.Trim(v, `"`)
+		case "swapBehavior":
+			p.SwapBehavior = strings.Trim(v, `"`)
+		}
+	}
 	for _, l := range nonEmpty(secs["MOUNTOPTS"]) {
 		f := strings.Split(l, "|")
 		if len(f) == 3 {

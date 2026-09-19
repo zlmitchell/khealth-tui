@@ -129,7 +129,7 @@ func (b *OSBenchmark) String() string { return b.Name + " " + b.Version }
 // only part of it was verified.
 func evalTemplated(info *nodeinfo.Info, rule stigdata.Rule) (Status, string) {
 	if !info.STIGProbed {
-		return Manual, "node probe has no OS STIG facts (collected by an older probe?)"
+		return Manual, "OS STIG facts not collected (S on the OS STIG sub-tab)"
 	}
 	var fails, manuals, custom []string
 	passes, nas := 0, 0
@@ -376,6 +376,21 @@ func (e *evaluator) osRules() {
 	})
 	for _, b := range order {
 		members := groups[b]
+		// The OS STIG facts are collected on demand; until a node has them
+		// its table rules are not emitted at all (the sub-tab explains how
+		// to collect), so nodes without facts drop out of the group here.
+		if b != nil {
+			var probed []string
+			for _, n := range members {
+				if ni(n).STIGProbed {
+					probed = append(probed, n)
+				}
+			}
+			if len(probed) == 0 {
+				continue
+			}
+			members = probed
+		}
 		if b == nil {
 			for _, c := range osChecks {
 				e.perNode(c.id, c.title, c.cat, g, c.fix, members, func(n string) (Status, string) { return c.eval(ni(n)) })

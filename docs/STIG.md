@@ -278,9 +278,10 @@ OVAL only (<rule name>)":
   options, `sshd -T`); where the STIG also requires the setting to be
   persisted (fstab, grub, sysctl.d) the evaluator reports FAIL with a
   "lost on reboot" detail when only one side is set.
-- A node probed by a build older than the OS STIG probe (no `SYSCTLALL`
-  section) reports every templated rule as MANUAL until the next full
-  collection.
+- The OS STIG facts are collected only on request (`S` on the OS STIG
+  sub-tab); until then a node has no OS STIG rows at all rather than
+  hundreds of MANUAL ones, and the Node hardening column reads "not
+  collected".
 - The union of all products' stat/find/dump targets is sent to every node;
   results are matched back by `V-ID:index` so a RHEL scan running on an
   Ubuntu node is simply ignored.

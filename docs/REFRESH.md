@@ -16,8 +16,9 @@ server-side stream and the spinner is UI-only.
 | **CRD instance counts** | kube-apiserver | on each snapshot, only while the Workloads / Resources sub-tab is open | one list (limit 1, count from metadata) per resource type |
 | **Light SSH probe** (`nodeinfo.Script`, base) | every node (or `ssh.nodes`) | every `refresh` tick when SSH is on, unless the node's previous probe is still running or it is in backoff (`ssh.backoff`: last probe took > `refresh`/2) | one `sh` session per node under `renice 19` / `ionice -c2 -n7` (`ssh.nice`), `ssh.concurrency` (8) in parallel, timeout 3 x `ssh.timeout` (60 s); ~0.2 s wall / 0.2 s CPU per node, nothing sleeps or waits on D-Bus: /proc (CPU% is the delta against the previous probe's counters), df, one `systemctl show` for all units, `chronyc`/timesyncd for NTP state, kubelet cmdline (pid reused from the previous probe), cheap hardening facts. Ends with a `PERF` section (`times`, loadavg) that feeds `P` / `--perf-log` |
 | **Config tier** (`Options.Config`, inside the base script) | every node | every `heavy_every` ticks, first contact, `R`; carried forward by `Info.MergeConfig` in between | certificates (`openssl` per file), sysctl subset, file modes, slow hardening commands (`needs-restarting`, `fips-mode-setup`, `mokutil`, `auditctl`, `ufw`, `pro`), rke2/k3s config.yaml(.d), audit/PSS files, server manifests, static pods, CNI confs, registries.yaml, containerd certs.d/config; ~1 s CPU |
+| **Preflight** (`scripts/preflight.sh`, appended to every probe) | every node | `SWAPS` and `PFUNITS` (unit state from `/run/systemd`, no D-Bus) every tick; the rest with the config tier (fstab swap, kubelet failSwapOn, mount options, modprobe.d, DMI/cloud-init, fapolicyd rules, CSI host dirs, auditd.conf, shadow ages + faillock, proxy env, iptables version, SELinux packages, NetworkManager conf, registries.yaml probe: parallel `curl` to each endpoint and its token realm, 6 s cap) and `FAPDENY` (`ausearch -m FANOTIFY`, `timeout 20`) with the heavy tier | ~0.1 s CPU; the registry probe is the only network I/O |
 | **Heavy SSH probe** (`Options.Heavy`) | every node | every `heavy_every` ticks (default 6 = every 3 min) or on `R` / when SSH is (re)enabled | adds journal (`logs.lines` / `logs.since`), `crictl images`, container list, tarball manifests (cached by path/size/mtime), `du` of hostPath/local PVs; timeout 6 x `ssh.timeout` (120 s) |
-| **OS STIG SSH probe** (`Options.OSStig`) | every node | **once per node on first contact**, then only on `R` (or when SSH is re-enabled); results are carried across later cycles by `Info.MergeSTIG` | adds `sysctl -a`, package list, unit files/states, `findmnt`, `fstab`, `sshd -T`, `auditctl -l` + rules.d, modprobe.d, `lsmod`, grub args, `stat` of the STIG-named files, `find` violation scans (de-duplicated across rule sets: 39 scans, 20 s cap each, 20 hits max) and dumps of the config files the templates read (64 KB cap each, secrets masked); ~1.2 s CPU on a stock image |
+| **OS STIG SSH probe** (`Options.OSStig`) | every node | **only on request**: `S` on the Security / OS STIG sub-tab; never on launch, refresh or `R`. Results are carried across later cycles by `Info.MergeSTIG` until the next `S` | adds `sysctl -a`, package list, unit files/states, `findmnt`, `fstab`, `sshd -T`, `auditctl -l` + rules.d, modprobe.d, `lsmod`, grub args, `stat` of the STIG-named files, `find` violation scans (de-duplicated across rule sets: 39 scans, 20 s cap each, 20 hits max) and dumps of the config files the templates read (64 KB cap each, secrets masked); ~1.2 s CPU on a stock image |
 | **etcd SSH probe** (`etcd.Script`) | etcd nodes (all known hosts when the API is down) | every `refresh` tick when SSH is on (same skip/backoff rules as the light probe) | every cycle: `/health` + `/metrics` from `--listen-metrics-urls` (plain HTTP) or the TLS client port, raft files, data-dir size (~0.1 s wall / 0.1 s CPU). Heavy cycles / unhealthy member: config sources and dumps, snapshot dir listings, backup hints, leader-election scan of the etcd container log. etcdctl member/endpoint/alarm via crictl only while the API-side exec probe is not answering (API down or first cycle). `Probe.Merge` carries every skipped section forward; same timeout as the light probe |
 | **etcd via `kubectl exec`** | etcd pods | every `refresh` tick | `etcdctl member list`, `endpoint health/status`, `alarm list` inside the pod |
 | **S3 snapshot checks** | rke2 S3 secret / one etcd node | on demand (when an etcd probe reports an S3 config) | one secret read; one SSH connectivity test |
@@ -26,23 +27,22 @@ server-side stream and the spinner is UI-only.
 | **STIG / CIS evaluation** (`stig.Evaluate`) | local | after every snapshot, and once 250 ms after the last node/etcd/helm/S3 message of a burst (coalesced `recompute`) | CPU only, no remote calls; ~450 OS rules per node evaluate in milliseconds |
 | **Findings / history** | local | after every snapshot / node message | 90-sample in-memory series per metric |
 
-## Why the OS STIG probe is not per cycle
+## Why the OS STIG probe only runs on request
 
 The light probe is designed to be cheap enough for every tick. The OS STIG
-facts are not: `rpm -qa`, `sysctl -a`, recursive `find` over `/usr/lib`,
-`/var/log` and friends, and ~25 file dumps add roughly a second of CPU and
-50-100 KB of output per node, and none of it changes minute to minute. So the
-scheduler (`App.collectCmds`) sets `Options.OSStig` only when
+facts are not: `rpm -qa`, `sysctl -a`, a `find` sweep over the local
+filesystems, `auditctl -l`, `sshd -T` and ~60 file dumps add a few seconds
+of CPU and 50-100 KB of output per node, and none of it changes minute to
+minute. So the scheduler (`App.collectCmds`) sets `Options.OSStig` only for
+the cycle after the user presses `S` on the Security / OS STIG sub-tab; the
+key does nothing anywhere else, and neither launch, `r`, `R` nor re-enabling
+SSH trigger it.
 
-- the node has no OS STIG facts yet (`!prev.STIGProbed`) - i.e. first contact
-  after launch, or a node that joined later, or a node whose previous
-  collection failed;
-- the user pressed `R` (full refresh) or re-enabled SSH with `s`.
-
-Every other cycle the probe omits those sections and `Info.MergeSTIG` copies
-the previous facts forward, so the OS STIG results stay populated. The
-Security tab header shows when the facts were collected and flags nodes still
-pending their first collection.
+Until a node has been collected its OS STIG rules are not emitted at all -
+the sub-tab is empty with the hint to press `S`, and the Node hardening
+column reads "not collected". After a collection `Info.MergeSTIG` copies the
+facts forward on every later cycle, so the results stay populated, and the
+header shows how old they are; press `S` again to re-collect.
 
 ## Footprint
 
@@ -75,4 +75,5 @@ logs:
 ```
 
 `s` turns SSH collection off entirely (API-only mode); `r` forces an
-immediate light cycle; `R` forces heavy + OS STIG.
+immediate light cycle; `R` forces a heavy cycle; `S` (OS STIG sub-tab only)
+collects the OS STIG facts.

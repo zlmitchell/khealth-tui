@@ -22,6 +22,9 @@ auditd.service|active|enabled
 firewalld.service|inactive|disabled
 ===FSTABSWAP
 /dev/mapper/rl-swap     none                    swap    defaults        0 0
+===KUBELETSWAP
+failSwapOn:false
+swapBehavior:LimitedSwap
 ===MOUNTOPTS
 /|xfs|rw,relatime,seclabel
 /var|xfs|rw,nosuid,nodev,noexec,relatime,seclabel
@@ -113,8 +116,8 @@ func TestParsePreflight(t *testing.T) {
 	if !p.Units["fapolicyd.service"].Active || !p.Units["nm-cloud-setup.timer"].Enabled || p.Units["vmtoolsd.service"].Active {
 		t.Errorf("units: %+v", p.Units)
 	}
-	if len(p.FstabSwap) != 1 {
-		t.Errorf("fstab swap: %v", p.FstabSwap)
+	if len(p.FstabSwap) != 1 || p.FailSwapOn != "false" || p.SwapBehavior != "LimitedSwap" {
+		t.Errorf("fstab swap: %v failSwapOn=%q behavior=%q", p.FstabSwap, p.FailSwapOn, p.SwapBehavior)
 	}
 	if m := p.MountOpt("/var/lib/rancher/rke2"); m == nil || m.Mountpoint != "/var" || !m.Has("noexec") {
 		t.Errorf("mount for data-dir: %+v", m)

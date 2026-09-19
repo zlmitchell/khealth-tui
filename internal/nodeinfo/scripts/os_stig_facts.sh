@@ -14,21 +14,25 @@ kv() { printf '%s=%s\n' "$1" "$2"; }
 kv default_target "$(systemctl get-default 2>/dev/null)"
 kv efi "$([ -d /sys/firmware/efi ] && echo 1 || echo 0)"
 if command -v update-crypto-policies >/dev/null 2>&1; then
-  kv crypto_policy "$(update-crypto-policies --show 2>/dev/null)"
+  # --show only prints /etc/crypto-policies/config (python start-up otherwise)
+  kv crypto_policy "$(grep -v '^#' /etc/crypto-policies/config 2>/dev/null | head -1 | tr -d '[:space:]')"
   kv crypto_check "$(update-crypto-policies --check 2>&1 | head -1)"
   kv crypto_applied "$(update-crypto-policies --is-applied 2>&1 | head -1)"
 fi
 kv nx "$(grep -qw nx /proc/cpuinfo 2>/dev/null && echo 1 || echo 0)"
 kv promisc "$(ip -o link 2>/dev/null | grep -c PROMISC)"
 kv wireless "$(ls -d /sys/class/net/*/wireless 2>/dev/null | wc -l)"
-kv rtc_local "$(timedatectl show -p LocalRTC --value 2>/dev/null)"
-kv timezone "$(timedatectl show -p Timezone --value 2>/dev/null)"
+# what timedatectl would report, without waking systemd-timedated (~0.9 s)
+kv rtc_local "$(awk 'NR==3{print ($1=="LOCAL")?"yes":"no"}' /etc/adjtime 2>/dev/null)"
+tz=$(readlink /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##'); [ -n "$tz" ] || tz=$(cat /etc/timezone 2>/dev/null)
+kv timezone "$tz"
 kv root_passwd "$(passwd -S root 2>/dev/null | awk '{print $2}')"
 if command -v rpm >/dev/null 2>&1; then
   kv gpg_keys "$(rpm -q gpg-pubkey --qf '%{SUMMARY};' 2>/dev/null)"
   kv rpm_verify_cron "$(rpm -V cronie crontabs 2>/dev/null | awk '$2 != "c"' | head -5 | tr '\n' ';')"
   kv rpm_verify_sshd "$(rpm -V openssh-server 2>/dev/null | awk '$2 != "c"' | head -5 | tr '\n' ';')"
-  kv repos "$(dnf -C repolist --enabled -q 2>/dev/null | awk 'NR>1{print $1}' | tr '\n' ' ')"
+  # enabled repos from the repo files themselves (dnf -C repolist is 0.2 s of python for the same answer)
+  kv repos "$(awk -F= '/^\[/{r=substr($0,2,length($0)-2); en[r]=1} /^enabled[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); en[r]=($2=="1"||$2=="true"||$2=="yes")} END{for(r in en) if(en[r]) print r}' /etc/yum.repos.d/*.repo 2>/dev/null | sort | tr '\n' ' ')"
   kv redhat_release "$(cat /etc/redhat-release 2>/dev/null)"
 fi
 kv faillock_ctx "$(ls -Zd /var/log/faillock 2>/dev/null | awk '{print $1}')"
@@ -83,8 +87,31 @@ cat /etc/group 2>/dev/null
 sec SHADOWMETA
 awk -F: '{h=$2; t=(h==""?"empty":(h ~ /^[!*]/?"locked":substr(h,1,3))); print $1":"t":"$4":"$5":"$7":"$8}' /etc/shadow 2>/dev/null
 sec STIGSWEEP
-mounts=$(df --local -P -x tmpfs -x devtmpfs 2>/dev/null | awk 'NR>1{print $6}')
-[ -n "$mounts" ] && timeout 120 find $mounts -xdev \( -type d -perm -0002 ! -perm -1000 -printf 'WWNOSTICKY|%p\n' \) -o \( -type d -perm -0002 -uid +999 -printf 'WWUSER|%p|%U\n' \) -o \( -type d -perm -0002 -gid +999 -printf 'WWGROUP|%p|%G\n' \) -o \( -nouser -printf 'NOUSER|%p\n' \) -o \( -nogroup -printf 'NOGROUP|%p\n' \) -o \( -name shosts.equiv -printf 'SHOSTS|%p\n' \) -o \( -name .shosts -printf 'SHOSTS|%p\n' \) 2>/dev/null | head -200
+# Host filesystems only: overlay/nsfs mounts are running containers' root
+# filesystems (150+ on a busy node) and the image layer stores are not the
+# host either. One find pass prints numeric uid/gid, type and mode and awk
+# applies the checks: find's own -nouser/-nogroup call NSS once per file
+# (25 s here with sss in nsswitch, 1 s this way); ids awk does not know are
+# confirmed with a few getent lookups so domain users still resolve.
+mounts=$(df --local -P -x tmpfs -x devtmpfs -x overlay -x nsfs -x squashfs -x efivarfs -x fuse.lxcfs 2>/dev/null | awk 'NR>1{print $6}')
+UIDS=$(timeout 10 getent passwd 2>/dev/null | cut -d: -f3 | tr '\n' ' '); [ -n "$UIDS" ] || UIDS=$(cut -d: -f3 /etc/passwd 2>/dev/null | tr '\n' ' ')
+GIDS=$(timeout 10 getent group 2>/dev/null | cut -d: -f3 | tr '\n' ' '); [ -n "$GIDS" ] || GIDS=$(cut -d: -f3 /etc/group 2>/dev/null | tr '\n' ' ')
+[ -n "$mounts" ] && timeout 120 find $mounts -xdev \( -path '*/io.containerd.snapshotter.v1.*' -o -path '*/io.containerd.runtime.v2.task' -o -path '*/kubelet/pods' -o -path /var/lib/docker/overlay2 -o -path /var/lib/containers/storage \) -prune -o -printf '%U|%G|%y|%m|%f|%p\n' 2>/dev/null | awk -F'|' -v uids="$UIDS" -v gids="$GIDS" '
+BEGIN { n=split(uids,a," "); for(i=1;i<=n;i++) U[a[i]]=1; n=split(gids,a," "); for(i=1;i<=n;i++) G[a[i]]=1 }
+out>=200 { exit }
+{ uid=$1; gid=$2; typ=$3; mode=$4; name=$5; path=$6
+  o=substr(mode,length(mode),1)+0; ww=(o==2||o==3||o==6||o==7); sticky=(length(mode)==4 && substr(mode,1,1)%2==1)
+  if (typ=="d" && ww) { if(!sticky) {print "WWNOSTICKY|" path; out++} if(uid+0>999) {print "WWUSER|" path "|" uid; out++} if(gid+0>999) {print "WWGROUP|" path "|" gid; out++} }
+  if (!(uid in U) && nu[uid]++<5) {print "NOUSER?|" uid "|" path; out++}
+  if (!(gid in G) && ng[gid]++<5) {print "NOGROUP?|" gid "|" path; out++}
+  if (name=="shosts.equiv" || name==".shosts") {print "SHOSTS|" path; out++}
+}' | while IFS='|' read -r k id path; do
+  case "$k" in
+    'NOUSER?') case " $known " in *" u$id "*) ;; *) if getent passwd "$id" >/dev/null 2>&1; then known="$known u$id"; else echo "NOUSER|$path"; fi;; esac;;
+    'NOGROUP?') case " $known " in *" g$id "*) ;; *) if getent group "$id" >/dev/null 2>&1; then known="$known g$id"; else echo "NOGROUP|$path"; fi;; esac;;
+    *) if [ -n "$path" ]; then echo "$k|$id|$path"; else echo "$k|$id"; fi;;
+  esac
+done
 timeout 60 find -L /bin /sbin /usr/bin /usr/sbin /usr/libexec /usr/local/bin /usr/local/sbin -xdev \( -perm /022 -printf 'BINPERM|%p|%m\n' \) -o \( ! -user root -printf 'BINOWNER|%p|%U\n' \) -o \( -gid +999 -printf 'BINGROUP|%p|%G\n' \) 2>/dev/null | head -50
 awk -F: '($3>=1000)&&($1!="nobody")&&($7 !~ /(nologin|false)$/){print $1":"$4":"$6}' /etc/passwd 2>/dev/null | while IFS=: read -r u g h; do
   if [ -d "$h" ]; then stat -c "HOME|$u|%a|%g|%n" "$h" 2>/dev/null; else echo "HOMEMISSING|$u|$h"; continue; fi

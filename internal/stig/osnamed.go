@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s-health-tui/internal/nodeinfo"
@@ -39,7 +40,7 @@ func register(m map[string]namedEval) {
 
 // ---------- helpers ----------
 
-var commentRe = regexp.MustCompile(`^\s*[#;]`)
+var commentRe = rx(`^\s*[#;]`)
 
 // lines returns the non-comment, non-empty lines of a dumped file.
 func lines(info *nodeinfo.Info, path string) ([]string, bool) {
@@ -99,7 +100,7 @@ func grep(info *nodeinfo.Info, re *regexp.Regexp, paths ...string) ([]string, bo
 // keyValue returns the last "KEY value" / "KEY = value" setting of key in
 // the dumped files (case-insensitive key), and whether it was found.
 func keyValue(info *nodeinfo.Info, key string, paths ...string) (string, bool) {
-	re := regexp.MustCompile(`(?i)^(?:[^:]*: )?\s*` + regexp.QuoteMeta(key) + `\s*[= \t]\s*(.*?)\s*$`)
+	re := rx(`(?i)^(?:[^:]*: )?\s*` + regexp.QuoteMeta(key) + `\s*[= \t]\s*(.*?)\s*$`)
 	ls, _ := linesOf(info, paths...)
 	val, found := "", false
 	for _, l := range ls {
@@ -173,7 +174,7 @@ func umaskFile(info *nodeinfo.Info, path string, naWhenMissing bool) (Status, st
 		}
 		return Fail, path + " missing"
 	}
-	re := regexp.MustCompile(`(?i)\bumask\s+(\d{3,4})`)
+	re := rx(`(?i)\bumask\s+(\d{3,4})`)
 	found := false
 	for _, l := range ls {
 		for _, m := range re.FindAllStringSubmatch(l, -1) {
@@ -321,7 +322,7 @@ func init() {
 			return failIf(bad, "accounts with an empty password")
 		},
 		"no_empty_passwords": func(i *nodeinfo.Info) (Status, string) {
-			hits, _ := grep(i, regexp.MustCompile(`\bnullok\b`), append(pamAuthFiles(i), pamPasswordFile(i, "/etc/pam.d/system-auth"))...)
+			hits, _ := grep(i, rx(`\bnullok\b`), append(pamAuthFiles(i), pamPasswordFile(i, "/etc/pam.d/system-auth"))...)
 			return failIf(hits, "nullok in PAM")
 		},
 		"account_unique_id": evalDuplicateUIDs,
@@ -448,7 +449,7 @@ func init() {
 			return failIf(bad, "home files group-owned by a group the user is not in")
 		},
 		"accounts_umask_interactive_users": func(i *nodeinfo.Info) (Status, string) {
-			re := regexp.MustCompile(`(?i)umask\s+(\d{3,4})`)
+			re := rx(`(?i)umask\s+(\d{3,4})`)
 			var bad []string
 			for _, l := range sweep(i, "UMASK") {
 				if m := re.FindStringSubmatch(l); m != nil && strings.TrimLeft(m[1], "0") != "77" {
@@ -580,7 +581,7 @@ func init() {
 	pamHas := func(rhelFile, module string) namedEval {
 		return func(i *nodeinfo.Info) (Status, string) {
 			path := pamPasswordFile(i, rhelFile)
-			hits, ok := grep(i, regexp.MustCompile(`^[^:]*:\s*password\s+\S+.*`+regexp.QuoteMeta(module)), path)
+			hits, ok := grep(i, rx(`^[^:]*:\s*password\s+\S+.*`+regexp.QuoteMeta(module)), path)
 			if !ok {
 				return Fail, path + " missing"
 			}
@@ -593,11 +594,11 @@ func init() {
 	pamUnixRounds := func(rhelFile string) namedEval {
 		return func(i *nodeinfo.Info) (Status, string) {
 			path := pamPasswordFile(i, rhelFile)
-			hits, ok := grep(i, regexp.MustCompile(`^[^:]*:\s*password\s+\S+.*pam_unix\.so`), path)
+			hits, ok := grep(i, rx(`^[^:]*:\s*password\s+\S+.*pam_unix\.so`), path)
 			if !ok {
 				return Fail, path + " missing"
 			}
-			re := regexp.MustCompile(`rounds=(\d+)`)
+			re := rx(`rounds=(\d+)`)
 			for _, h := range hits {
 				if m := re.FindStringSubmatch(h); m != nil {
 					if n, _ := atoi(m[1]); n >= 100000 {
@@ -612,7 +613,7 @@ func init() {
 	pamUnixSHA512 := func(rhelFile string) namedEval {
 		return func(i *nodeinfo.Info) (Status, string) {
 			path := pamPasswordFile(i, rhelFile)
-			hits, ok := grep(i, regexp.MustCompile(`^[^:]*:\s*password\s+\S+.*pam_unix\.so.*\bsha512\b`), path)
+			hits, ok := grep(i, rx(`^[^:]*:\s*password\s+\S+.*pam_unix\.so.*\bsha512\b`), path)
 			if !ok {
 				return Fail, path + " missing"
 			}
@@ -627,13 +628,13 @@ func init() {
 			ls, ok := lines(i, "/etc/security/faillock.conf")
 			if !ok {
 				// pre-faillock.conf systems carry the options on the preauth line
-				hits, _ := grep(i, regexp.MustCompile(`pam_faillock\.so.*preauth.*\b`+regexp.QuoteMeta(opt)+`\b`), pamAuthFiles(i)...)
+				hits, _ := grep(i, rx(`pam_faillock\.so.*preauth.*\b`+regexp.QuoteMeta(opt)+`\b`), pamAuthFiles(i)...)
 				if len(hits) > 0 {
 					return Pass, ""
 				}
 				return Fail, "/etc/security/faillock.conf missing and " + opt + " not on the preauth line"
 			}
-			re := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(opt) + `\b\s*(?:=\s*(\S+))?`)
+			re := rx(`^\s*` + regexp.QuoteMeta(opt) + `\b\s*(?:=\s*(\S+))?`)
 			for _, l := range ls {
 				if m := re.FindStringSubmatch(l); m != nil {
 					if want == "" || m[1] == want {
@@ -690,7 +691,7 @@ func init() {
 			return Pass, ""
 		},
 		"smartcard_pam_enabled": func(i *nodeinfo.Info) (Status, string) {
-			hits, ok := grep(i, regexp.MustCompile(`pam_pkcs11\.so`), "/etc/pam.d/common-auth")
+			hits, ok := grep(i, rx(`pam_pkcs11\.so`), "/etc/pam.d/common-auth")
 			if !ok || len(hits) == 0 {
 				return Fail, "pam_pkcs11.so not in /etc/pam.d/common-auth (NA only with an approved alternate MFA)"
 			}
@@ -703,9 +704,9 @@ func init() {
 }
 
 func pkcs11Policy(want string) namedEval {
-	re := regexp.MustCompile(`\b(` + want + `)\b`)
+	re := rx(`\b(` + want + `)\b`)
 	return func(i *nodeinfo.Info) (Status, string) {
-		hits, ok := grep(i, regexp.MustCompile(`cert_policy`), "/etc/pam_pkcs11/pam_pkcs11.conf")
+		hits, ok := grep(i, rx(`cert_policy`), "/etc/pam_pkcs11/pam_pkcs11.conf")
 		if !ok {
 			if !pkgAny(i, "libpam-pkcs11", "pam_pkcs11") {
 				return Fail, "pam_pkcs11 not installed (NA only when smart card authentication is not used)"
@@ -730,7 +731,7 @@ func init() {
 	sudoers := []string{"/etc/sudoers", "/etc/sudoers.d/"}
 	register(map[string]namedEval{
 		"sudo_remove_nopasswd": func(i *nodeinfo.Info) (Status, string) {
-			hits, _ := grep(i, regexp.MustCompile(`\bNOPASSWD\b`), sudoers...)
+			hits, _ := grep(i, rx(`\bNOPASSWD\b`), sudoers...)
 			if len(hits) > 0 {
 				return Fail, "NOPASSWD in " + truncList(hits, 3) + " (must be documented as an MFA admin group)"
 			}
@@ -739,12 +740,12 @@ func init() {
 		"sudo_remove_no_authenticate": sudoNoAuthenticate,
 		"sudo_require_authentication": sudoNoAuthenticate,
 		"sudo_require_reauthentication": func(i *nodeinfo.Info) (Status, string) {
-			hits, _ := grep(i, regexp.MustCompile(`(?i)timestamp_timeout\s*=\s*(-?\d+)`), sudoers...)
+			hits, _ := grep(i, rx(`(?i)timestamp_timeout\s*=\s*(-?\d+)`), sudoers...)
 			if len(hits) == 0 {
 				return Fail, "timestamp_timeout not set in sudoers"
 			}
 			files := map[string]bool{}
-			re := regexp.MustCompile(`(?i)timestamp_timeout\s*=\s*(-?\d+)`)
+			re := rx(`(?i)timestamp_timeout\s*=\s*(-?\d+)`)
 			for _, h := range hits {
 				f, _, _ := strings.Cut(h, ": ")
 				files[f] = true
@@ -763,7 +764,7 @@ func init() {
 			var missing []string
 			files := map[string]bool{}
 			for _, opt := range []string{"!targetpw", "!rootpw", "!runaspw"} {
-				hits, _ := grep(i, regexp.MustCompile(`(?i)^[^:]*:\s*Defaults\b.*`+regexp.QuoteMeta(opt)), sudoers...)
+				hits, _ := grep(i, rx(`(?i)^[^:]*:\s*Defaults\b.*`+regexp.QuoteMeta(opt)), sudoers...)
 				if len(hits) == 0 {
 					missing = append(missing, opt)
 				}
@@ -781,7 +782,7 @@ func init() {
 			return Pass, ""
 		},
 		"sudo_restrict_privilege_elevation_to_authorized": func(i *nodeinfo.Info) (Status, string) {
-			hits, _ := grep(i, regexp.MustCompile(`^[^:]*:\s*ALL\s+ALL\s*=\s*\(ALL(:ALL)?\)\s+ALL`), sudoers...)
+			hits, _ := grep(i, rx(`^[^:]*:\s*ALL\s+ALL\s*=\s*\(ALL(:ALL)?\)\s+ALL`), sudoers...)
 			return failIf(hits, "sudoers entries granting ALL to everyone")
 		},
 		"sudoers_default_includedir": func(i *nodeinfo.Info) (Status, string) {
@@ -789,7 +790,7 @@ func init() {
 			if !ok {
 				return Fail, "/etc/sudoers missing"
 			}
-			re := regexp.MustCompile(`(?m)^\s*[#@]include(dir)?\s+(\S+)`)
+			re := rx(`(?m)^\s*[#@]include(dir)?\s+(\S+)`)
 			ms := re.FindAllStringSubmatch(c, -1)
 			if len(ms) == 0 {
 				return NA, "no include directives"
@@ -799,11 +800,11 @@ func init() {
 					return Fail, "include of " + m[2]
 				}
 			}
-			nested, _ := grep(i, regexp.MustCompile(`^[^:]*:\s*[#@]include`), "/etc/sudoers.d/")
+			nested, _ := grep(i, rx(`^[^:]*:\s*[#@]include`), "/etc/sudoers.d/")
 			return failIf(nested, "nested includes in /etc/sudoers.d")
 		},
 		"selinux_context_elevation_for_sudo": func(i *nodeinfo.Info) (Status, string) {
-			hits, _ := grep(i, regexp.MustCompile(`sysadm_r`), sudoers...)
+			hits, _ := grep(i, rx(`sysadm_r`), sudoers...)
 			if len(hits) == 0 {
 				return Fail, "no sudoers entry elevating to TYPE=sysadm_t ROLE=sysadm_r"
 			}
@@ -828,7 +829,7 @@ func init() {
 }
 
 func sudoNoAuthenticate(i *nodeinfo.Info) (Status, string) {
-	hits, _ := grep(i, regexp.MustCompile(`!authenticate`), "/etc/sudoers", "/etc/sudoers.d/")
+	hits, _ := grep(i, rx(`!authenticate`), "/etc/sudoers", "/etc/sudoers.d/")
 	return failIf(hits, "!authenticate in sudoers")
 }
 
@@ -845,8 +846,8 @@ func init() {
 		"accounts_umask_etc_profile":   func(i *nodeinfo.Info) (Status, string) { return umaskFile(i, "/etc/profile", false) },
 		"accounts_umask_etc_csh_cshrc": func(i *nodeinfo.Info) (Status, string) { return umaskFile(i, "/etc/csh.cshrc", true) },
 		"accounts_tmout": func(i *nodeinfo.Info) (Status, string) {
-			hits, _ := grep(i, regexp.MustCompile(`\bTMOUT\s*=\s*(\d+)`), "/etc/profile", "/etc/profile.d/")
-			re := regexp.MustCompile(`\bTMOUT\s*=\s*(\d+)`)
+			hits, _ := grep(i, rx(`\bTMOUT\s*=\s*(\d+)`), "/etc/profile", "/etc/profile.d/")
+			re := rx(`\bTMOUT\s*=\s*(\d+)`)
 			for _, h := range hits {
 				if m := re.FindStringSubmatch(h); m != nil {
 					if n, _ := atoi(m[1]); n > 0 && n <= 600 {
@@ -858,7 +859,7 @@ func init() {
 			return Fail, "TMOUT not set in /etc/profile.d"
 		},
 		"accounts_max_concurrent_login_sessions": func(i *nodeinfo.Info) (Status, string) {
-			re := regexp.MustCompile(`^[^:]*:\s*\S+\s+(?:hard|-)\s+maxlogins\s+(\d+)`)
+			re := rx(`^[^:]*:\s*\S+\s+(?:hard|-)\s+maxlogins\s+(\d+)`)
 			hits, _ := grep(i, re, "/etc/security/limits.conf", "/etc/security/limits.d/")
 			if len(hits) == 0 {
 				return Fail, "no hard maxlogins in limits.conf"
@@ -873,7 +874,7 @@ func init() {
 			return Pass, ""
 		},
 		"disable_users_coredumps": func(i *nodeinfo.Info) (Status, string) {
-			re := regexp.MustCompile(`^[^:]*:\s*(\S+)\s+(?:hard|-)\s+core\s+(\d+)`)
+			re := rx(`^[^:]*:\s*(\S+)\s+(?:hard|-)\s+core\s+(\d+)`)
 			hits, _ := grep(i, re, "/etc/security/limits.conf", "/etc/security/limits.d/")
 			global := false
 			for _, h := range hits {
@@ -1108,7 +1109,7 @@ func init() {
 		"ensure_gpgcheck_local_packages":     dnfConf("localpkg_gpgcheck", "1"),
 		"clean_components_post_updating": func(i *nodeinfo.Info) (Status, string) {
 			if isUbuntu(i) {
-				hits, _ := grep(i, regexp.MustCompile(`(?i)Remove-Unused-Dependencies\s+"true"`), "/etc/apt/apt.conf.d/")
+				hits, _ := grep(i, rx(`(?i)Remove-Unused-Dependencies\s+"true"`), "/etc/apt/apt.conf.d/")
 				if len(hits) == 0 {
 					return Fail, `Unattended-Upgrade::Remove-Unused-Dependencies "true" not set in /etc/apt/apt.conf.d`
 				}
@@ -1140,7 +1141,7 @@ func init() {
 			return failIf(epel, "EPEL repositories enabled")
 		},
 		"apt_conf_disallow_unauthenticated": func(i *nodeinfo.Info) (Status, string) {
-			hits, _ := grep(i, regexp.MustCompile(`(?i)AllowUnauthenticated\s+"?true`), "/etc/apt/apt.conf.d/")
+			hits, _ := grep(i, rx(`(?i)AllowUnauthenticated\s+"?true`), "/etc/apt/apt.conf.d/")
 			return failIf(hits, "AllowUnauthenticated true")
 		},
 		"kerberos_disable_no_keytab": func(i *nodeinfo.Info) (Status, string) {
@@ -1175,7 +1176,7 @@ func dnfConf(key, want string) namedEval {
 }
 
 func repoGpgcheck(i *nodeinfo.Info) (Status, string) {
-	hits, found := grep(i, regexp.MustCompile(`(?i)^[^:]*:\s*gpgcheck\s*=\s*0`), "/etc/yum.repos.d/")
+	hits, found := grep(i, rx(`(?i)^[^:]*:\s*gpgcheck\s*=\s*0`), "/etc/yum.repos.d/")
 	if !found {
 		return Manual, "no repo files dumped"
 	}
@@ -1185,4 +1186,19 @@ func repoGpgcheck(i *nodeinfo.Info) (Status, string) {
 func firstField(s string) string {
 	s, _, _ = strings.Cut(s, ";")
 	return strings.TrimSpace(s)
+}
+
+// rxCache holds every pattern the named evaluators use. They are built at
+// evaluation time (some from the rule's key), and a recompute evaluates
+// ~450 rules per node, so compiling per call was a quarter of Evaluate.
+var rxCache sync.Map
+
+// rx returns the compiled pattern, compiling it once.
+func rx(pattern string) *regexp.Regexp {
+	if v, ok := rxCache.Load(pattern); ok {
+		return v.(*regexp.Regexp)
+	}
+	re := regexp.MustCompile(pattern)
+	v, _ := rxCache.LoadOrStore(pattern, re)
+	return v.(*regexp.Regexp)
 }

@@ -20,7 +20,7 @@ func preflightInfo() *nodeinfo.Info {
 		Registries: []nodeinfo.ConfigFile{{Path: "/etc/rancher/rke2/registries.yaml", Content: "mirrors:\n  docker.io:\n    endpoint:\n      - \"https://harbor.corp:5000\"\nconfigs:\n  \"harbor.corp\":\n    auth:\n      username: <masked>\n      password: <masked>\n"}},
 	}
 	ni.Preflight = nodeinfo.Preflight{
-		Probed: true, DeniesProbed: true,
+		Probed: true, DeniesProbed: true, FailSwapOn: "true",
 		Swaps:     []nodeinfo.SwapDev{{Name: "/dev/dm-1", Type: "partition", SizeKB: 2097148}},
 		Units:     map[string]nodeinfo.PFUnit{"fapolicyd.service": {Active: true}, "auditd.service": {Active: true}, "NetworkManager.service": {Active: true}, "nm-cloud-setup.timer": {Enabled: true}, "firewalld.service": {Active: true}, "multipathd.service": {Active: true}},
 		MountOpts: []nodeinfo.MountOpt{{Mountpoint: "/", Type: "xfs", Options: []string{"rw"}}, {Mountpoint: "/var", Type: "xfs", Options: []string{"rw", "nosuid", "nodev", "noexec"}}},
@@ -152,6 +152,37 @@ func findingsFor(f []Finding, obj string) []Finding {
 		}
 	}
 	return out
+}
+
+func TestPreflightSwapRKE2Default(t *testing.T) {
+	in := baseInput()
+	ni := preflightInfo()
+	ni.Preflight.FailSwapOn = "false"
+	ni.SwapTotal, ni.SwapFree = 2097148*1024, 2000000*1024
+	in.Nodes["cp-1"] = ni
+	f := Evaluate(in)
+	if findingWith(f, SevCrit, "node", "swap active") != nil {
+		t.Error("rke2 failSwapOn=false must not raise the CRIT swap finding")
+	}
+	if findingWith(f, SevInfo, "node", "swap in use") == nil {
+		t.Error("expected the INFO swap-in-use finding")
+	}
+}
+
+func TestModprobeDisables(t *testing.T) {
+	cases := map[string]bool{
+		"install cdrom /bin/false": true,
+		"blacklist sr_mod":         true,
+		"install nf_conntrack /sbin/modprobe --ignore-install nf_conntrack $CMDLINE_OPTS": false,
+		"install usb-storage /bin/true": true,
+	}
+	for line, want := range cases {
+		f := strings.Fields(line)
+		m := nodeinfo.ModprobeLine{Directive: f[0], Module: f[1], Line: line}
+		if m.Disables() != want {
+			t.Errorf("%q: Disables=%v want %v", line, m.Disables(), want)
+		}
+	}
 }
 
 func TestNoProxyCovers(t *testing.T) {

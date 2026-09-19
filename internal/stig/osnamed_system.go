@@ -115,9 +115,9 @@ func init() {
 			}
 			return Manual, fmt.Sprintf("%s on %s is %.1f GB; confirm it holds one week of records", dir, best.Mountpoint, gb)
 		},
-		"audit_rules_immutable":            auditRuleFileHas(regexp.MustCompile(`^\s*-e\s+2\b`)),
-		"audit_rules_immutable_login_uids": auditRuleFileHas(regexp.MustCompile(`^\s*--loginuid-immutable\b`)),
-		"audit_rules_system_shutdown":      auditRuleFileHas(regexp.MustCompile(`^\s*-f\s+2\b`)),
+		"audit_rules_immutable":            auditRuleFileHas(rx(`^\s*-e\s+2\b`)),
+		"audit_rules_immutable_login_uids": auditRuleFileHas(rx(`^\s*--loginuid-immutable\b`)),
+		"audit_rules_system_shutdown":      auditRuleFileHas(rx(`^\s*-f\s+2\b`)),
 		"audit_rules_suid_privilege_function": func(i *nodeinfo.Info) (Status, string) {
 			rules, src := auditRulesOf(i)
 			if src == "" {
@@ -258,21 +258,21 @@ func rsyslogGrep(re *regexp.Regexp, missing string) namedEval {
 func init() {
 	register(map[string]namedEval{
 		"rsyslog_nolisten": func(i *nodeinfo.Info) (Status, string) {
-			hits, _ := grep(i, regexp.MustCompile(`(?i)InputTCPServerRun|UDPServerRun|RELPServerRun|imtcp|imudp|imrelp`), "/etc/rsyslog.conf", "/etc/rsyslog.d/")
+			hits, _ := grep(i, rx(`(?i)InputTCPServerRun|UDPServerRun|RELPServerRun|imtcp|imudp|imrelp`), "/etc/rsyslog.conf", "/etc/rsyslog.d/")
 			if len(hits) > 0 {
 				return Fail, "rsyslog listens for remote logs (only a log aggregation server may): " + truncList(hits, 2)
 			}
 			return Pass, ""
 		},
-		"rsyslog_remote_access_monitoring":                       rsyslogGrep(regexp.MustCompile(`(auth\.\*|authpriv\.\*|daemon\.\*)`), "auth.*, authpriv.* or daemon.* not logged"),
-		"rsyslog_remote_loghost":                                 rsyslogGrep(regexp.MustCompile(`@@|type="omfwd"`), "no remote log host (@@host or omfwd)"),
-		"rsyslog_cron_logging":                                   rsyslogGrep(regexp.MustCompile(`(?i)(^|[;:\s])cron\.\*|^[^:]*:\s*\*\.\*\s`), "cron facility not logged"),
-		"rsyslog_encrypt_offload_defaultnetstreamdriver":         rsyslogGrep(regexp.MustCompile(`(?i)\$DefaultNetstreamDriver\s+gtls|StreamDriver(\.Name)?\s*=\s*"?(gtls|ossl)`), "$DefaultNetstreamDriver gtls not set"),
-		"rsyslog_omfwd_streamdriver":                             rsyslogGrep(regexp.MustCompile(`(?i)StreamDriver\s*=\s*"(gtls|ossl)"`), `no StreamDriver="gtls"/"ossl" in an omfwd action`),
-		"rsyslog_encrypt_offload_actionsendstreamdrivermode":     rsyslogGrep(regexp.MustCompile(`(?i)\$ActionSendStreamDriverMode\s+1|StreamDriver\.?Mode\s*=\s*"?1`), "$ActionSendStreamDriverMode 1 not set"),
-		"rsyslog_omfwd_tls":                                      rsyslogGrep(regexp.MustCompile(`(?i)tls="on"|StreamDriver\.Mode\s*=\s*"1"`), `no tls="on" / StreamDriver.Mode="1" in an omfwd action`),
-		"rsyslog_encrypt_offload_actionsendstreamdriverauthmode": rsyslogGrep(regexp.MustCompile(`(?i)StreamDriver\.?AuthMode\s*=?\s*"?x509/name`), "$ActionSendStreamDriverAuthMode x509/name not set"),
-		"rsyslog_omfwd_authmode":                                 rsyslogGrep(regexp.MustCompile(`(?i)(streamdriver|tls)\.authmode\s*=\s*"x509/name"`), `no streamdriver.authmode="x509/name" in an omfwd action`),
+		"rsyslog_remote_access_monitoring":                       rsyslogGrep(rx(`(auth\.\*|authpriv\.\*|daemon\.\*)`), "auth.*, authpriv.* or daemon.* not logged"),
+		"rsyslog_remote_loghost":                                 rsyslogGrep(rx(`@@|type="omfwd"`), "no remote log host (@@host or omfwd)"),
+		"rsyslog_cron_logging":                                   rsyslogGrep(rx(`(?i)(^|[;:\s])cron\.\*|^[^:]*:\s*\*\.\*\s`), "cron facility not logged"),
+		"rsyslog_encrypt_offload_defaultnetstreamdriver":         rsyslogGrep(rx(`(?i)\$DefaultNetstreamDriver\s+gtls|StreamDriver(\.Name)?\s*=\s*"?(gtls|ossl)`), "$DefaultNetstreamDriver gtls not set"),
+		"rsyslog_omfwd_streamdriver":                             rsyslogGrep(rx(`(?i)StreamDriver\s*=\s*"(gtls|ossl)"`), `no StreamDriver="gtls"/"ossl" in an omfwd action`),
+		"rsyslog_encrypt_offload_actionsendstreamdrivermode":     rsyslogGrep(rx(`(?i)\$ActionSendStreamDriverMode\s+1|StreamDriver\.?Mode\s*=\s*"?1`), "$ActionSendStreamDriverMode 1 not set"),
+		"rsyslog_omfwd_tls":                                      rsyslogGrep(rx(`(?i)tls="on"|StreamDriver\.Mode\s*=\s*"1"`), `no tls="on" / StreamDriver.Mode="1" in an omfwd action`),
+		"rsyslog_encrypt_offload_actionsendstreamdriverauthmode": rsyslogGrep(rx(`(?i)StreamDriver\.?AuthMode\s*=?\s*"?x509/name`), "$ActionSendStreamDriverAuthMode x509/name not set"),
+		"rsyslog_omfwd_authmode":                                 rsyslogGrep(rx(`(?i)(streamdriver|tls)\.authmode\s*=\s*"x509/name"`), `no streamdriver.authmode="x509/name" in an omfwd action`),
 	})
 }
 
@@ -294,19 +294,19 @@ func chronyGrep(re *regexp.Regexp, missing string) namedEval {
 }
 
 func init() {
-	servers := regexp.MustCompile(`^[^:]*:\s*(server|pool|peer)\s+\S+`)
+	servers := rx(`^[^:]*:\s*(server|pool|peer)\s+\S+`)
 	register(map[string]namedEval{
 		"chronyd_server_directive":       chronyGrep(servers, "no server/pool directive"),
 		"chronyd_specify_remote_server":  chronyGrep(servers, "no server/pool directive"),
-		"chronyd_client_only":            chronyGrep(regexp.MustCompile(`^[^:]*:\s*port\s+0\b`), "port 0 not set (chronyd may act as a server)"),
-		"chronyd_no_chronyc_network":     chronyGrep(regexp.MustCompile(`^[^:]*:\s*cmdport\s+0\b`), "cmdport 0 not set"),
-		"chronyd_configure_local_socket": chronyGrep(regexp.MustCompile(`^[^:]*:\s*cmdport\s+0\b`), "cmdport 0 not set"),
+		"chronyd_client_only":            chronyGrep(rx(`^[^:]*:\s*port\s+0\b`), "port 0 not set (chronyd may act as a server)"),
+		"chronyd_no_chronyc_network":     chronyGrep(rx(`^[^:]*:\s*cmdport\s+0\b`), "cmdport 0 not set"),
+		"chronyd_configure_local_socket": chronyGrep(rx(`^[^:]*:\s*cmdport\s+0\b`), "cmdport 0 not set"),
 		"chronyd_or_ntpd_set_maxpoll": func(i *nodeinfo.Info) (Status, string) {
 			hits, found := grep(i, servers, chronyFiles...)
 			if !found || len(hits) == 0 {
 				return Fail, "no server/pool directive"
 			}
-			re := regexp.MustCompile(`\bmaxpoll\s+(\d+)`)
+			re := rx(`\bmaxpoll\s+(\d+)`)
 			for _, h := range hits {
 				m := re.FindStringSubmatch(h)
 				if m == nil {
@@ -351,7 +351,7 @@ func sameSet(a, b string) bool {
 // cryptoBackend checks a "Ciphers ..." / "MACs ..." line in a crypto-policies
 // back-end file (RHEL 9/10 "Ciphers a,b" or RHEL 8 "-oCiphers=a,b").
 func cryptoBackend(path, key, want string) namedEval {
-	re := regexp.MustCompile(`(?im)^\s*(?:CRYPTO_POLICY=.*-o)?` + key + `[= ]([^ '"\n]+)`)
+	re := rx(`(?im)^\s*(?:CRYPTO_POLICY=.*-o)?` + key + `[= ]([^ '"\n]+)`)
 	return func(i *nodeinfo.Info) (Status, string) {
 		c, ok := i.STIGFile(path)
 		if !ok {
@@ -371,7 +371,7 @@ func cryptoBackend(path, key, want string) namedEval {
 // sshConfigExact checks a keyword in sshd_config / ssh_config (+ .d) for an
 // exact, ordered list; conflicting lines fail.
 func sshConfigExact(files []string, key, want string) namedEval {
-	re := regexp.MustCompile(`(?i)^[^:]*:\s*` + key + `\s+(\S+)`)
+	re := rx(`(?i)^[^:]*:\s*` + key + `\s+(\S+)`)
 	return func(i *nodeinfo.Info) (Status, string) {
 		hits, found := grep(i, re, files...)
 		if !found {
@@ -454,7 +454,7 @@ func init() {
 		"harden_sshd_ciphers_openssh_conf_crypto_policy":       cryptoBackend("/etc/crypto-policies/back-ends/openssh.config", "Ciphers", rhelCiphers),
 		"harden_sshd_macs_openssh_conf_crypto_policy":          cryptoBackend("/etc/crypto-policies/back-ends/openssh.config", "MACs", rhelMACs),
 		"sshd_include_crypto_policy": func(i *nodeinfo.Info) (Status, string) {
-			hits, found := grep(i, regexp.MustCompile(`(?i)^[^:]*:\s*Include\s+/etc/crypto-policies/back-ends/opensshserver\.config`), sshdFiles...)
+			hits, found := grep(i, rx(`(?i)^[^:]*:\s*Include\s+/etc/crypto-policies/back-ends/opensshserver\.config`), sshdFiles...)
 			if !found {
 				return Fail, "/etc/ssh/sshd_config missing"
 			}
@@ -615,7 +615,7 @@ func init() {
 			return NA, "no wireless radios"
 		},
 		"network_configure_name_resolution": func(i *nodeinfo.Info) (Status, string) {
-			hits, found := grep(i, regexp.MustCompile(`^[^:]*:\s*nameserver\s+\S+`), "/etc/resolv.conf")
+			hits, found := grep(i, rx(`^[^:]*:\s*nameserver\s+\S+`), "/etc/resolv.conf")
 			if !found {
 				return Fail, "/etc/resolv.conf missing"
 			}
@@ -642,7 +642,7 @@ func init() {
 			return failIf(extra, "smtpd_client_restrictions entries beyond permit_mynetworks,reject")
 		},
 		"postfix_client_configure_mail_alias_postmaster": func(i *nodeinfo.Info) (Status, string) {
-			hits, found := grep(i, regexp.MustCompile(`^[^:]*:\s*postmaster:\s*root\s*$`), "/etc/aliases")
+			hits, found := grep(i, rx(`^[^:]*:\s*postmaster:\s*root\s*$`), "/etc/aliases")
 			if !found || len(hits) == 0 {
 				return Fail, "no 'postmaster: root' alias"
 			}
@@ -840,7 +840,7 @@ func init() {
 				return NA, "UEFI boot"
 			}
 			line := cmd(i, "grub_superusers")
-			m := regexp.MustCompile(`superusers="?([^" ]*)`).FindStringSubmatch(line)
+			m := rx(`superusers="?([^" ]*)`).FindStringSubmatch(line)
 			if m == nil || m[1] == "" {
 				return Fail, "no superusers set in grub.cfg"
 			}

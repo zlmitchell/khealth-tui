@@ -1410,7 +1410,9 @@ func (a *App) hardeningContent() content {
 		}
 		counts, _ := stig.OSSummary(a.stigRes, n)
 		osCell := styleDim.Render("no STIG table")
-		if len(counts) > 0 {
+		if !ni.STIGProbed {
+			osCell = styleDim.Render("not collected (S on OS STIG)")
+		} else if len(counts) > 0 {
 			txt := stig.OSSummaryText(counts)
 			switch {
 			case counts[stig.Fail] > 0:
@@ -1507,7 +1509,7 @@ func (a *App) osStigContent() content {
 	}
 	h, lines := renderTable(a.width, []column{{title: "STATUS"}, {title: "CAT"}, {title: "ID"}, {title: "STIG ID"}, {title: "STIG", max: 22}, {title: "RULE", max: 56}, {title: "DETAIL"}}, rows)
 	hdr = append(hdr, h)
-	c := content{header: hdr, selectable: true, empty: "no OS STIG results (no SSH node facts yet)"}
+	c := content{header: hdr, selectable: true, empty: "no OS STIG results yet - press S to collect the facts from the nodes"}
 	for i, l := range lines {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
@@ -1561,11 +1563,11 @@ func (a *App) osBenchmarkLine() string {
 			oldest = ni.STIGCollected
 		}
 	}
-	when := styleDim.Render("facts pending first collection")
+	when := styleWarn.Render("facts not collected yet - press S on the OS STIG sub-tab to run the probe (a few seconds per node)")
 	if !oldest.IsZero() {
-		when = styleDim.Render("facts collected " + age(oldest) + " ago (once per node; R re-collects)")
+		when = styleDim.Render("facts collected " + age(oldest) + " ago (S re-collects)")
 		if unprobed > 0 {
-			when += styleWarn.Render(fmt.Sprintf(", %d node(s) pending", unprobed))
+			when += styleWarn.Render(fmt.Sprintf(", %d node(s) not collected", unprobed))
 		}
 	}
 	return kv("OS STIGs", strings.Join(parts, "  ·  ")) + "  " + when

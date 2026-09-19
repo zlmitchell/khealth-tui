@@ -123,7 +123,7 @@ type App struct {
 	spinner     spinner.Model
 	problemOnly bool
 	hideManual  bool // Security: hide MANUAL rules (m)
-	stigNext    bool // re-collect the OS STIG facts on the next SSH cycle (R)
+	stigNext    bool // collect the OS STIG facts on the next SSH cycle (S on the OS STIG sub-tab)
 
 	cursor   [tabCount]int
 	scroll   [tabCount]int
@@ -375,13 +375,13 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 			continue
 		}
 		opts := nodeinfo.Options{Heavy: heavy, LogLines: a.cfg.Logs.Lines, LogSince: a.cfg.Logs.Since, PVPaths: pvPaths}
-		// OS STIG facts are collected once per node (first contact) and on R,
-		// not every cycle: sysctl -a, package lists, find scans and config
-		// dumps are the most expensive part of the probe. The config tier
-		// (certs, sysctls, config files, slow hardening commands) rides on
-		// the heavy cycles for the same reason.
+		// OS STIG facts are collected only when asked for (S on the OS STIG
+		// sub-tab): sysctl -a, package lists, find scans and config dumps are
+		// the most expensive part of the probe and never run unrequested. The
+		// config tier (certs, sysctls, config files, slow hardening commands)
+		// rides on the heavy cycles for the same reason.
 		prev := a.nodes[name]
-		opts.OSStig = a.stigNext || prev == nil || !prev.STIGProbed
+		opts.OSStig = a.stigNext
 		opts.Config = heavy || prev == nil || !prev.ConfigProbed
 		opts.CPUSample = prev == nil || prev.Err != nil || prev.CPUStat.Total == 0
 		if prev != nil && prev.Err == nil {
@@ -428,6 +428,22 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 	}
 	a.stigNext = false
 	return tea.Batch(cmds...)
+}
+
+// sshTargetNames is sshTargets filtered by ssh.nodes, names only.
+func (a *App) sshTargetNames(snap *k8s.Snapshot) []string {
+	only := map[string]bool{}
+	for _, n := range a.cfg.SSH.Nodes {
+		only[n] = true
+	}
+	nodes, _ := a.sshTargets(snap)
+	var out []string
+	for i := range nodes {
+		if len(only) == 0 || only[nodes[i].Name] {
+			out = append(out, nodes[i].Name)
+		}
+	}
+	return out
 }
 
 // sshTargets returns the nodes to collect from. When the API returned no
@@ -974,11 +990,26 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "R":
 		a.heavyNext = true
-		a.stigNext = true
 		a.client.ResetDenied() // retry the API calls that were refused
 		if !a.refreshing {
-			a.setStatus("full refresh (logs, images, tarballs, OS STIG facts)")
+			a.setStatus("full refresh (logs, images, tarballs)")
 			return a, a.refreshCmd()
+		}
+	case "S":
+		// OS STIG collection is explicit: only from its own sub-tab
+		if a.tab == tabSecurity && a.subName() == "OS STIG" {
+			switch {
+			case a.runner == nil:
+				a.setStatus("SSH unavailable: " + a.sshErr)
+			case !a.sshEnabled:
+				a.setStatus("enable SSH collection first (s)")
+			case a.snap == nil:
+				a.setStatus("waiting for the first API snapshot")
+			default:
+				a.stigNext = true
+				a.setStatus(fmt.Sprintf("collecting OS STIG facts from %d node(s)", len(a.sshTargetNames(a.snap))))
+				return a, a.collectCmds(a.snap)
+			}
 		}
 	case "s":
 		if a.runner == nil {
@@ -988,7 +1019,6 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if a.sshEnabled {
 				a.setStatus("SSH collection enabled")
 				a.heavyNext = true
-				a.stigNext = true
 				return a, a.collectCmds(a.snap)
 			}
 			a.setStatus("SSH collection disabled")
@@ -1732,6 +1762,7 @@ func helpLines() []string {
 		"  Events     enter  open the involved object in the inspector",
 		"  Security   ←/→    Rules / Node hardening / OS STIG        enter  rule detail + fix",
 		"             a      hide passing rules                      m      hide MANUAL rules",
+		"             S      (OS STIG sub-tab) collect the OS STIG facts from the nodes now",
 		"",
 		styleBold.Render("Log viewer (L)"),
 		"  [ ] / tab  switch container    { }  next/prev pod    p  previous instance    f  follow    w  wrap    T  timestamps short/off/full    H  highlighting    r  reload    esc  close",

@@ -33,9 +33,13 @@ done
 if [ "__CONFIG__" = 1 ]; then
 sec FSTABSWAP
 grep -E '^[^#]*[[:space:]]swap[[:space:]]' /etc/fstab 2>/dev/null
+sec KUBELETSWAP
+# rke2/k3s write failSwapOn: false into their kubelet defaults; kubeadm and
+# a kubelet-arg override keep the upstream default (true)
+grep -hsE '^[[:space:]]*(failSwapOn|swapBehavior):' "$RKE2_DD"/agent/etc/kubelet.conf.d/*.conf "$K3S_DD"/agent/etc/kubelet.conf.d/*.conf /var/lib/kubelet/config.yaml /etc/rancher/rke2/kubelet-config.yaml 2>/dev/null | tr -d ' '
 sec MOUNTOPTS
-# real filesystems only: mountpoint|fstype|options
-awk '$1 ~ /^\// || $3 ~ /^(nfs|nfs4|cifs|zfs|fuse)/ {print $2"|"$3"|"$4}' /proc/mounts 2>/dev/null
+# real filesystems only, without the per-pod bind mounts: mountpoint|fstype|options
+awk '($1 ~ /^\// || $3 ~ /^(nfs|nfs4|cifs|zfs|fuse\.|fuse$)/) && $2 !~ /^\/(var\/lib\/kubelet\/(pods|plugins)|run\/k3s|sys\/|proc\/|dev\/)/ {print $2"|"$3"|"$4}' /proc/mounts 2>/dev/null
 sec MODPROBE
 grep -HsE '^[[:space:]]*(install|blacklist)[[:space:]]+(cdrom|sr_mod|isofs|udf|usb.storage|vsock|vmw_vsock_vmci_transport|vmw_vmci|vmw_balloon|vmxnet3|vmw_pvscsi|br_netfilter|overlay|nf_conntrack|vxlan|ipip|wireguard|ip_tables|ip6_tables|nf_tables|xt_[a-zA-Z_]*)([[:space:]]|$)' /etc/modprobe.d/*.conf /usr/lib/modprobe.d/*.conf /run/modprobe.d/*.conf 2>/dev/null
 sec MODULES
@@ -106,17 +110,19 @@ sec REGPROBE
 # here instead of as ImagePullBackOff later. One line per endpoint:
 # host|url|http|curlexit|tokenhttp|auth|ca|insecure
 # and F|key|kind|path|ok/missing for every TLS file the configs section names.
-T=$(printf '\t')
+# fields are separated by the unit separator (0x1f): `read` collapses runs
+# of tab/space so empty fields would shift, and passwords may contain '|'
+T=$(printf '\037')
 regyaml() {
   awk '
-    function cflush() { if (top=="configs" && reg!="") printf "C\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", reg, u, p, ca, ce, ke, ins; u=p=ca=ce=ke=ins="" }
-    function mflush() { if (top=="mirrors" && reg!="" && reg!="*" && neps==0) print "M\t" reg "\t" }
+    function cflush() { if (top=="configs" && reg!="") printf "C\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", reg, u, p, ca, ce, ke, ins; u=p=ca=ce=ke=ins="" }
+    function mflush() { if (top=="mirrors" && reg!="" && reg!="*" && neps==0) print "M\037" reg "\037" }
     function val(s,  i) { i=index(s,":"); s=substr(s,i+1); sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+#.*$/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^["'\'']|["'\'']$/,"",s); return s }
     /^[[:space:]]*(#|$)/ {next}
     /^[^[:space:]]/ { cflush(); mflush(); top=$1; sub(/:.*/,"",top); reg=""; neps=0; next }
     top=="mirrors" && /^  [^[:space:]]/ { mflush(); reg=$0; sub(/^  /,"",reg); sub(/:[[:space:]]*$/,"",reg); gsub(/["'\'']/,"",reg); neps=0; next }
-    top=="mirrors" && /^[[:space:]]+endpoint:[[:space:]]*\[/ { s=$0; sub(/^[^[]*\[/,"",s); sub(/\].*$/,"",s); n=split(s,a,","); for(i=1;i<=n;i++){e=a[i]; gsub(/["'\'' ]/,"",e); if(e!=""){print "M\t" reg "\t" e; neps++}} next }
-    top=="mirrors" && reg!="" && /^[[:space:]]*-[[:space:]]*/ { e=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",e); gsub(/["'\'' ]/,"",e); if (e!="") {print "M\t" reg "\t" e; neps++} next }
+    top=="mirrors" && /^[[:space:]]+endpoint:[[:space:]]*\[/ { s=$0; sub(/^[^[]*\[/,"",s); sub(/\].*$/,"",s); n=split(s,a,","); for(i=1;i<=n;i++){e=a[i]; gsub(/["'\'' ]/,"",e); if(e!=""){print "M\037" reg "\037" e; neps++}} next }
+    top=="mirrors" && reg!="" && /^[[:space:]]*-[[:space:]]*/ { e=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",e); gsub(/["'\'' ]/,"",e); if (e!="") {print "M\037" reg "\037" e; neps++} next }
     top=="configs" && /^  [^[:space:]]/ { cflush(); reg=$0; sub(/^  /,"",reg); sub(/:[[:space:]]*$/,"",reg); gsub(/["'\'']/,"",reg); next }
     top=="configs" && reg!="" { l=$0; sub(/^[[:space:]]+/,"",l); k=l; sub(/:.*/,"",k)
       if (k=="username") u=val(l); else if (k=="password") p=val(l); else if (k=="ca_file") ca=val(l); else if (k=="cert_file") ce=val(l); else if (k=="key_file") ke=val(l); else if (k=="insecure_skip_verify") ins=val(l); next }
@@ -136,10 +142,12 @@ probe() { # url host user pass ca cert key insecure
   code=$(printf '%s' "$out" | tail -1); code2=
   if [ "$code" = 401 ]; then
     # token auth (Docker Hub, Harbor, GHCR, Quay): a 401 on /v2/ only says
-    # "get a token"; the token endpoint is what rejects bad credentials
+    # "get a token"; the token endpoint is what rejects bad credentials. A
+    # pull scope is required: Harbor answers 401 to an unscoped anonymous
+    # request even when its projects are public
     realm=$(printf '%s' "$out" | grep -i '^www-authenticate: *bearer' | sed -nE 's/.*realm="([^"]+)".*/\1/p' | head -1)
     service=$(printf '%s' "$out" | grep -i '^www-authenticate: *bearer' | sed -nE 's/.*service="([^"]+)".*/\1/p' | head -1)
-    [ -n "$realm" ] && code2=$(opts | curl -m 6 -o /dev/null -w '%{http_code}' -K - "$realm?service=$service" 2>/dev/null)
+    [ -n "$realm" ] && code2=$(opts | curl -m 6 -o /dev/null -w '%{http_code}' -K - "$realm?service=$service&scope=repository:library/busybox:pull" 2>/dev/null)
   fi
   echo "$host|$url|${code:-000}|$rc|$code2|${user:+yes}|${ca:+yes}|$ins"
 }
@@ -156,12 +164,18 @@ for f in /etc/rancher/rke2/registries.yaml /etc/rancher/k3s/registries.yaml; do
   # every endpoint (or the registry itself when a mirror lists none) plus
   # every configs key that is not an endpoint; probes run in parallel and
   # the subshell waits for them so their lines stay inside this section
-  { printf '%s\n' "$R" | grep '^M' | while IFS="$T" read -r _ reg e; do
-      [ -z "$e" ] && { case "$reg" in docker.io) e=https://registry-1.docker.io;; *) e=https://$reg;; esac; }
+  EPS=$(printf '%s\n' "$R" | grep '^M' | while IFS="$T" read -r _ reg e; do
+      # (pattern) form: bash 5.1 cannot parse an unparenthesised case pattern inside $( )
+      [ -z "$e" ] && { case "$reg" in (docker.io) e=https://registry-1.docker.io;; (*) e=https://$reg;; esac; }
       echo "$e"
+    done | sed 's|/*$||')
+  EPHOSTS=" $(printf '%s\n' "$EPS" | sed -E 's#^[a-z]+://##; s#/.*##' | tr '\n' ' ')"
+  { printf '%s\n' "$EPS"
+    printf '%s\n' "$R" | grep '^C' | while IFS="$T" read -r _ k _; do
+      case "$k" in \**) continue;; esac
+      case "$EPHOSTS" in *" $k "*) ;; *) echo "https://$k";; esac
     done
-    printf '%s\n' "$R" | grep '^C' | while IFS="$T" read -r _ k _; do case "$k" in \**) ;; *) echo "https://$k";; esac; done
-  } | sed 's|/*$||' | sort -u | head -8 | {
+  } | grep . | sort -u | head -8 | {
     while read -r url; do
       host=$(printf '%s' "$url" | sed -E 's#^[a-z]+://##; s#/.*##')
       c=$(printf '%s\n' "$R" | grep "^C${T}${host}${T}" | head -1)
