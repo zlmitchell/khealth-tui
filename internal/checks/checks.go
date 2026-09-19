@@ -289,6 +289,23 @@ func Evaluate(in Input) []Finding {
 			top := ls.TopPatterns(logs.ClassWarn, 3)
 			add(SevInfo, "logs", name, fmt.Sprintf("%d warning log lines (%s)", n, strings.Join(top, ", ")), "")
 		}
+		// rancher-system-agent: Rancher rewrites the node config through plans,
+		// so a plan event explains config that differs from what was set locally
+		ago := func(m logs.Match) string {
+			if m.Time.IsZero() {
+				return ""
+			}
+			return " (last " + in.Now.Sub(m.Time).Round(time.Minute).String() + " ago)"
+		}
+		if n := ls.ByName["rancher-plan-failed"]; n > 0 {
+			add(SevCrit, "node", name, fmt.Sprintf("Rancher plan failed %d time(s)%s: node config may be half-applied", n, ago(ls.Last("rancher-plan-failed"))), "journalctl -u rancher-system-agent; compare config.yaml.d/50-rancher.yaml with the other nodes (RKE2 tab)")
+		}
+		if n := ls.ByName["rancher-plan-applied"]; n > 0 {
+			add(SevInfo, "node", name, fmt.Sprintf("Rancher applied a plan %d time(s)%s: config.yaml.d/50-rancher.yaml and the rke2 unit were rewritten from the Rancher cluster spec", n, ago(ls.Last("rancher-plan-applied"))), "expected after an upgrade or cluster edit in Rancher; otherwise check the RKE2 tab for drift from what the node ran before")
+		}
+		if n := ls.ByName["rancher-probe-fail"]; n > 0 {
+			add(SevWarn, "node", name, fmt.Sprintf("rancher-system-agent health probes failing (%d lines%s)", n, ago(ls.Last("rancher-probe-fail"))), "Rancher marks the machine unhealthy and holds plans; Logs tab for the probe name")
+		}
 	}
 
 	// ---- etcd ----
@@ -365,6 +382,60 @@ func Evaluate(in Input) []Finding {
 		}
 	}
 
+	// ---- dangling references ----
+	for i := range s.Ingresses {
+		ing := &s.Ingresses[i]
+		for _, t := range ing.Spec.TLS {
+			if t.SecretName == "" {
+				continue
+			}
+			if exists, tracked := s.RefExists("Secret", ing.Namespace, t.SecretName); tracked && !exists {
+				add(SevWarn, "workload", ing.Namespace+"/ingress/"+ing.Name, fmt.Sprintf("TLS secret %q does not exist (hosts %s): the ingress controller serves its default certificate", t.SecretName, strings.Join(t.Hosts, ",")), "create the secret (cert-manager Certificate?) or fix spec.tls[].secretName")
+			}
+		}
+	}
+	for i := range s.Pods {
+		p := &s.Pods[i]
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		ref := p.Namespace + "/" + p.Name
+		check := func(kind, name, via string) {
+			if name == "" {
+				return
+			}
+			if exists, tracked := s.RefExists(kind, p.Namespace, name); tracked && !exists {
+				add(SevWarn, "workload", ref, fmt.Sprintf("references missing %s %q (%s)", kind, name, via), "the pod cannot start / will restart until it exists")
+			}
+		}
+		for _, v := range p.Spec.Volumes {
+			switch {
+			case v.Secret != nil && (v.Secret.Optional == nil || !*v.Secret.Optional):
+				check("Secret", v.Secret.SecretName, "volume "+v.Name)
+			case v.ConfigMap != nil && (v.ConfigMap.Optional == nil || !*v.ConfigMap.Optional):
+				check("ConfigMap", v.ConfigMap.Name, "volume "+v.Name)
+			case v.PersistentVolumeClaim != nil:
+				check("PersistentVolumeClaim", v.PersistentVolumeClaim.ClaimName, "volume "+v.Name)
+			}
+		}
+		for _, c := range p.Spec.Containers {
+			for _, e := range c.Env {
+				if e.ValueFrom == nil {
+					continue
+				}
+				if r := e.ValueFrom.SecretKeyRef; r != nil && (r.Optional == nil || !*r.Optional) {
+					check("Secret", r.Name, "env "+e.Name)
+				}
+				if r := e.ValueFrom.ConfigMapKeyRef; r != nil && (r.Optional == nil || !*r.Optional) {
+					check("ConfigMap", r.Name, "env "+e.Name)
+				}
+			}
+		}
+		if sa := p.Spec.ServiceAccountName; sa != "" && sa != "default" {
+			check("ServiceAccount", sa, "serviceAccountName")
+		}
+	}
+
 	// ---- storage ----
 	for key, u := range MergePVCUsage(s, in.Nodes) {
 		pct := u.UsedPct()
@@ -429,7 +500,7 @@ func Evaluate(in Input) []Finding {
 		if st != "deployed" && st != "superseded" {
 			add(SevWarn, "helm", rel.Namespace+"/"+rel.Name, "release status "+rel.Status, "helm history / rollback")
 		}
-		if l, ok := in.HelmLatest[rel.Chart]; ok && l.Version != "" && helmcheck.CompareVersions(l.Version, rel.Version) > 0 {
+		if l, ok := in.HelmLatest[rel.Namespace+"/"+rel.Name]; ok && l.Version != "" && helmcheck.CompareVersions(l.Version, rel.Version) > 0 {
 			add(SevInfo, "helm", rel.Namespace+"/"+rel.Name, fmt.Sprintf("chart %s %s -> %s available (%s)", rel.Chart, rel.Version, l.Version, l.Source), "")
 		}
 	}

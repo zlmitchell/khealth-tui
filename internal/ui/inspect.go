@@ -45,7 +45,11 @@ func (a *App) openInspectRef(ref k8s.ObjRef) tea.Cmd {
 		defer cancel()
 		u, err := client.GetObject(ctx, ref)
 		if err != nil {
-			return inspectMsg{seq: seq, level: inspectLevel{title: refTitle(ref), err: err.Error()}}
+			msg := err.Error()
+			if strings.Contains(msg, "not found") {
+				msg = "object does not exist: " + msg + "\n\nThe previous object references it by name, so this is a dangling reference (see the Overview findings for the impact)."
+			}
+			return inspectMsg{seq: seq, level: inspectLevel{title: refTitle(ref), err: msg}}
 		}
 		lvl := levelFromObject(u, snap)
 		// controllers whose children are not in the snapshot (ReplicaSets)
@@ -113,6 +117,12 @@ func levelFromObject(u *unstructured.Unstructured, snap *k8s.Snapshot) inspectLe
 	lvl.refs = k8s.ExtractRefs(u)
 	if snap != nil {
 		lvl.refs = append(lvl.refs, snap.Children(u.GetUID())...)
+		for i := range lvl.refs {
+			r := &lvl.refs[i]
+			if exists, tracked := snap.RefExists(r.Kind, r.Namespace, r.Name); tracked && !exists {
+				r.Via = "MISSING: " + r.Via
+			}
+		}
 	}
 	lvl.dump = strings.Split(strings.TrimRight(k8s.DumpYAML(u), "\n"), "\n")
 	return lvl
@@ -217,7 +227,10 @@ func (a *App) renderInspect() (string, []string) {
 		return title, lines
 	}
 	if top.err != "" {
-		lines = append(lines, styleCrit.Render(top.err), "", styleDim.Render("esc goes back"))
+		for _, l := range strings.Split(top.err, "\n") {
+			lines = append(lines, wrap(styleCrit.Render(l), w)...)
+		}
+		lines = append(lines, "", styleDim.Render("esc goes back"))
 		return title, lines
 	}
 	for _, m := range top.meta {
@@ -233,6 +246,8 @@ func (a *App) renderInspect() (string, []string) {
 			via := r.Via
 			viaStyled := styleDim.Render(via)
 			switch {
+			case strings.HasPrefix(via, "MISSING"):
+				viaStyled = styleCrit.Render(via)
 			case via == "owner":
 				viaStyled = styleInfo.Render("owner")
 			case via == "child":

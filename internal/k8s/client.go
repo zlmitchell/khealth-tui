@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -18,6 +19,7 @@ import (
 type Client struct {
 	CS      *kubernetes.Clientset
 	Dyn     dynamic.Interface
+	Meta    metadata.Interface // metadata-only lists (names without payloads)
 	Config  *rest.Config
 	Context string
 	Host    string
@@ -61,9 +63,13 @@ func New(kubeconfig, ctxName string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	md, err := metadata.NewForConfig(restCfg)
+	if err != nil {
+		return nil, err
+	}
 	name := ctxName
 	if name == "" {
 		name = raw.CurrentContext
 	}
-	return &Client{CS: cs, Dyn: dyn, Config: restCfg, Context: name, Host: restCfg.Host}, nil
+	return &Client{CS: cs, Dyn: dyn, Meta: md, Config: restCfg, Context: name, Host: restCfg.Host}, nil
 }

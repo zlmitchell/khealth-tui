@@ -45,6 +45,13 @@ type Snapshot struct {
 	CronJobs       []batchv1.CronJob
 	CRBs           []rbacv1.ClusterRoleBinding
 	NetPols        []networkingv1.NetworkPolicy
+	Ingresses      []networkingv1.Ingress
+
+	// Names of secrets / configmaps / service accounts (ns/name) from
+	// metadata-only lists, used to spot dangling references.
+	SecretNames    map[string]bool
+	ConfigMapNames map[string]bool
+	SANames        map[string]bool
 
 	Readyz []APICheck
 	Livez  []APICheck
@@ -177,6 +184,9 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		NodeMetrics:    map[string]NodeMetric{},
 		KubeletConfigs: map[string]map[string]any{},
 		PVCUsage:       map[string]VolumeUsage{},
+		SecretNames:    map[string]bool{},
+		ConfigMapNames: map[string]bool{},
+		SANames:        map[string]bool{},
 	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -357,6 +367,38 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		mu.Unlock()
 		return nil
 	})
+	run("ingresses", func() error {
+		l, err := cs.NetworkingV1().Ingresses("").List(ctx, all)
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		s.Ingresses = l.Items
+		mu.Unlock()
+		return nil
+	})
+	for _, spec := range []struct {
+		res  string
+		dest *map[string]bool
+	}{{"secrets", &s.SecretNames}, {"configmaps", &s.ConfigMapNames}, {"serviceaccounts", &s.SANames}} {
+		spec := spec
+		wg.Add(1)
+		go func() { // metadata-only, so cheap even with large secrets; optional
+			defer wg.Done()
+			gvr := schema.GroupVersionResource{Version: "v1", Resource: spec.res}
+			l, err := c.Meta.Resource(gvr).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return
+			}
+			names := make(map[string]bool, len(l.Items))
+			for _, it := range l.Items {
+				names[it.Namespace+"/"+it.Name] = true
+			}
+			mu.Lock()
+			*spec.dest = names
+			mu.Unlock()
+		}()
+	}
 	run("networkpolicies", func() error {
 		l, err := cs.NetworkingV1().NetworkPolicies("").List(ctx, all)
 		if err != nil {
@@ -827,6 +869,37 @@ func detectDistribution(nodes []corev1.Node) string {
 		}
 	}
 	return "unknown"
+}
+
+// RefExists reports whether a Secret/ConfigMap/ServiceAccount/PVC reference
+// resolves; ok=false when the kind is not tracked.
+func (s *Snapshot) RefExists(kind, ns, name string) (exists bool, tracked bool) {
+	key := ns + "/" + name
+	switch kind {
+	case "Secret":
+		if len(s.SecretNames) == 0 {
+			return false, false
+		}
+		return s.SecretNames[key], true
+	case "ConfigMap":
+		if len(s.ConfigMapNames) == 0 {
+			return false, false
+		}
+		return s.ConfigMapNames[key], true
+	case "ServiceAccount":
+		if len(s.SANames) == 0 {
+			return false, false
+		}
+		return s.SANames[key], true
+	case "PersistentVolumeClaim":
+		for i := range s.PVCs {
+			if s.PVCs[i].Namespace == ns && s.PVCs[i].Name == name {
+				return true, true
+			}
+		}
+		return false, true
+	}
+	return false, false
 }
 
 // WarningEvents returns only Warning-type events.
