@@ -728,7 +728,7 @@ func (a *App) nsOptions() []string {
 }
 
 func (a *App) bodyHeight() int {
-	h := a.height - 4
+	h := a.height - 5 // header, tab strip, rule, status line, footer
 	if h < 3 {
 		h = 3
 	}
@@ -876,17 +876,32 @@ func (a *App) renderHeader() string {
 	return trunc(strings.Join(parts, "  "), a.width)
 }
 
+// renderTabs draws the tab strip as its own full-width band (distinct from
+// the status header above it) followed by a rule that carries the active
+// tab's name.
 func (a *App) renderTabs() string {
 	var b strings.Builder
+	b.WriteString(styleTabBar.Render(" "))
 	for i, name := range tabNames {
-		label := tabKeys[i] + " " + name
 		if tab(i) == a.tab {
-			b.WriteString(styleTabOn.Render(label))
+			b.WriteString(styleTabOn.Render(tabKeys[i] + " " + name))
 		} else {
-			b.WriteString(styleTabOff.Render(label))
+			b.WriteString(styleTabBar.Render(styleTabKey.Render(tabKeys[i]) + " " + styleTabOff.Render(name)))
 		}
+		b.WriteString(styleTabBar.Render(" "))
 	}
-	return trunc(b.String(), a.width)
+	strip := b.String()
+	if w := ansi.StringWidth(strip); w < a.width {
+		strip += styleTabBar.Render(strings.Repeat(" ", a.width-w))
+	}
+	strip = trunc(strip, a.width)
+
+	title := " " + tabNames[a.tab] + " "
+	rule := styleRule.Render("━━") + styleRuleTitle.Render(title)
+	if w := ansi.StringWidth(rule); w < a.width {
+		rule += styleRule.Render(strings.Repeat("━", a.width-w))
+	}
+	return strip + "\n" + trunc(rule, a.width)
 }
 
 func (a *App) renderBody() string {

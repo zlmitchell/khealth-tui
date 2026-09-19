@@ -29,11 +29,19 @@ var (
 	styleTitle  = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	styleHeader = lipgloss.NewStyle().Bold(true).Foreground(colorDim).Underline(true)
 	styleSel    = lipgloss.NewStyle().Reverse(true)
-	styleTabOn  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Background(colorAccent).Padding(0, 1)
-	styleTabOff = lipgloss.NewStyle().Foreground(colorDim).Padding(0, 1)
-	styleBar    = lipgloss.NewStyle().Foreground(colorDim)
-	styleKey    = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
-	styleBox    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1)
+	colorTabBar = lipgloss.AdaptiveColor{Light: "#e4e6ea", Dark: "#21262d"}
+	colorTabTxt = lipgloss.AdaptiveColor{Light: "#24292f", Dark: "#c9d1d9"}
+
+	// tab strip: a full-width band; active tab is an inverted accent block
+	styleTabBar    = lipgloss.NewStyle().Background(colorTabBar)
+	styleTabOn     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Background(colorAccent).Padding(0, 1)
+	styleTabOff    = lipgloss.NewStyle().Foreground(colorTabTxt).Background(colorTabBar)
+	styleTabKey    = lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Background(colorTabBar)
+	styleRule      = lipgloss.NewStyle().Foreground(colorAccent)
+	styleRuleTitle = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	styleBar       = lipgloss.NewStyle().Foreground(colorDim)
+	styleKey       = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	styleBox       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1)
 )
 
 func sevStyle(s checks.Severity) lipgloss.Style {
