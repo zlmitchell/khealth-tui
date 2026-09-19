@@ -234,8 +234,7 @@ func (a *App) logVisibleLines() []string {
 			if width < 20 {
 				width = 20
 			}
-			frags := strings.Split(ansi.Wrap(hl(rest), width, ""), "
-")
+			frags := strings.Split(ansi.Wrap(hl(rest), width, ""), "\n")
 			for i, fr := range frags {
 				if i == 0 {
 					out = append(out, prefix+fr)
