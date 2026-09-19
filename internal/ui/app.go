@@ -40,11 +40,12 @@ const (
 	tabImages
 	tabSecurity
 	tabLogs
+	tabRKE2
 	tabCount
 )
 
-var tabNames = [...]string{"Overview", "Nodes", "Workloads", "etcd", "Storage", "Events", "Addons", "Helm", "Images", "Security", "Logs"}
-var tabKeys = [...]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-"}
+var tabNames = [...]string{"Overview", "Nodes", "Workloads", "etcd", "Storage", "Events", "Addons", "Helm", "Images", "Security", "Logs", "RKE2"}
+var tabKeys = [...]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="}
 
 type overlayKind int
 
@@ -117,6 +118,8 @@ type App struct {
 	detailScroll int
 	status       string
 	statusAt     time.Time
+	logsNode     string // Logs tab: node whose lines are listed ("" = node list)
+	logsAll      bool   // Logs tab: show info lines too
 }
 
 type snapshotMsg struct {
@@ -258,6 +261,7 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 				res := runner.Run(ctx, host, script)
 				p := etcd.Parse(name, res.Stdout)
 				p.Duration = res.Finished.Sub(res.Started)
+				p.Stderr = strings.TrimSpace(res.Stderr)
 				if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
 					p.Err = fmt.Errorf("%s", firstLine(res.Err.Error()+" "+res.Stderr))
 				}
@@ -576,6 +580,9 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.setStatus("SSH collection disabled")
 		}
 	case "a":
+		if a.tab == tabLogs && a.logsNode != "" {
+			a.logsAll = !a.logsAll
+		}
 		a.problemOnly = !a.problemOnly
 		a.cursor[a.tab] = 0
 		a.scroll[a.tab] = 0
@@ -584,10 +591,22 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.filter.SetValue(a.filters[a.tab])
 		return a, a.filter.Focus()
 	case "esc":
+		if a.tab == tabLogs && a.logsNode != "" && a.filters[a.tab] == "" {
+			a.logsNode = ""
+			a.cursor[a.tab], a.scroll[a.tab] = 0, 0
+			return a, nil
+		}
 		a.filters[a.tab] = ""
 	case "?":
 		a.overlay = ovHelp
 	case "enter":
+		if a.tab == tabLogs && a.logsNode == "" {
+			if id := a.selectedID(); id != "" {
+				a.logsNode = id
+				a.cursor[a.tab], a.scroll[a.tab], a.filters[a.tab] = 0, 0, ""
+			}
+			return a, nil
+		}
 		a.openDetail()
 	case "j", "down":
 		a.move(1)
@@ -769,6 +788,8 @@ func (a *App) currentContent() content {
 		return a.securityContent()
 	case tabLogs:
 		return a.logsContent()
+	case tabRKE2:
+		return a.rke2Content()
 	}
 	return content{}
 }
@@ -1057,6 +1078,8 @@ func helpLines() []string {
 		"  Images     per-node image inventory, unused images, airgap tarball contents vs running",
 		"  Security   STIG / CIS checks from component flags, kubelet config, PSA, RBAC and node facts",
 		"  Logs       rke2/kubelet/containerd journal classified into startup-noise / warnings / errors",
+		"             enter on a node lists its lines; enter on a line shows the full text + explanation; esc goes back; a shows info lines",
+		"  RKE2       config.yaml(.d), data-dir, server/manifests (HelmChartConfig etc.), static pod manifests, audit/PSS policies, config drift",
 		"",
 		styleDim.Render("Config: ~/.config/k8s-health-tui/config.yaml (see config.example.yaml)"),
 	}

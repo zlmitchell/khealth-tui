@@ -87,6 +87,23 @@ tls-san:
 server: https://10.0.0.1:9345
 node-label:
   - cattle.io/os=linux
+===MANIFESTS
+--- /var/lib/rancher/rke2/server/manifests/rke2-canal.yaml|500000|1700000000|HelmChart x1,
+(content omitted: bundled chart tarball / >64KB)
+--- /var/lib/rancher/rke2/server/manifests/rke2-canal-config.yaml|200|1700000001|HelmChartConfig x1,
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-canal
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    flannel:
+      iface: eth1
+===STATICPODS
+--- /var/lib/rancher/rke2/agent/pod-manifests/etcd.yaml|3000|1700000002|
+image: docker.io/rancher/hardened-etcd:v3.5.16
+- --config-file=/var/lib/rancher/rke2/server/db/etcd/config
 ===RANCHER
 system-agent=loaded active running
 agent-url=https://rancher.example.com
@@ -219,6 +236,12 @@ func TestParse(t *testing.T) {
 	}
 	if len(info.Journal) != 1 {
 		t.Errorf("journal: %v", info.Journal)
+	}
+	if len(info.Manifests) != 2 || !info.Manifests[0].Bundled || info.Manifests[0].Kinds != "HelmChart x1" || info.Manifests[1].Bundled || !strings.Contains(info.Manifests[1].Content, "iface: eth1") || info.Manifests[1].Size != 200 {
+		t.Errorf("manifests: %+v", info.Manifests)
+	}
+	if len(info.StaticPods) != 1 || !strings.Contains(info.StaticPods[0].Content, "hardened-etcd") {
+		t.Errorf("static pods: %+v", info.StaticPods)
 	}
 }
 

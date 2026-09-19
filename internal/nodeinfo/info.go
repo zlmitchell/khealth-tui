@@ -40,6 +40,10 @@ type Info struct {
 	EtcdUser               bool
 	SELinux                string
 	ConfigFiles            []ConfigFile      // rke2/k3s config.yaml(.d) (secrets masked)
+	ExtraFiles             []ConfigFile      // audit policy, PSS config, /etc/rancher listings
+	Manifests              []ManifestFile    // rke2/k3s server/manifests (auto-deploy dir)
+	StaticPods             []ManifestFile    // pod-manifests / /etc/kubernetes/manifests
+	DataDir                string            // rke2/k3s data-dir
 	Settings               map[string]string // merged top-level key: value from config files
 	Rancher                RancherNode
 	CNI                    []CNIConf
@@ -92,6 +96,16 @@ type Perm struct {
 type ConfigFile struct {
 	Path    string
 	Content string
+}
+
+// ManifestFile is a file from an auto-deploy or static pod manifest directory.
+type ManifestFile struct {
+	Path    string
+	Size    int64
+	ModTime time.Time
+	Kinds   string // "HelmChartConfig x1,ConfigMap x2,"
+	Content string
+	Bundled bool // rke2-provided (content omitted)
 }
 
 // RancherNode is the node-side view of Rancher management.
@@ -245,7 +259,17 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	}
 	info.EtcdUser = strings.Contains(secs["ETCDUSER"], "uid=")
 	info.SELinux = strings.TrimSpace(secs["SELINUX"])
+	for _, l := range nonEmpty(secs["DATADIR"]) {
+		if k, v, ok := strings.Cut(l, "="); ok && v != "" {
+			if (k == "rke2" && info.Dist == "rke2") || (k == "k3s" && info.Dist == "k3s") {
+				info.DataDir = strings.TrimSpace(v)
+			}
+		}
+	}
 	info.ConfigFiles = parseDumps(secs["RKE2CFG"])
+	info.ExtraFiles = parseDumps(secs["RKE2EXTRA"])
+	info.Manifests = parseManifests(secs["MANIFESTS"])
+	info.StaticPods = parseManifests(secs["STATICPODS"])
 	for _, cf := range info.ConfigFiles {
 		for _, l := range strings.Split(cf.Content, "\n") {
 			if strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t") || strings.HasPrefix(l, "-") {
@@ -543,6 +567,32 @@ func parseDumps(s string) []ConfigFile {
 	if cur != nil {
 		cur.Content = strings.TrimRight(cur.Content, "\n")
 		out = append(out, *cur)
+	}
+	return out
+}
+
+// parseManifests reads "--- path|size|mtime|kinds" headed dumps.
+func parseManifests(s string) []ManifestFile {
+	var out []ManifestFile
+	for _, cf := range parseDumps(s) {
+		f := strings.SplitN(cf.Path, "|", 4)
+		m := ManifestFile{Path: f[0], Content: cf.Content}
+		if len(f) > 1 {
+			m.Size, _ = strconv.ParseInt(f[1], 10, 64)
+		}
+		if len(f) > 2 {
+			if mt, err := strconv.ParseInt(f[2], 10, 64); err == nil {
+				m.ModTime = time.Unix(mt, 0)
+			}
+		}
+		if len(f) > 3 {
+			m.Kinds = strings.TrimSuffix(f[3], ",")
+		}
+		if strings.HasPrefix(cf.Content, "(content omitted") {
+			m.Bundled = true
+			m.Content = ""
+		}
+		out = append(out, m)
 	}
 	return out
 }

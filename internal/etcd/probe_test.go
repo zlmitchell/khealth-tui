@@ -126,6 +126,43 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestParseGateway(t *testing.T) {
+	raw := `===DIST
+rke2
+===PATHS
+endpoint=https://127.0.0.1:2379
+missing=/nope.crt
+===ETCDCTL
+via=grpc-gateway
+diag=no running etcd container found via /var/lib/rancher/rke2/bin/crictl -r unix:///run/k3s/containerd/containerd.sock
+---MEMBERS
+{"header":{"cluster_id":"1","member_id":"11","raft_term":"7"},"members":[{"ID":"11","name":"cp-1","peerURLs":["https://10.0.0.1:2380"],"clientURLs":["https://10.0.0.1:2379"]},{"ID":"12345678901234567890","name":"cp-2","peerURLs":["https://10.0.0.2:2380"],"clientURLs":["https://10.0.0.2:2379"]}]}
+
+---GWSTATUS
+{"header":{"cluster_id":"1","member_id":"11","raft_term":"7"},"version":"3.5.16","dbSize":"50000000","leader":"11","raftIndex":"1234","raftTerm":"7","dbSizeInUse":"20000000"}
+
+---GWALARMS
+{"header":{"cluster_id":"1"},"alarms":[{"memberID":"11","alarm":"NOSPACE"}]}
+===END
+`
+	p := Parse("cp-1", raw)
+	if p.EtcdctlVia != "grpc-gateway" || !strings.HasPrefix(p.EtcdctlDiag, "no running etcd container") {
+		t.Errorf("via/diag: %q %q", p.EtcdctlVia, p.EtcdctlDiag)
+	}
+	if len(p.Missing) != 1 || p.Missing[0] != "/nope.crt" {
+		t.Errorf("missing: %v", p.Missing)
+	}
+	if len(p.Members) != 2 || p.Members[0].ID != "b" || p.Members[1].ID != "ab54a98ceb1f0ad2" {
+		t.Errorf("members: %+v", p.Members)
+	}
+	if len(p.Statuses) != 1 || p.Statuses[0].MemberID != "b" || p.Statuses[0].Leader != "b" || p.Statuses[0].DBSize != 50000000 || p.Statuses[0].Version != "3.5.16" {
+		t.Errorf("gateway status: %+v", p.Statuses)
+	}
+	if len(p.Alarms) != 1 || p.Alarms[0].Type != "NOSPACE" || p.Alarms[0].MemberID != "b" {
+		t.Errorf("alarms: %+v", p.Alarms)
+	}
+}
+
 func TestParseNoEtcd(t *testing.T) {
 	p := Parse("w-1", "===DIST\nunknown\n===HOST\nw-1\n===PATHS\nca=\ncert=\nkey=\nendpoint=https://127.0.0.1:2379\ndatadir=\n===SOURCE\n===HEALTH\n===METRICS\n===ETCDCTL\nvia=none\n===END\n")
 	if p.Dist != "unknown" || p.Health != nil || p.Metrics != nil || len(p.Members) != 0 {

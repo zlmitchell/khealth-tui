@@ -47,6 +47,19 @@ func Script(o Options) string {
 const baseScript = `
 sec() { printf '\n===%s\n' "$1"; }
 export LC_ALL=C
+RKE2_DD=/var/lib/rancher/rke2; K3S_DD=/var/lib/rancher/k3s
+for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml; do
+  [ -f "$f" ] || continue
+  v=$(sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' "$f" | tail -1 | sed 's/[[:space:]]*$//')
+  [ -n "$v" ] && RKE2_DD=$v
+done
+for f in /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do
+  [ -f "$f" ] || continue
+  v=$(sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' "$f" | tail -1 | sed 's/[[:space:]]*$//')
+  [ -n "$v" ] && K3S_DD=$v
+done
+mask() { sed -E 's/^([[:space:]]*(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)[[:space:]]*:).*/\1 <masked>/' "$1"; }
+sec DATADIR; echo "rke2=$RKE2_DD"; echo "k3s=$K3S_DD"
 sec TIME; date +%s.%N 2>/dev/null || date +%s
 sec HOST; hostname; uname -r; uname -m
 sec UPTIME; cat /proc/uptime
@@ -107,7 +120,42 @@ sec RKE2CFG
 for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do
   [ -f "$f" ] || continue
   echo "--- $f"
-  grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | sed -E 's/^([[:space:]]*(token|agent-token|etcd-s3-access-key|etcd-s3-secret-key|password)[[:space:]]*:).*/\1 <masked>/'
+  grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | mask /dev/stdin
+done
+sec RKE2EXTRA
+for f in /etc/rancher/rke2/audit-policy.yaml /etc/rancher/rke2/rke2-pss.yaml /etc/rancher/rke2/psa.yaml /etc/rancher/rke2/rke2-cis-sysctl.conf /etc/rancher/rke2/rke2-cis.yaml /etc/rancher/k3s/audit-policy.yaml /etc/rancher/k3s/psa.yaml; do
+  [ -f "$f" ] || continue
+  echo "--- $f"
+  head -c 16384 "$f" | mask /dev/stdin
+done
+for d in /etc/rancher/rke2 /etc/rancher/k3s /etc/rancher/agent /etc/rancher/node; do
+  [ -d "$d" ] || continue
+  echo "--- listing $d"
+  ls -la "$d" 2>/dev/null | tail -n +2
+done
+sec MANIFESTS
+for d in "$RKE2_DD/server/manifests" "$K3S_DD/server/manifests"; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*; do
+    [ -f "$f" ] || continue
+    sz=$(stat -c %s "$f" 2>/dev/null); mt=$(stat -c %Y "$f" 2>/dev/null)
+    kinds=$(grep -E '^kind:' "$f" 2>/dev/null | sed 's/kind:[[:space:]]*//' | sort | uniq -c | awk '{printf "%s x%s,", $2, $1}')
+    echo "--- $f|$sz|$mt|$kinds"
+    if [ "${sz:-0}" -le 65536 ] && ! grep -q 'chartContent:' "$f" 2>/dev/null; then
+      mask "$f"
+    else
+      echo "(content omitted: bundled chart tarball / >64KB)"
+    fi
+  done
+done
+sec STATICPODS
+for d in "$RKE2_DD/agent/pod-manifests" "$K3S_DD/agent/pod-manifests" /etc/kubernetes/manifests; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*.yaml "$d"/*.yml; do
+    [ -f "$f" ] || continue
+    echo "--- $f|$(stat -c %s "$f" 2>/dev/null)|$(stat -c %Y "$f" 2>/dev/null)|"
+    grep -E '^[[:space:]]*(image:|- --)' "$f" 2>/dev/null | sed 's/^[[:space:]]*//'
+  done
 done
 sec RANCHER
 echo "system-agent=$(systemctl show -p LoadState,ActiveState,SubState --value rancher-system-agent 2>/dev/null | tr '\n' ' ')"

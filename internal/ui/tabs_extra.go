@@ -3,10 +3,12 @@ package ui
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	etcdpkg "k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/helmcheck"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/logs"
@@ -48,14 +50,43 @@ func (a *App) etcdContent() content {
 			break
 		}
 	}
+	// statuses can come from one etcdctl --cluster call or one gateway call per node
+	statusByID := map[string]*etcdpkg.EndpointStatus{}
+	for _, n := range sortedKeys(a.etcd) {
+		for i := range a.etcd[n].Statuses {
+			st := &a.etcd[n].Statuses[i]
+			if st.MemberID != "" {
+				statusByID[st.MemberID] = st
+			}
+		}
+	}
 	add("", styleTitle.Render("Members"))
 	if memberProbe == "" {
-		add(styleDim.Render("  no member list (etcdctl unavailable on probed nodes - needs crictl access to the etcd container or etcdctl on the host)"))
+		add(styleDim.Render("  no member list. Per node:"))
+		for _, n := range sortedKeys(a.etcd) {
+			p := a.etcd[n]
+			if p.Err != nil {
+				add("  " + styleBold.Render(n) + "  " + styleCrit.Render("probe error: "+firstLine(p.Err.Error())))
+				continue
+			}
+			line := "  " + styleBold.Render(n) + "  " + kv("via", p.EtcdctlVia)
+			if p.EtcdctlDiag != "" {
+				line += "  " + styleWarn.Render(p.EtcdctlDiag)
+			}
+			if len(p.Missing) > 0 {
+				line += "  " + styleCrit.Render("missing: "+strings.Join(p.Missing, ", "))
+			}
+			if p.EtcdctlDiag == "" && len(p.Missing) == 0 && p.EtcdctlOut != "" {
+				line += "  " + styleDim.Render(trunc(lastNonEmpty(p.EtcdctlOut), 100))
+			}
+			add(line)
+		}
+		add(styleDim.Render("  enter shows the raw probe output; set etcd.ca_cert/client_cert/client_key/endpoint in the config for non-standard layouts"))
 	} else {
 		p := a.etcd[memberProbe]
 		var rows [][]string
 		for _, m := range p.Members {
-			st := p.Status(m.ID)
+			st := statusByID[m.ID]
 			ver, db, inuse, leader, term, idx, errs := "-", "-", "-", "", "-", "-", ""
 			if st != nil {
 				ver = st.Version
@@ -361,6 +392,16 @@ func (a *App) etcdTiles() []string {
 	return tileRow(tiles[:n])
 }
 
+func lastNonEmpty(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" && !strings.HasPrefix(t, "---") {
+			return t
+		}
+	}
+	return ""
+}
+
 func fmtMs(v float64) string {
 	if math.IsNaN(v) {
 		return "-"
@@ -382,6 +423,15 @@ func (a *App) etcdDetail() (string, []string) {
 		}
 		if p.Health != nil {
 			out = append(out, kv("health raw", p.Health.Raw))
+		}
+		if p.EtcdctlVia != "" {
+			out = append(out, kv("etcdctl via", p.EtcdctlVia)+"  "+kv("diag", p.EtcdctlDiag))
+		}
+		if len(p.Missing) > 0 {
+			out = append(out, styleCrit.Render("missing: "+strings.Join(p.Missing, ", ")))
+		}
+		if p.Stderr != "" {
+			out = append(out, styleWarn.Render("stderr: "+firstLine(p.Stderr)))
 		}
 		for _, cf := range p.ConfigDump {
 			out = append(out, "", styleBold.Render("--- "+cf.Path))
@@ -1000,7 +1050,10 @@ func (a *App) securityDetail(id string) (string, []string) {
 // ---------- Logs ----------
 
 func (a *App) logsContent() content {
-	hdr := []string{styleTitle.Render("Node logs") + styleDim.Render("  journal of rke2-server/agent, kubelet, containerd, rancher-system-agent classified with the pattern knowledge base. R refreshes; enter shows lines + explanations.")}
+	if a.logsNode != "" {
+		return a.logLinesContent(a.logsNode)
+	}
+	hdr := []string{styleTitle.Render("Node logs") + styleDim.Render("  journal of rke2-server/agent, kubelet, containerd, rancher-system-agent classified with the pattern knowledge base. R refreshes; enter opens a node's lines.")}
 	var rows [][]string
 	var ids []string
 	for _, n := range sortedKeys(a.nodes) {
@@ -1065,7 +1118,70 @@ func errorsPerHour(ls *logs.Summary, n int) []float64 {
 	return out
 }
 
+// logLinesContent lists one node's classified log lines (Enter = full line).
+func (a *App) logLinesContent(node string) content {
+	ls := a.logSum[node]
+	ni := a.nodes[node]
+	hdr := []string{styleTitle.Render("Logs: "+node) + styleDim.Render("  esc back to nodes · enter full line + explanation · a toggles info lines · / filters")}
+	if ls == nil || ni == nil {
+		return content{header: hdr, empty: "no log data for this node yet (R for a full collection)"}
+	}
+	var units []string
+	for _, u := range ni.Units {
+		units = append(units, fmt.Sprintf("%s %s/%s restarts=%d", u.Name, u.Active, u.Sub, u.NRestarts))
+	}
+	hdr = append(hdr, styleDim.Render(strings.Join(units, "  ")))
+	mix := []seg{{float64(ls.Counts[logs.ClassError]), styleCrit, "error"}, {float64(ls.Counts[logs.ClassWarn]), styleWarn, "warn"}, {float64(ls.Counts[logs.ClassStartup]), styleInfo, "startup"}, {float64(ls.Counts[logs.ClassInfo]), styleDim, "info"}}
+	hdr = append(hdr, stacked(40, mix)+"  "+legend(mix)+"  "+styleDim.Render("err/hour ")+styleCrit.Render(sparkline(errorsPerHour(ls, 24), 24, 0)))
+	var rows [][]string
+	var ids []string
+	for i, m := range ls.Matches {
+		if !a.logsAll && (m.Class == logs.ClassInfo || (m.Class == logs.ClassStartup && m.Pattern != nil && m.Pattern.Persist == 0)) {
+			continue
+		}
+		name := ""
+		if m.Pattern != nil {
+			name = m.Pattern.Name
+		}
+		ts := ""
+		if !m.Time.IsZero() {
+			ts = m.Time.Local().Format("01-02 15:04:05")
+		}
+		rows = append(rows, []string{classStyle(m.Class).Render(fmt.Sprintf("%-7s", m.Class.String())), ts, m.Unit, styleDim.Render(name), logMessage(m.Line)})
+		ids = append(ids, fmt.Sprint(i))
+	}
+	// journal-file tails have no classification; list them too
+	base := len(ls.Matches)
+	for fi, lf := range ni.LogFiles {
+		for li, l := range strings.Split(lf.Content, "\n") {
+			if strings.TrimSpace(l) == "" {
+				continue
+			}
+			rows = append(rows, []string{styleDim.Render("file   "), "", shortPath(lf.Path), "", l})
+			ids = append(ids, fmt.Sprintf("f%d:%d:%d", base, fi, li))
+		}
+	}
+	h, lines := renderTable(a.width, []column{{title: "CLASS"}, {title: "TIME"}, {title: "UNIT", max: 22}, {title: "PATTERN", max: 20}, {title: "MESSAGE"}}, rows)
+	hdr = append(hdr, h)
+	c := content{header: hdr, selectable: true, empty: styleOK.Render("nothing noteworthy in the collected window (a shows all lines)")}
+	for i, l := range lines {
+		c.rows = append(c.rows, row{id: ids[i], text: l})
+	}
+	return c
+}
+
+// logMessage strips the journal timestamp/host/unit prefix for the table.
+func logMessage(line string) string {
+	if g := journalPrefix.FindStringSubmatch(line); g != nil {
+		return line[len(g[0]):]
+	}
+	return line
+}
+
 func (a *App) logsDetail(node string) (string, []string) {
+	if a.logsNode != "" {
+		return a.logLineDetail(a.logsNode, node)
+	}
 	ls := a.logSum[node]
 	ni := a.nodes[node]
 	if ls == nil || ni == nil {
@@ -1121,6 +1237,59 @@ func (a *App) logsDetail(node string) (string, []string) {
 		}
 	}
 	return "Logs on " + node, out
+}
+
+var journalPrefix = regexp.MustCompile(`^\S+\s+\S+\s+[^:\s]+(\[\d+\])?:\s*`)
+
+// logLineDetail shows one full log line with the matching pattern's explanation.
+func (a *App) logLineDetail(node, id string) (string, []string) {
+	ls := a.logSum[node]
+	ni := a.nodes[node]
+	if ls == nil || ni == nil {
+		return "", nil
+	}
+	w := a.width - 6
+	if strings.HasPrefix(id, "f") {
+		var base, fi, li int
+		if _, err := fmt.Sscanf(id, "f%d:%d:%d", &base, &fi, &li); err == nil && fi < len(ni.LogFiles) {
+			lines := strings.Split(ni.LogFiles[fi].Content, "\n")
+			if li < len(lines) {
+				out := []string{kv("file", ni.LogFiles[fi].Path), ""}
+				out = append(out, wrap(lines[li], w)...)
+				return "Log line on " + node, out
+			}
+		}
+		return "", nil
+	}
+	var idx int
+	if _, err := fmt.Sscan(id, &idx); err != nil || idx < 0 || idx >= len(ls.Matches) {
+		return "", nil
+	}
+	m := ls.Matches[idx]
+	out := []string{classStyle(m.Class).Render(m.Class.String()) + "  " + kv("unit", m.Unit) + "  " + kv("time", m.Time.Format(time.RFC3339)), ""}
+	out = append(out, wrap(m.Line, w)...)
+	if m.Pattern != nil {
+		out = append(out, "", styleTitle.Render("Pattern: "+m.Pattern.Name)+"  "+styleDim.Render("(seen "+fmt.Sprint(ls.ByName[m.Pattern.Name])+"x in this window)"))
+		out = append(out, wrap(m.Pattern.Explain, w)...)
+		if m.Pattern.Persist > 0 {
+			out = append(out, styleDim.Render(fmt.Sprintf("Expected during startup; escalated to a warning when still seen more than %s after the unit came up.", humanDur(m.Pattern.Persist))))
+		}
+	} else {
+		out = append(out, "", styleDim.Render("No knowledge-base pattern matched this line."))
+	}
+	// context: the neighbouring lines from the same window
+	out = append(out, "", styleTitle.Render("Context"))
+	for i := idx - 3; i <= idx+3; i++ {
+		if i < 0 || i >= len(ls.Matches) {
+			continue
+		}
+		prefix := "  "
+		if i == idx {
+			prefix = styleBold.Render("> ")
+		}
+		out = append(out, prefix+trunc(ls.Matches[i].Line, w-2))
+	}
+	return "Log line on " + node, out
 }
 
 func classStyle(c logs.Class) interface{ Render(...string) string } {

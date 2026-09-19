@@ -728,6 +728,8 @@ func (a *App) detailFor(t tab, id string) (string, []string) {
 		return a.securityDetail(id)
 	case tabLogs:
 		return a.logsDetail(id)
+	case tabRKE2:
+		return a.rke2Detail(id)
 	}
 	return "", nil
 }
