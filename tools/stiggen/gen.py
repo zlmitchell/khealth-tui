@@ -150,13 +150,16 @@ def main():
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
-    env = load_env(a.cac, a.product)
+    # Without a controls file (CAC dropped the product) every rule is emitted as
+    # manual and the CAC environment is not needed.
+    env = load_env(a.cac, a.product) if a.controls else None
+    sys.path.insert(0, a.cac)
     import ssg.build_yaml  # noqa: E402
     import ssg.templates  # noqa: E402
 
     rules_idx, vars_idx = index_rules(a.cac)
     ctl_version, controls = load_controls(a.controls) if a.controls else ("", {})
-    profile_sels = load_profile_selections(a.cac, a.product)
+    profile_sels = load_profile_selections(a.cac, a.product) if a.controls else {}
     resolver = Resolver(a.cac, env, vars_idx)
     templates = {}
 

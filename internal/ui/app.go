@@ -926,7 +926,11 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.filters[a.tab] = ""
 	case "?":
-		a.overlay = ovHelp
+		// help uses the scrollable detail overlay (j/k, PgUp/PgDn, esc)
+		a.detailTitle = "Help"
+		a.detailLines = helpLines()
+		a.detailScroll = 0
+		a.overlay = ovDetail
 	case "enter":
 		if a.tab == tabLogs && a.logsNode == "" {
 			if id := a.selectedID(); id != "" {

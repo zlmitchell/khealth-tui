@@ -53,6 +53,9 @@ func TestS3CheckScriptAndParse(t *testing.T) {
 		{"curl: (6) Could not resolve host: minio.lab\n", false, 0, "(6) Could not resolve host: minio.lab"},
 		{"ca-missing=/etc/s3-ca.crt\n200\n", true, 200, "HTTP 200 (configured CA /etc/s3-ca.crt not readable, verified with system CAs)"},
 		{"curl-missing\n", false, 0, "curl not installed on node"},
+		{"curl: (77) error adding trust anchors from file: /tmp/khealth-s3-ca.x\n000\n", false, 0, "(77) error adding trust anchors from file: /tmp/khealth-s3-ca.x"},
+		{"ca-missing=/etc/no.crt\ncurl: (6) Could not resolve host: x\n000\n", false, 0, "(6) Could not resolve host: x (configured CA /etc/no.crt not readable)"},
+		{"ssh: dial tcp: i/o timeout\n", false, 0, "ssh: dial tcp: i/o timeout"},
 		{"", false, 0, "no output"},
 	} {
 		r := ParseS3Check("cp-1", "https://minio.lab:9000", c.out)

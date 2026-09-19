@@ -125,6 +125,21 @@ to run `--cluster-reset` on. If the apiserver itself is unreachable the SSH
 collection keeps going against the last node list it saw (or `ssh.hosts`)
 and runs the etcd probe on every host.
 
+## etcd S3 snapshots
+
+For rke2/k3s the tool works out the effective S3 destination of every
+server: `etcd-s3-*` keys from `config.yaml`(.d) (credential values are
+reported as `<set>`, never read) merged with the `etcd-s3-config-secret` when
+one is named (its values win). It then reports: S3 enabled on some servers but
+not others, servers uploading to different endpoint/bucket/folder, missing
+bucket or credentials, `skip-ssl-verify`, the secret not existing, the newest
+S3-uploaded snapshot record being older than `etcd.max_backup_age`, records
+whose upload failed, `s3-upload-fail` journal lines, and whether each server
+can actually reach the endpoint: a `curl` from the node using the node's own
+CA / TLS settings (any HTTP status counts as reachable; DNS, connect and
+certificate errors are shown verbatim). No credentials are used for that
+check. The etcd tab shows one row per server.
+
 ## How etcd is discovered
 
 | Layout | Detection | Certs | etcdctl | Snapshots |
