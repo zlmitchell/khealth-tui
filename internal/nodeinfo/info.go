@@ -56,6 +56,24 @@ type Info struct {
 	ContainerdHosts        []string // registries containerd has certs.d/hosts.toml for
 	ContainerdConfig       []ConfigFile
 
+	// OS STIG facts (internal/stigdata templates)
+	SysctlAll      map[string]string
+	Packages       map[string]bool
+	UnitFiles      map[string]string    // unit -> enabled/disabled/masked/static/...
+	UnitStates     map[string]UnitState // unit -> load/active/sub
+	Findmnt        []MountEntry
+	Fstab          []string
+	SSHD           map[string][]string // sshd -T keyword (lower-case) -> values
+	AuditRules     []string            // auditctl -l (loaded)
+	AuditRuleFiles []string            // /etc/audit/rules.d/*.rules + audit.rules
+	Modprobe       []string            // install/blacklist lines from modprobe.d
+	LoadedModules  map[string]bool
+	GrubArgs       []string // grubby args= lines and GRUB_CMDLINE_LINUX*
+	STIGStat       map[string]Perm
+	STIGViol       map[string][]string // check id -> violating paths (find scans)
+	STIGFiles      []ConfigFile        // config files the templates read (masked)
+	STIGProbed     bool                // probe sections present (newer script)
+
 	// heavy
 	Images     []Image
 	Containers []Container
@@ -102,6 +120,18 @@ type Cert struct {
 // Perm is a file mode/ownership record.
 type Perm struct {
 	Path, Mode, User, Group, Type string
+	UID, GID                      string // numeric ids (STIG stat lines only)
+}
+
+// MountEntry is one findmnt line.
+type MountEntry struct {
+	Target, Source, FSType string
+	Options                []string
+}
+
+// UnitState is one systemctl list-units line.
+type UnitState struct {
+	Load, Active, Sub string
 }
 
 // ConfigFile is a (possibly masked) file dump.
@@ -320,6 +350,7 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 			}
 		}
 	}
+	parseOSStig(info, secs)
 	info.ConfigFiles = parseDumps(secs["RKE2CFG"])
 	info.ExtraFiles = parseDumps(secs["RKE2EXTRA"])
 	info.Manifests = parseManifests(secs["MANIFESTS"])
@@ -638,6 +669,93 @@ func parseSystemdTime(s string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// parseOSStig reads the OS STIG probe sections (see script.go osStigScript
+// and stigdata.ProbeScript).
+func parseOSStig(info *Info, secs map[string]string) {
+	if _, ok := secs["SYSCTLALL"]; !ok {
+		return
+	}
+	info.STIGProbed = true
+	info.SysctlAll = map[string]string{}
+	for _, l := range nonEmpty(secs["SYSCTLALL"]) {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			info.SysctlAll[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	info.Packages = map[string]bool{}
+	for _, l := range nonEmpty(secs["PKGS"]) {
+		info.Packages[strings.TrimSpace(l)] = true
+	}
+	info.UnitFiles = map[string]string{}
+	for _, l := range nonEmpty(secs["UNITFILES"]) {
+		if f := strings.Fields(l); len(f) >= 2 {
+			info.UnitFiles[f[0]] = f[1]
+		}
+	}
+	info.UnitStates = map[string]UnitState{}
+	for _, l := range nonEmpty(secs["UNITSALL"]) {
+		if f := strings.Fields(l); len(f) >= 4 {
+			info.UnitStates[f[0]] = UnitState{Load: f[1], Active: f[2], Sub: f[3]}
+		}
+	}
+	for _, l := range nonEmpty(secs["FINDMNT"]) {
+		if f := strings.Fields(l); len(f) >= 4 {
+			info.Findmnt = append(info.Findmnt, MountEntry{Target: f[0], Source: f[1], FSType: f[2], Options: strings.Split(f[3], ",")})
+		}
+	}
+	info.Fstab = nonEmpty(secs["FSTAB"])
+	info.SSHD = map[string][]string{}
+	for _, l := range nonEmpty(secs["SSHD"]) {
+		if k, v, ok := strings.Cut(l, " "); ok {
+			k = strings.ToLower(k)
+			info.SSHD[k] = append(info.SSHD[k], strings.TrimSpace(v))
+		}
+	}
+	info.AuditRules = nonEmpty(secs["AUDITRULES"])
+	info.AuditRuleFiles = nonEmpty(secs["AUDITRULESD"])
+	info.Modprobe = nonEmpty(secs["MODPROBE"])
+	info.LoadedModules = map[string]bool{}
+	for _, l := range nonEmpty(secs["LSMOD"]) {
+		info.LoadedModules[strings.TrimSpace(l)] = true
+	}
+	info.GrubArgs = nonEmpty(secs["GRUBCFG"])
+	info.STIGStat = map[string]Perm{}
+	for _, l := range nonEmpty(secs["STIGSTAT"]) {
+		if f := strings.SplitN(l, "|", 7); len(f) == 7 {
+			info.STIGStat[f[6]] = Perm{Mode: f[0], User: f[1], Group: f[2], UID: f[3], GID: f[4], Type: f[5], Path: f[6]}
+		}
+	}
+	info.STIGViol = map[string][]string{}
+	for _, l := range nonEmpty(secs["STIGVIOL"]) {
+		if f := strings.SplitN(l, "|", 3); len(f) == 3 && f[0] == "VIOL" {
+			info.STIGViol[f[1]] = append(info.STIGViol[f[1]], f[2])
+		}
+	}
+	info.STIGFiles = parseDumps(secs["STIGFILES"])
+}
+
+// STIGFile returns a dumped config file's content and whether it was present.
+func (i *Info) STIGFile(path string) (string, bool) {
+	for _, f := range i.STIGFiles {
+		if f.Path == path {
+			return f.Content, true
+		}
+	}
+	return "", false
+}
+
+// STIGFilesGlob returns dumped files under a directory (prefix match).
+func (i *Info) STIGFilesGlob(dir string) []ConfigFile {
+	dir = strings.TrimRight(dir, "/") + "/"
+	var out []ConfigFile
+	for _, f := range i.STIGFiles {
+		if strings.HasPrefix(f.Path, dir) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func parseDumps(s string) []ConfigFile {

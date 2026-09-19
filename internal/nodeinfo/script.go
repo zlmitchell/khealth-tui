@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"k8s-health-tui/internal/stigdata"
 )
 
 // Options controls what the node script collects.
@@ -42,6 +44,8 @@ func Script(o Options) string {
 
 	var b strings.Builder
 	b.WriteString(baseScript)
+	b.WriteString(osStigScript)
+	b.WriteString(stigdata.ProbeScript())
 	if o.Heavy {
 		h := strings.ReplaceAll(heavyScript, "__LINES__", fmt.Sprint(lines))
 		h = strings.ReplaceAll(h, "__SINCE__", since)
@@ -221,6 +225,30 @@ for f in /var/lib/rancher/rke2/agent/etc/containerd/config.toml /var/lib/rancher
   echo "--- $f"
   grep -nE 'registry|mirrors|config_path|endpoint|sandbox_image|SystemdCgroup|snapshotter|default_runtime|disable_snapshot_annotations' "$f" 2>/dev/null | grep -viE 'password|username|auth' | head -80
 done
+`
+
+// osStigScript collects the generic facts the OS STIG templates evaluate
+// (see internal/stigdata); the data-derived stat/find/dump sections are
+// appended by stigdata.ProbeScript.
+const osStigScript = `
+sec SYSCTLALL; sysctl -a 2>/dev/null
+sec PKGS
+if command -v rpm >/dev/null 2>&1; then rpm -qa --qf '%{NAME}
+' 2>/dev/null
+elif command -v dpkg-query >/dev/null 2>&1; then dpkg-query -W -f='${Package} ${db:Status-Status}
+' 2>/dev/null | awk '$2=="installed"{print $1}'; fi
+sec UNITFILES; systemctl list-unit-files --no-legend --plain --no-pager 2>/dev/null
+sec UNITSALL; systemctl list-units --all --no-legend --plain --no-pager --type=service,socket,timer 2>/dev/null
+sec FINDMNT; findmnt -rn -o TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null
+sec FSTAB; grep -vE '^[[:space:]]*(#|$)' /etc/fstab 2>/dev/null
+sec SSHD; sshd -T 2>/dev/null
+sec AUDITRULES; auditctl -l 2>/dev/null
+sec AUDITRULESD; cat /etc/audit/rules.d/*.rules /etc/audit/audit.rules 2>/dev/null | grep -vE '^[[:space:]]*(#|$)'
+sec MODPROBE; grep -hE '^[[:space:]]*(install|blacklist)[[:space:]]' /etc/modprobe.d/*.conf /etc/modprobe.conf 2>/dev/null
+sec LSMOD; lsmod 2>/dev/null | awk 'NR>1{print $1}'
+sec GRUBCFG
+grubby --info=ALL 2>/dev/null | grep '^args='
+grep -E '^GRUB_CMDLINE_LINUX' /etc/default/grub 2>/dev/null
 `
 
 const heavyScript = `
