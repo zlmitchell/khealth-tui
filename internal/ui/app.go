@@ -54,7 +54,7 @@ var subTabs = map[tab][]string{
 	tabWorkloads: {"Controllers", "Pods", "Resources", "Object"},
 	tabEvents:    {"Events", "Object"},
 	tabLogs:      {"Nodes", "Lines"},
-	tabSecurity:  {"Rules", "Node hardening"},
+	tabSecurity:  {"Rules", "Node hardening", "OS STIG"},
 }
 
 const subInspect = "Object"
@@ -121,6 +121,8 @@ type App struct {
 	lastRefresh time.Time
 	spinner     spinner.Model
 	problemOnly bool
+	hideManual  bool // Security: hide MANUAL rules (m)
+	stigNext    bool // re-collect the OS STIG facts on the next SSH cycle (R)
 
 	cursor   [tabCount]int
 	scroll   [tabCount]int
@@ -350,7 +352,12 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 		host := a.nodeAddress(n)
 		name := n.Name
 		opts := nodeinfo.Options{Heavy: heavy, LogLines: a.cfg.Logs.Lines, LogSince: a.cfg.Logs.Since, PVPaths: pvPaths}
-		if prev := a.nodes[name]; prev != nil {
+		// OS STIG facts are collected once per node (first contact) and on R,
+		// not every cycle: sysctl -a, package lists, find scans and config
+		// dumps are the most expensive part of the probe.
+		prev := a.nodes[name]
+		opts.OSStig = a.stigNext || prev == nil || !prev.STIGProbed
+		if prev != nil {
 			opts.KnownTarballs = prev.TarballKeys()
 		}
 		a.pending[name] = true
@@ -386,6 +393,7 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 			})
 		}
 	}
+	a.stigNext = false
 	return tea.Batch(cmds...)
 }
 
@@ -509,17 +517,13 @@ func (a *App) s3CheckCmd(node string) tea.Cmd {
 
 func (a *App) recompute() {
 	for name, ni := range a.nodes {
-		if ni != nil && len(ni.Journal) > 0 {
-			var lines []string
-			lines = append(lines, ni.Journal...)
+		if ni != nil && (len(ni.Journal) > 0 || len(ni.LogFiles) > 0) {
+			// rke2's kubelet/containerd log to files rather than the journal
+			srcs := []logs.Source{{Lines: ni.Journal}}
 			for _, lf := range ni.LogFiles {
-				for _, l := range strings.Split(lf.Content, "\n") {
-					if strings.TrimSpace(l) != "" {
-						lines = append(lines, l)
-					}
-				}
+				srcs = append(srcs, logs.Source{Unit: logFileUnit(lf.Path), Lines: strings.Split(lf.Content, "\n")})
 			}
-			a.logSum[name] = logs.Classify(lines, time.Now())
+			a.logSum[name] = logs.ClassifySources(srcs, time.Now())
 		}
 	}
 	a.stigRes = stig.Evaluate(stig.Input{Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd})
@@ -695,6 +699,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		m.info.MergeHeavy(a.nodes[m.info.Node])
+		m.info.MergeSTIG(a.nodes[m.info.Node])
 		a.nodes[m.info.Node] = m.info
 		delete(a.pending, m.info.Node)
 		a.recompute()
@@ -904,8 +909,9 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "R":
 		a.heavyNext = true
+		a.stigNext = true
 		if !a.refreshing {
-			a.setStatus("full refresh (logs, images, tarballs)")
+			a.setStatus("full refresh (logs, images, tarballs, OS STIG facts)")
 			return a, a.refreshCmd()
 		}
 	case "s":
@@ -916,6 +922,7 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if a.sshEnabled {
 				a.setStatus("SSH collection enabled")
 				a.heavyNext = true
+				a.stigNext = true
 				return a, a.collectCmds(a.snap)
 			}
 			a.setStatus("SSH collection disabled")
@@ -927,6 +934,12 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.problemOnly = !a.problemOnly
 		a.cursor[a.tab] = 0
 		a.scroll[a.tab] = 0
+	case "m":
+		if a.tab == tabSecurity {
+			a.hideManual = !a.hideManual
+			a.cursor[a.tab] = 0
+			a.scroll[a.tab] = 0
+		}
 	case "/":
 		a.filterOn = true
 		a.filter.SetValue(a.filters[a.tab])
@@ -1573,18 +1586,24 @@ func (a *App) renderOverlay() string {
 		if a.nsCursor >= visible {
 			start = a.nsCursor - visible + 1
 		}
-		var rows [][]string
-		for i := start; i < len(opts) && i < start+visible; i++ {
-			rows = append(rows, a.nsRow(opts[i]))
+		// size the columns from every namespace, not just the visible window,
+		// so the layout stays put while scrolling
+		rows := make([][]string, 0, len(opts))
+		for _, o := range opts {
+			rows = append(rows, a.nsRow(o))
 		}
-		hdr, rl := renderTable(a.width-6, []column{{title: "NAMESPACE", max: 40}, {title: "PSA ENFORCE"}, {title: "PRIV PODS"}, {title: "PODS", right: true}, {title: "NOTE"}}, rows)
-		lines = append(lines, "  "+hdr)
-		for i, l := range rl {
-			if start+i == a.nsCursor {
-				lines = append(lines, styleSel.Render("> "+pad(l, a.width-8)))
+		tw := a.width - 8
+		hdr, rl := renderTable(tw, []column{{title: "NAMESPACE", max: 40}, {title: "PSA ENFORCE"}, {title: "PRIV PODS"}, {title: "PODS", right: true}, {title: "NOTE"}}, rows)
+		lines = append(lines, "  "+pad(hdr, tw))
+		for i := start; i < len(rl) && i < start+visible; i++ {
+			if i == a.nsCursor {
+				lines = append(lines, styleSel.Render("> "+pad(rl[i], tw)))
 			} else {
-				lines = append(lines, "  "+l)
+				lines = append(lines, "  "+pad(rl[i], tw))
 			}
+		}
+		if len(rl) > visible {
+			lines = append(lines, styleDim.Render(fmt.Sprintf("  %d-%d of %d", start+1, min(start+visible, len(rl)), len(rl))))
 		}
 	case ovConfirm, ovRevisions:
 		title, lines = a.renderActionOverlay()
@@ -1633,7 +1652,7 @@ func helpLines() []string {
 		"  n      choose namespace (shows PSA level + privileged pods; filters Inspect, Events, Storage, Helm)",
 		"  /      filter rows on the current tab (substring)          esc   clear filter / step back",
 		"  a      toggle problems-only view (Overview, Inspect, Events, Security, Resources)",
-		"  r      refresh now (API + light SSH collection)             R     full refresh: journal logs, images, tarballs, PV du",
+		"  r      refresh now (API + light SSH collection)             R     full refresh: journal logs, images, tarballs, PV du, OS STIG facts",
 		"  s      toggle SSH collection on/off                        q     quit (steps back first when inside an object/log view)",
 		"",
 		styleBold.Render("Tab-specific keys"),
@@ -1644,7 +1663,8 @@ func helpLines() []string {
 		"  etcd       enter  raw probe output and config dumps",
 		"  Logs       enter  node lines, enter again = full line + explanation; a = include info lines",
 		"  Events     enter  open the involved object in the inspector",
-		"  Security   ←/→    Rules / Node hardening                  enter  rule detail + fix",
+		"  Security   ←/→    Rules / Node hardening / OS STIG        enter  rule detail + fix",
+		"             a      hide passing rules                      m      hide MANUAL rules",
 		"",
 		styleBold.Render("Log viewer (L)"),
 		"  [ ] / tab  switch container    { }  next/prev pod    p  previous instance    f  follow    w  wrap    T  timestamps short/off/full    H  highlighting    r  reload    esc  close",
@@ -1667,7 +1687,7 @@ func helpLines() []string {
 		"             need the helm CLI; --read-only disables them; rke2-bundled charts are refused)",
 		"  Images     per-node image inventory, unused images, airgap tarball contents vs running",
 		"  Security   STIG / CIS checks from component flags, kubelet config, PSA, RBAC and node facts",
-		"  Logs       rke2/kubelet/containerd journal classified into startup-noise / warnings / errors",
+		"  Logs       rke2/kubelet/containerd/rancher-system-agent logs classified into startup-noise / warnings / errors (Rancher plan events flag config rewrites)",
 		"             enter on a node lists its lines; enter on a line shows the full text + explanation; esc goes back; a shows info lines",
 		"  RKE2       config.yaml(.d), data-dir, server/manifests (HelmChartConfig etc.), static pod manifests, audit/PSS policies, config drift",
 		"",
