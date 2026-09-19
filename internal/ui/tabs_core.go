@@ -521,7 +521,17 @@ func (a *App) storageContent() content {
 			pvBytes += float64(q.Value())
 		}
 	}
+	var usedBytes, capBytes float64
+	for _, u := range s.PVCUsage {
+		usedBytes += float64(u.Used)
+		capBytes += float64(u.Capacity)
+	}
+	usedTxt := styleDim.Render("n/a")
+	if capBytes > 0 {
+		usedTxt = gauge(usedBytes/capBytes*100, 12, thr.DiskWarnPct, thr.DiskCritPct) + styleDim.Render(fmt.Sprintf(" %s of %s across %d mounted claims", humanBytes(usedBytes), humanBytes(capBytes), len(s.PVCUsage)))
+	}
 	add(styleTitle.Render("Storage") + "  " + kv("PVCs", stacked(24, pvcSegs)) + " " + legend(pvcSegs) + "  " + kv("PVs", stacked(24, pvSegs)) + " " + legend(pvSegs) + "  " + kv("provisioned", humanBytes(pvBytes)))
+	add(kv("PVC usage", usedTxt))
 	add("", styleTitle.Render("StorageClasses"))
 	var rows [][]string
 	for i := range s.StorageClasses {
@@ -582,7 +592,11 @@ func (a *App) storageContent() content {
 		add(lines...)
 	}
 
-	add("", styleTitle.Render("PersistentVolumeClaims")+styleDim.Render("  (namespace filter applies)"))
+	usedNote := "used = kubelet stats/summary of the node mounting the claim"
+	if len(s.PVCUsage) == 0 {
+		usedNote = "no usage data (needs nodes/proxy RBAC and mounted claims)"
+	}
+	add("", styleTitle.Render("PersistentVolumeClaims")+styleDim.Render("  (namespace filter applies; "+usedNote+")"))
 	rows = nil
 	for i := range s.PVCs {
 		p := &s.PVCs[i]
@@ -608,12 +622,18 @@ func (a *App) storageContent() content {
 		} else if q, ok := p.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
 			capacity = q.String() + styleDim.Render(" (req)")
 		}
-		rows = append(rows, []string{p.Namespace, p.Name, st, p.Spec.VolumeName, capacity, sc, age(p.CreationTimestamp.Time)})
+		used := styleDim.Render("-")
+		mounted := ""
+		if u, ok := s.PVCUsage[p.Namespace+"/"+p.Name]; ok {
+			used = gauge(u.UsedPct(), 10, thr.DiskWarnPct, thr.DiskCritPct) + styleDim.Render(" "+humanBytes(float64(u.Used))+"/"+humanBytes(float64(u.Capacity)))
+			mounted = u.Node
+		}
+		rows = append(rows, []string{p.Namespace, p.Name, st, used, mounted, p.Spec.VolumeName, capacity, sc, age(p.CreationTimestamp.Time)})
 	}
 	if len(rows) == 0 {
 		add(styleDim.Render("  none"))
 	} else {
-		h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "NAME", max: 40}, {title: "STATUS"}, {title: "VOLUME", max: 40}, {title: "CAPACITY"}, {title: "CLASS"}, {title: "AGE"}}, rows)
+		h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "NAME", max: 36}, {title: "STATUS"}, {title: "USED"}, {title: "NODE", max: 20}, {title: "VOLUME", max: 36}, {title: "CAPACITY"}, {title: "CLASS"}, {title: "AGE"}}, rows)
 		add(h)
 		add(lines...)
 	}

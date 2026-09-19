@@ -54,6 +54,8 @@ const (
 	ovHelp
 	ovNamespace
 	ovDetail
+	ovConfirm
+	ovRevisions
 )
 
 // row is one selectable/scrollable line of a tab.
@@ -120,6 +122,11 @@ type App struct {
 	statusAt     time.Time
 	logsNode     string // Logs tab: node whose lines are listed ("" = node list)
 	logsAll      bool   // Logs tab: show info lines too
+
+	pendingAct    *action
+	revRelease    *k8s.HelmRelease
+	revCursor     int
+	actionRunning bool
 }
 
 type snapshotMsg struct {
@@ -504,6 +511,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.helmLatest = m.latest
 		a.recompute()
 		return a, nil
+	case actionDoneMsg:
+		return a, a.handleActionDone(m)
 	case tea.KeyMsg:
 		return a.handleKey(m)
 	}
@@ -541,6 +550,24 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	for i, k := range tabKeys {
 		if key == k {
 			a.tab = tab(i)
+			return a, nil
+		}
+	}
+	if a.tab == tabHelm && a.snap != nil {
+		switch key {
+		case "u":
+			if a.actionRunning {
+				a.setStatus("an action is still running")
+				return a, nil
+			}
+			a.startHelmUpgrade()
+			return a, nil
+		case "b":
+			if a.actionRunning {
+				a.setStatus("an action is still running")
+				return a, nil
+			}
+			a.startHelmRollback()
 			return a, nil
 		}
 	}
@@ -676,6 +703,8 @@ func (a *App) clamp(c content) {
 func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := m.String()
 	switch a.overlay {
+	case ovConfirm, ovRevisions:
+		return a.handleActionOverlayKey(key)
 	case ovNamespace:
 		switch key {
 		case "esc":
@@ -893,6 +922,8 @@ func (a *App) renderHeader() string {
 	parts = append(parts, kv("ssh", ssh))
 	state := ""
 	switch {
+	case a.actionRunning:
+		state = a.spinner.View() + " " + styleWarn.Render("helm action running")
 	case a.refreshing:
 		state = a.spinner.View() + " refreshing"
 	case len(a.pending) > 0 || len(a.etcdPend) > 0:
@@ -1021,6 +1052,8 @@ func (a *App) renderOverlay() string {
 			}
 			lines = append(lines, t)
 		}
+	case ovConfirm, ovRevisions:
+		title, lines = a.renderActionOverlay()
 	case ovDetail:
 		title = a.detailTitle
 		visible := h - 4
@@ -1074,7 +1107,9 @@ func helpLines() []string {
 		"  Storage    StorageClasses, CSI drivers, PVs/PVCs and node filesystems",
 		"  Events     warning events",
 		"  Addons     CNI, CSI, DNS/ingress/metrics, Rancher management, registries.yaml, rke2 HelmCharts",
-		"  Helm       releases (enter = values applied), optional update check",
+		"  Helm       releases (enter = values applied), optional update check;",
+		"             u = helm upgrade to the newest known chart version, b = helm rollback to a chosen revision (both confirm first;",
+		"             need the helm CLI; --read-only disables them; rke2-bundled charts are refused)",
 		"  Images     per-node image inventory, unused images, airgap tarball contents vs running",
 		"  Security   STIG / CIS checks from component flags, kubelet config, PSA, RBAC and node facts",
 		"  Logs       rke2/kubelet/containerd journal classified into startup-noise / warnings / errors",

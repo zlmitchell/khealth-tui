@@ -26,7 +26,14 @@ type Config struct {
 	Etcd       Etcd       `yaml:"etcd"`
 	Helm       Helm       `yaml:"helm"`
 	Logs       Logs       `yaml:"logs"`
+	Actions    Actions    `yaml:"actions"`
 	Thresholds Thresholds `yaml:"thresholds"`
+}
+
+// Actions configures the (opt-out) mutating operations run through CLIs.
+type Actions struct {
+	Enabled    bool   `yaml:"enabled"`
+	HelmBinary string `yaml:"helm_binary"`
 }
 
 // SSH configures how nodes are reached over SSH.
@@ -105,9 +112,10 @@ func Default() Config {
 			StrictHostKey: true,
 			Concurrency:   8,
 		},
-		Etcd: Etcd{MaxBackupAge: 24 * time.Hour},
-		Helm: Helm{Timeout: 15 * time.Second},
-		Logs: Logs{Lines: 400, Since: "-24h"},
+		Etcd:    Etcd{MaxBackupAge: 24 * time.Hour},
+		Helm:    Helm{Timeout: 15 * time.Second},
+		Logs:    Logs{Lines: 400, Since: "-24h"},
+		Actions: Actions{Enabled: true, HelmBinary: "helm"},
 		Thresholds: Thresholds{
 			DiskWarnPct:     80,
 			DiskCritPct:     90,
@@ -154,6 +162,7 @@ func Load(args []string) (Config, error) {
 		noSudo      = fs.Bool("no-sudo", false, "do not use sudo on nodes")
 		insecureHK  = fs.Bool("insecure-host-key", false, "skip SSH host key verification")
 		helmUpdates = fs.Bool("helm-updates", false, "check Helm chart repos / Artifact Hub for newer chart versions")
+		readOnly    = fs.Bool("read-only", false, "disable mutating actions (helm rollback/upgrade)")
 		showVersion = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
@@ -222,6 +231,8 @@ func Load(args []string) (Config, error) {
 			cfg.SSH.StrictHostKey = !*insecureHK
 		case "helm-updates":
 			cfg.Helm.CheckUpdates = *helmUpdates
+		case "read-only":
+			cfg.Actions.Enabled = !*readOnly
 		}
 	})
 

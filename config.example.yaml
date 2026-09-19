@@ -48,6 +48,10 @@ logs:
   lines: 400                      # journalctl -n per node
   since: "-24h"                   # journalctl --since
 
+actions:
+  enabled: true                   # Helm tab: u = helm upgrade, b = helm rollback (always confirmed); --read-only disables
+  helm_binary: helm               # helm CLI used for actions (with --kubeconfig/--kube-context of this session)
+
 thresholds:
   disk_warn_pct: 80
   disk_crit_pct: 90

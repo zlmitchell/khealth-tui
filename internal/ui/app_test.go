@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -244,3 +245,61 @@ via=crictl x
 100|1|/var/lib/rancher/rke2/server/db/snapshots/old
 ===END
 `
+
+func TestHelmActionOverlays(t *testing.T) {
+	a := testApp()
+	a.cfg.Actions.HelmBinary = "sh" // exists in the test environment
+	a.helmLatest["nginx"] = helmcheck.Latest{Version: "99.0.0", Source: "repo", RepoURL: "https://charts.example.com"}
+	a.snap.HelmReleases[0].History = []k8s.HelmRevision{{Revision: 2, Status: "deployed", Chart: "nginx", Version: "15.0.0"}, {Revision: 1, Status: "superseded", Chart: "nginx", Version: "14.0.0"}}
+	a.tab = tabHelm
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	if a.overlay != ovRevisions {
+		t.Fatalf("expected revision picker, got %v (status %q)", a.overlay, a.status)
+	}
+	_ = a.View()
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.overlay != ovConfirm || a.pendingAct == nil || !strings.Contains(strings.Join(a.pendingAct.argv, " "), "rollback web 1") {
+		t.Fatalf("expected rollback confirm, got %v %+v", a.overlay, a.pendingAct)
+	}
+	if !strings.Contains(ansi.Strip(a.View()), "rollback web 1 --namespace default") {
+		t.Errorf("confirm overlay should show the command")
+	}
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if a.overlay != ovNone || a.pendingAct != nil {
+		t.Errorf("cancel should close the overlay")
+	}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if a.overlay != ovConfirm || !strings.Contains(strings.Join(a.pendingAct.argv, " "), "--version 99.0.0") {
+		t.Fatalf("expected upgrade confirm, got %v (status %q)", a.overlay, a.status)
+	}
+	_ = a.View()
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
+	a.cfg.Actions.Enabled = false
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if a.overlay != ovNone || !strings.Contains(a.status, "disabled") {
+		t.Errorf("read-only should block actions: %q", a.status)
+	}
+}
+
+func TestLogsDrillDown(t *testing.T) {
+	a := testApp()
+	a.tab = tabLogs
+	a.cursor[tabLogs] = 0 // cp-1 has journal lines
+	a.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.logsNode != "cp-1" {
+		t.Fatalf("enter should open node lines, got %q", a.logsNode)
+	}
+	c := a.currentContent()
+	if !c.selectable || len(c.rows) == 0 {
+		t.Fatalf("expected selectable log lines, got %d rows", len(c.rows))
+	}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.overlay != ovDetail || !strings.Contains(ansi.Strip(strings.Join(a.detailLines, "\n")), "token does not match") {
+		t.Errorf("line detail should show the full line; overlay=%v", a.overlay)
+	}
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
+	a.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.logsNode != "" {
+		t.Errorf("esc should return to the node list")
+	}
+}

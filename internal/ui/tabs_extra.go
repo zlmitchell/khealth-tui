@@ -791,10 +791,14 @@ func (a *App) helmContent() content {
 		if r.ValuesYAML != "" {
 			vals = fmt.Sprintf("%d lines", strings.Count(r.ValuesYAML, "\n")+1)
 		}
-		rows = append(rows, []string{r.Namespace, r.Name, r.Chart, r.Version, r.AppVersion, fmt.Sprint(r.Revision), st, age(r.Updated), vals, latest})
+		name := r.Name
+		if r.Bundled {
+			name += styleDim.Render(" (rke2)")
+		}
+		rows = append(rows, []string{r.Namespace, name, r.Chart, r.Version, r.AppVersion, fmt.Sprintf("%d/%d", r.Revision, len(r.History)), st, age(r.Updated), vals, latest})
 		ids = append(ids, r.Namespace+"/"+r.Name)
 	}
-	h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "RELEASE", max: 36}, {title: "CHART", max: 36}, {title: "VERSION"}, {title: "APP"}, {title: "REV", right: true}, {title: "STATUS"}, {title: "UPDATED", right: true}, {title: "VALUES"}, {title: "LATEST"}}, rows)
+	h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "RELEASE", max: 36}, {title: "CHART", max: 36}, {title: "VERSION"}, {title: "APP"}, {title: "REV/HIST", right: true}, {title: "STATUS"}, {title: "UPDATED", right: true}, {title: "VALUES"}, {title: "LATEST"}}, rows)
 	hsegs := []seg{{0, styleOK, "deployed"}, {0, styleCrit, "failed"}, {0, styleWarn, "other"}, {0, styleInfo, "outdated"}}
 	for _, r := range s.HelmReleases {
 		switch strings.ToLower(r.Status) {
@@ -809,7 +813,7 @@ func (a *App) helmContent() content {
 			hsegs[3].n++
 		}
 	}
-	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope; enter shows the values applied. Update check: ", len(rows)))}
+	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope; enter = values, ", len(rows))) + styleKey.Render("u") + styleDim.Render(" upgrade to latest, ") + styleKey.Render("b") + styleDim.Render(" rollback. Update check: ")}
 	if a.helm != nil {
 		hdr[0] += styleOK.Render("on")
 	} else {
@@ -835,6 +839,16 @@ func (a *App) helmDetail(id string) (string, []string) {
 		}
 		if l, ok := a.helmLatest[r.Chart]; ok && l.Version != "" {
 			out = append(out, kv("latest available", l.Version+" ("+l.Source+")"))
+		}
+		if len(r.History) > 0 {
+			out = append(out, "", styleTitle.Render("History")+styleDim.Render("  (b on the Helm tab rolls back)"))
+			var rows [][]string
+			for _, h := range r.History {
+				rows = append(rows, []string{fmt.Sprint(h.Revision), h.Status, h.Chart + " " + h.Version, h.AppVersion, age(h.Updated) + " ago", firstLine(h.Description)})
+			}
+			h, lines := renderTable(a.width-6, []column{{title: "REV", right: true}, {title: "STATUS"}, {title: "CHART"}, {title: "APP"}, {title: "UPDATED", right: true}, {title: "DESCRIPTION"}}, rows)
+			out = append(out, h)
+			out = append(out, lines...)
 		}
 		out = append(out, "", styleTitle.Render("User-supplied values (helm get values)"))
 		if r.ValuesYAML == "" {

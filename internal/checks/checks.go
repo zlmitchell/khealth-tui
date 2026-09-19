@@ -322,6 +322,18 @@ func Evaluate(in Input) []Finding {
 	}
 
 	// ---- storage ----
+	for key, u := range s.PVCUsage {
+		pct := u.UsedPct()
+		switch {
+		case pct >= float64(thr.DiskCritPct):
+			add(SevCrit, "storage", "pvc/"+key, fmt.Sprintf("%.0f%% used (%s of %s) on %s", pct, human(float64(u.Used)), human(float64(u.Capacity)), u.Node), "expand the PVC (allowVolumeExpansion) or clean up data")
+		case pct >= float64(thr.DiskWarnPct):
+			add(SevWarn, "storage", "pvc/"+key, fmt.Sprintf("%.0f%% used (%s of %s)", pct, human(float64(u.Used)), human(float64(u.Capacity))), "")
+		}
+		if u.Inodes > 0 && float64(u.InodesUsed)*100/float64(u.Inodes) >= float64(thr.InodeWarnPct) {
+			add(SevWarn, "storage", "pvc/"+key, fmt.Sprintf("inodes %d%% used", u.InodesUsed*100/u.Inodes), "")
+		}
+	}
 	for i := range s.PVCs {
 		p := &s.PVCs[i]
 		switch p.Status.Phase {

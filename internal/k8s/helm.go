@@ -13,6 +13,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
 )
 
@@ -30,6 +31,18 @@ type HelmRelease struct {
 	ValuesYAML  string // user-supplied values (helm get values)
 	Storage     string // secret | configmap
 	Bundled     bool   // installed by rke2/k3s HelmChart controller
+	History     []HelmRevision
+}
+
+// HelmRevision is one entry of a release's history (newest first).
+type HelmRevision struct {
+	Revision    int
+	Status      string
+	Chart       string
+	Version     string
+	AppVersion  string
+	Updated     time.Time
+	Description string
 }
 
 type helmReleaseJSON struct {
@@ -53,6 +66,7 @@ type helmReleaseJSON struct {
 
 func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 	latest := map[string]HelmRelease{}
+	history := map[string][]HelmRevision{}
 	secrets, err := c.CS.CoreV1().Secrets("").List(ctx, metav1.ListOptions{FieldSelector: "type=helm.sh/release.v1"})
 	if err != nil {
 		return nil, err
@@ -64,10 +78,8 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 		}
 		rel.Storage = "secret"
 		rel.Namespace = sec.Namespace
-		if v, ok := sec.Labels["owner"]; ok && v == "helm" {
-			rel.Bundled = false
-		}
 		key := rel.Namespace + "/" + rel.Name
+		history[key] = append(history[key], HelmRevision{Revision: rel.Revision, Status: rel.Status, Chart: rel.Chart, Version: rel.Version, AppVersion: rel.AppVersion, Updated: rel.Updated, Description: rel.Description})
 		if cur, ok := latest[key]; !ok || rel.Revision > cur.Revision {
 			latest[key] = rel
 		}
@@ -86,13 +98,29 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 			rel.Storage = "configmap"
 			rel.Namespace = cm.Namespace
 			key := rel.Namespace + "/" + rel.Name
+			history[key] = append(history[key], HelmRevision{Revision: rel.Revision, Status: rel.Status, Chart: rel.Chart, Version: rel.Version, AppVersion: rel.AppVersion, Updated: rel.Updated, Description: rel.Description})
 			if cur, ok := latest[key]; !ok || rel.Revision > cur.Revision {
 				latest[key] = rel
 			}
 		}
 	}
+	// releases installed by the rke2/k3s HelmChart controller carry the CR name
+	bundled := map[string]bool{}
+	if l, err := c.Dyn.Resource(helmChartGVR).List(ctx, metav1.ListOptions{}); err == nil {
+		for _, it := range l.Items {
+			ns, _, _ := unstructured.NestedString(it.Object, "spec", "targetNamespace")
+			if ns == "" {
+				ns = it.GetNamespace()
+			}
+			bundled[ns+"/"+it.GetName()] = true
+		}
+	}
 	out := make([]HelmRelease, 0, len(latest))
-	for _, r := range latest {
+	for key, r := range latest {
+		h := history[key]
+		sort.Slice(h, func(i, j int) bool { return h[i].Revision > h[j].Revision })
+		r.History = h
+		r.Bundled = bundled[key]
 		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Namespace+out[i].Name < out[j].Namespace+out[j].Name })

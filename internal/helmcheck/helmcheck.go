@@ -24,6 +24,7 @@ import (
 type Latest struct {
 	Version string
 	Source  string // repo name or "artifacthub"
+	RepoURL string // chart repository URL usable with helm --repo
 	Err     string
 }
 
@@ -131,7 +132,7 @@ func (c *Checker) fromIndexes(chart string) (Latest, bool) {
 				continue
 			}
 			if !found || CompareVersions(v, best.Version) > 0 {
-				best = Latest{Version: v, Source: repo}
+				best = Latest{Version: v, Source: repo, RepoURL: c.cfg.Repos[repo]}
 				found = true
 			}
 		}
@@ -167,6 +168,7 @@ func (c *Checker) artifactHub(ctx context.Context, chart string) Latest {
 			Version    string `json:"version"`
 			Repository struct {
 				Name     string `json:"name"`
+				URL      string `json:"url"`
 				Official bool   `json:"official"`
 			} `json:"repository"`
 		} `json:"packages"`
@@ -181,7 +183,7 @@ func (c *Checker) artifactHub(ctx context.Context, chart string) Latest {
 			continue
 		}
 		if !found || (p.Repository.Official && !strings.HasSuffix(best.Source, "*")) || CompareVersions(p.Version, best.Version) > 0 {
-			best = Latest{Version: p.Version, Source: "artifacthub/" + p.Repository.Name}
+			best = Latest{Version: p.Version, Source: "artifacthub/" + p.Repository.Name, RepoURL: p.Repository.URL}
 			if p.Repository.Official {
 				best.Source += "*"
 			}

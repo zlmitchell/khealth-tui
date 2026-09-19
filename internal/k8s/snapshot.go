@@ -57,6 +57,10 @@ type Snapshot struct {
 	KubeletConfigs map[string]map[string]any
 	KubeletCfgErr  string
 
+	// PVCUsage is filesystem usage of mounted PVCs from kubelet stats/summary,
+	// keyed by "namespace/claim".
+	PVCUsage map[string]VolumeUsage
+
 	RKE2Snapshots []EtcdSnapshotRecord
 	HelmCharts    []HelmChartCR
 	HelmReleases  []HelmRelease
@@ -70,6 +74,21 @@ type APICheck struct {
 	Name   string
 	OK     bool
 	Detail string
+}
+
+// VolumeUsage is the kubelet-reported usage of a mounted PVC.
+type VolumeUsage struct {
+	Capacity, Used, Available int64
+	Inodes, InodesUsed        int64
+	Node, Pod                 string
+}
+
+// UsedPct returns used/capacity in percent, or -1.
+func (v VolumeUsage) UsedPct() float64 {
+	if v.Capacity <= 0 {
+		return -1
+	}
+	return float64(v.Used) * 100 / float64(v.Capacity)
 }
 
 // NodeMetric is the metrics.k8s.io usage for a node.
@@ -140,6 +159,7 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		Taken:          time.Now(),
 		NodeMetrics:    map[string]NodeMetric{},
 		KubeletConfigs: map[string]map[string]any{},
+		PVCUsage:       map[string]VolumeUsage{},
 	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -408,8 +428,12 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			cfg, err := c.kubeletConfigz(ctx, name)
+			usage, _ := c.kubeletVolumeStats(ctx, name)
 			mu.Lock()
 			defer mu.Unlock()
+			for k, v := range usage {
+				s.PVCUsage[k] = v
+			}
 			if err != nil {
 				if s.KubeletCfgErr == "" {
 					s.KubeletCfgErr = err.Error()
@@ -506,6 +530,49 @@ func (c *Client) kubeletConfigz(ctx context.Context, node string) (map[string]an
 		return nil, fmt.Errorf("configz: no kubeletconfig in response")
 	}
 	return wrapper.KubeletConfig, nil
+}
+
+// kubeletVolumeStats reads /stats/summary through the API proxy and returns
+// usage for every volume backed by a PVC.
+func (c *Client) kubeletVolumeStats(ctx context.Context, node string) (map[string]VolumeUsage, error) {
+	raw, err := c.CS.CoreV1().RESTClient().Get().Resource("nodes").Name(node).SubResource("proxy").Suffix("stats/summary").Do(ctx).Raw()
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Pods []struct {
+			PodRef struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"podRef"`
+			Volume []struct {
+				Name           string `json:"name"`
+				CapacityBytes  int64  `json:"capacityBytes"`
+				UsedBytes      int64  `json:"usedBytes"`
+				AvailableBytes int64  `json:"availableBytes"`
+				Inodes         int64  `json:"inodes"`
+				InodesUsed     int64  `json:"inodesUsed"`
+				PVCRef         *struct {
+					Name      string `json:"name"`
+					Namespace string `json:"namespace"`
+				} `json:"pvcRef"`
+			} `json:"volume"`
+		} `json:"pods"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, err
+	}
+	out := map[string]VolumeUsage{}
+	for _, p := range doc.Pods {
+		for _, v := range p.Volume {
+			if v.PVCRef == nil {
+				continue
+			}
+			key := v.PVCRef.Namespace + "/" + v.PVCRef.Name
+			out[key] = VolumeUsage{Capacity: v.CapacityBytes, Used: v.UsedBytes, Available: v.AvailableBytes, Inodes: v.Inodes, InodesUsed: v.InodesUsed, Node: node, Pod: p.PodRef.Namespace + "/" + p.PodRef.Name}
+		}
+	}
+	return out, nil
 }
 
 var etcdSnapshotGVR = schema.GroupVersionResource{Group: "k3s.cattle.io", Version: "v1", Resource: "etcdsnapshotfiles"}
