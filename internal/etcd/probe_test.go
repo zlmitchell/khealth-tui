@@ -190,3 +190,49 @@ func TestHealthFallback(t *testing.T) {
 		t.Errorf("%+v", h)
 	}
 }
+
+// TestParseLeaderLogAndRaft covers the on-disk evidence used to pick the node
+// to reset from after an outage: etcd log elections, member id, snap/WAL names.
+func TestParseLeaderLogAndRaft(t *testing.T) {
+	out := `
+===DIST
+rke2
+===LEADERLOG
+source=/var/log/pods/kube-system_etcd-*/etcd
+local-member-id=8e9e05c52164694d
+2026-09-17T10:00:02.000000000Z stderr F {"level":"info","ts":"2026-09-17T10:00:02.000Z","caller":"raft/node.go:1","msg":"raft.node: 8e9e05c52164694d elected leader 91bc3c398fb3c146 at term 41"}
+2026-09-18T01:02:03.000000000Z stderr F {"level":"info","ts":"2026-09-18T01:02:03.000Z","caller":"raft/raft.go:1","msg":"8e9e05c52164694d became leader at term 42"}
+2026-09-18T01:02:03.500000000Z stderr F {"level":"info","ts":"2026-09-18T01:02:03.500Z","caller":"raft/node.go:1","msg":"raft.node: 8e9e05c52164694d elected leader 8e9e05c52164694d at term 42"}
+raft2026/09/18 02:00:00 INFO: 91bc3c398fb3c146 became leader at term 43
+===RAFT
+snap=/var/lib/rancher/rke2/server/db/etcd/member/snap/000000000000002a-0000000000a7d8c0.snap
+wal=1789789863 /var/lib/rancher/rke2/server/db/etcd/member/wal/0000000000000007-0000000000a7d000.wal
+===END
+`
+	p := Parse("cp-1", out)
+	if p.LocalMemberID != "8e9e05c52164694d" {
+		t.Errorf("local member id: %q", p.LocalMemberID)
+	}
+	if len(p.LeaderEvents) != 4 {
+		t.Fatalf("events: %d", len(p.LeaderEvents))
+	}
+	if ev := p.LeaderEvents[0]; ev.Leader != "91bc3c398fb3c146" || ev.Term != 41 || ev.Time.IsZero() {
+		t.Errorf("event 0: %+v", ev)
+	}
+	if ev := p.LeaderEvents[1]; ev.Leader != "8e9e05c52164694d" || ev.Term != 42 {
+		t.Errorf("event 1: %+v", ev)
+	}
+	// capnslog (etcd 3.4) line without an ISO timestamp still parses
+	if ev := p.LeaderEvents[3]; ev.Leader != "91bc3c398fb3c146" || ev.Term != 43 || !ev.Time.IsZero() {
+		t.Errorf("event 3: %+v", ev)
+	}
+	if last, ok := p.LastLeader(); !ok || last.Term != 43 || last.Leader != "91bc3c398fb3c146" {
+		t.Errorf("last leader: %+v %v", last, ok)
+	}
+	if p.Raft == nil {
+		t.Fatal("no raft")
+	}
+	if p.Raft.SnapTerm != 0x2a || p.Raft.SnapIndex != 0xa7d8c0 || p.Raft.WALSeq != 7 || p.Raft.WALIndex != 0xa7d000 || p.Raft.WALLastWrite.Unix() != 1789789863 {
+		t.Errorf("raft: %+v", *p.Raft)
+	}
+}

@@ -45,6 +45,7 @@ type Finding struct {
 	Object   string
 	Message  string
 	Hint     string
+	Steps    []string // ordered remediation steps (triage findings)
 }
 
 // Input bundles all collected data.
@@ -72,6 +73,7 @@ func Evaluate(in Input) []Finding {
 	add := func(sev Severity, area, obj, msg, hint string) {
 		f = append(f, Finding{Severity: sev, Area: area, Object: obj, Message: msg, Hint: hint})
 	}
+	addF := func(x Finding) { f = append(f, x) }
 	thr := in.Cfg.Thresholds
 	s := in.Snap
 	if s == nil {
@@ -289,7 +291,7 @@ func Evaluate(in Input) []Finding {
 	}
 
 	// ---- etcd ----
-	evalEtcd(in, add)
+	evalEtcd(in, add, addF)
 
 	// ---- workloads ----
 	for i := range s.Pods {
@@ -463,7 +465,7 @@ func Evaluate(in Input) []Finding {
 	return f
 }
 
-func evalEtcd(in Input, add func(Severity, string, string, string, string)) {
+func evalEtcd(in Input, add func(Severity, string, string, string, string), addF func(Finding)) {
 	s := in.Snap
 	thr := in.Cfg.Thresholds
 	etcdNodes := 0
@@ -486,12 +488,18 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string)) {
 	leaders := map[string]bool{}
 	memberCounts := map[int]bool{}
 
+	// correlated per-member triage first; it owns the members it reports
+	triaged := triageEtcd(in, addF)
+
 	if x := in.EtcdExec; x != nil && x.Err == nil {
 		for _, h := range x.EndpointHealth {
 			if !h.Healthy {
 				who := h.Endpoint
 				if m := x.MemberByEndpoint(h.Endpoint); m != nil {
 					who = m.Name
+				}
+				if triaged[who] {
+					continue
 				}
 				add(SevCrit, "etcd", who, "endpoint unhealthy: "+firstLine(h.Error), "etcdctl endpoint health via "+x.EtcdctlVia)
 			}
@@ -536,7 +544,7 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string)) {
 			add(SevInfo, "etcd", name, "no local etcd detected (external etcd?)", "set etcd.endpoint/ca_cert/client_cert/client_key in config")
 			continue
 		}
-		if p.Health != nil && !p.Health.Healthy {
+		if p.Health != nil && !p.Health.Healthy && !triaged[name] {
 			add(SevCrit, "etcd", name, "unhealthy: "+firstLine(p.Health.Reason), "")
 		}
 		if m := p.Metrics; m != nil {
@@ -706,10 +714,25 @@ func MergePVCUsage(s *k8s.Snapshot, nodes map[string]*nodeinfo.Info) map[string]
 		return out
 	}
 	claimByPV := map[string]string{}
+	claimByPath := map[string]string{}
 	for i := range s.PVs {
 		pv := &s.PVs[i]
 		if pv.Spec.ClaimRef != nil {
-			claimByPV[pv.Name] = pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
+			claim := pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
+			claimByPV[pv.Name] = claim
+			if hp := pv.Spec.HostPath; hp != nil {
+				claimByPath[hp.Path] = claim
+			}
+			if lp := pv.Spec.Local; lp != nil {
+				claimByPath[lp.Path] = claim
+			}
+		}
+	}
+	requested := map[string]int64{}
+	for i := range s.PVCs {
+		pvc := &s.PVCs[i]
+		if q, ok := pvc.Spec.Resources.Requests["storage"]; ok {
+			requested[pvc.Namespace+"/"+pvc.Name] = q.Value()
 		}
 	}
 	for i := range s.PVCs {
@@ -730,6 +753,22 @@ func MergePVCUsage(s *k8s.Snapshot, nodes map[string]*nodeinfo.Info) map[string]
 				continue
 			}
 			out[key] = k8s.VolumeUsage{Capacity: m.SizeKB * 1024, Used: m.UsedKB * 1024, Available: m.AvailKB * 1024, Node: node, Pod: "(ssh df)"}
+		}
+		// hostPath/local PVs: du of the directory; capacity = the claim's request
+		// (not enforced by the provisioner, so it is a soft limit)
+		for path, kb := range ni.PVDirs {
+			key, ok := claimByPath[path]
+			if !ok {
+				continue
+			}
+			if _, have := out[key]; have {
+				continue
+			}
+			u := k8s.VolumeUsage{Used: kb * 1024, Capacity: requested[key], Node: node, Pod: "(ssh du, request not enforced)"}
+			if u.Capacity > u.Used {
+				u.Available = u.Capacity - u.Used
+			}
+			out[key] = u
 		}
 	}
 	return out

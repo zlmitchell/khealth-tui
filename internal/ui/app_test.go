@@ -75,6 +75,25 @@ func testApp() *App {
 	return a
 }
 
+// quits reports whether cmd (possibly a batch, e.g. with the ClearScreen a
+// layout change adds) contains tea.Quit.
+func quits(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	switch m := cmd().(type) {
+	case tea.QuitMsg:
+		return true
+	case tea.BatchMsg:
+		for _, c := range m {
+			if quits(c) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func TestRenderAllTabsAndDetails(t *testing.T) {
 	a := testApp()
 	if len(a.findings) == 0 {
@@ -121,8 +140,8 @@ func TestRenderAllTabsAndDetails(t *testing.T) {
 		t.Errorf("inspector body not rendered")
 	}
 	_, cmd := a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-	if cmd != nil || a.inInspect() || a.subName() != "Controllers" {
-		t.Errorf("q in the inspector should step back, not quit: sub=%q cmd=%v", a.subName(), cmd != nil)
+	if quits(cmd) || a.inInspect() || a.subName() != "Controllers" {
+		t.Errorf("q in the inspector should step back, not quit: sub=%q quit=%v", a.subName(), quits(cmd))
 	}
 	a.setSub(1)
 	if a.subName() != "Pods" || !a.wlPods {
@@ -349,5 +368,49 @@ func TestLogsDrillDown(t *testing.T) {
 	a.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
 	if a.logsNode != "" {
 		t.Errorf("esc should return to the node list")
+	}
+}
+
+func TestAddonsRowSelection(t *testing.T) {
+	a := testApp()
+	a.tab = tabAddons
+	c := a.currentContent()
+	if !c.selectable {
+		t.Fatalf("addons tab should be row-selectable")
+	}
+	// the cursor never rests on a heading or blank line
+	a.clamp(c)
+	for i := 0; i < len(c.rows)+2; i++ {
+		if id := a.selectedID(); id == "" {
+			t.Fatalf("cursor %d landed on a row without an id", a.cursor[tabAddons])
+		}
+		a.move(1)
+	}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if a.selectedID() == "" {
+		t.Fatalf("g should land on the first real row")
+	}
+	// enter on the registries row of cp-1 dumps that node's registries.yaml
+	for a.selectedID() != "registries:cp-1" {
+		before := a.cursor[tabAddons]
+		a.move(1)
+		if a.cursor[tabAddons] == before {
+			t.Fatalf("no registries row for cp-1; ids seen up to %q", a.selectedID())
+		}
+	}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	got := ansi.Strip(strings.Join(a.detailLines, "\n"))
+	if a.overlay != ovDetail || a.detailTitle != "Registries on cp-1" || !strings.Contains(got, "/etc/rancher/rke2/registries.yaml") {
+		t.Errorf("enter should open the node's registries dump; overlay=%v title=%q\n%s", a.overlay, a.detailTitle, got)
+	}
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
+	// HelmChart rows open the chart's values
+	title, lines := a.addonsDetail("helmchart:kube-system/rke2-canal")
+	if title != "HelmChart kube-system/rke2-canal" || !strings.Contains(ansi.Strip(strings.Join(lines, "\n")), "vethuMTU") {
+		t.Errorf("helmchart detail: %q %v", title, lines)
+	}
+	// no selection still gives the full dump
+	if title, lines := a.addonsDetail(""); title == "" || len(lines) == 0 {
+		t.Errorf("empty id should fall back to the full dump")
 	}
 }

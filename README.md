@@ -30,7 +30,7 @@ It uses two sources:
 | 7 | Addons | CNI (daemonsets + `/etc/cni/net.d` + rke2 `cni:`), CSI, CoreDNS/ingress/metrics-server/…, **Rancher management** (server URL, cluster-agent, fleet-agent, provisioned vs imported, `rancher-system-agent` per node, join topology via `server:`), **registries.yaml** vs containerd `certs.d`, registries actually used by pods, rke2 bundled HelmCharts + HelmChartConfig overrides |
 | 8 | Helm | releases decoded from `sh.helm.release.v1` secrets (chart, version, status, revision, history); Enter: **values applied** + history; optional update check against repo `index.yaml` / Artifact Hub; `u` upgrades to the newest known version, `b` rolls back to a chosen revision (runs the `helm` CLI after a confirmation, `--read-only` disables) |
 | 9 | Images | per node: image count/size, running containers, **unused images**, airgap tarballs (`/var/lib/rancher/rke2/agent/images/*.tar[.zst\|.gz]`, `.txt`) and which tarball images are running / which running images are not in any tarball |
-| 0 | Security | sub-tabs `Rules` / `Node hardening`; reference releases shown in the header; **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap) |
+| 0 | Security | sub-tabs `Rules` / `Node hardening`; reference releases shown in the header; **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap); `Node hardening` adds the DISA RHEL 8/9/10 and Ubuntu 20.04/22.04/24.04 STIG rules matched per node |
 | = | RKE2 | **control-plane isolation** (taints, user pods on servers, requests vs allocatable, whether apiserver/etcd static pods carry `control-plane-resource-requests`);  `config.yaml`(.d) per node, data-dir, `server/manifests` (user vs bundled, HelmChartConfig contents), static pod manifests, audit/PSS policies, config drift between nodes |
 | - | Logs | journal of rke2-server/agent, kubelet, containerd, rancher-system-agent **classified** into normal-startup noise / warnings / errors with explanations (token mismatch, CA mismatch, cluster-id mismatch, NOSPACE, PLEG, pull failures, protect-kernel-defaults, …); persistent startup noise is escalated |
 
@@ -102,6 +102,29 @@ rke2 S3 config), configmaps, `etcdsnapshotfiles.k3s.cattle.io`,
 `/readyz` `/livez` (`nonResourceURLs`), `metrics.k8s.io`. Missing permissions
 degrade gracefully and show up as findings.
 
+## etcd triage
+
+When a member is unhealthy the etcd tab and the Overview findings carry a
+**Triage** block: one entry per problem member, classified by correlating the
+member list / endpoint health with the node's Ready condition, SSH
+reachability, `rke2-server`/`k3s`/`kubelet` service state, the etcd static
+pod's container status and the classified journal (cluster-id mismatch,
+NOSPACE, disk full, missing etcd user, expired certs, port in use, clock
+skew). Each entry states the quorum situation (healthy/needed, leader, term)
+and numbered steps for that case. Nothing is executed; mutating commands
+(`member remove`, `defrag`, `alarm disarm`, `--cluster-reset`) are printed.
+
+When quorum is lost (power outage, all members down) the probe also reads
+what is on disk on each node: the etcd container log
+(`/var/log/pods/kube-system_etcd-*/etcd/*.log`, journal for k3s/systemd
+etcd) for `elected leader ... at term N` lines and the node's own
+`local-member-id`, plus `member/snap/<term>-<index>.snap` and the newest WAL
+file. Nodes are ranked by the highest term at which they were leader, then
+snapshot term/index and WAL activity, and the cluster finding names the node
+to run `--cluster-reset` on. If the apiserver itself is unreachable the SSH
+collection keeps going against the last node list it saw (or `ssh.hosts`)
+and runs the etcd probe on every host.
+
 ## How etcd is discovered
 
 | Layout | Detection | Certs | etcdctl | Snapshots |
@@ -121,11 +144,28 @@ cert paths in `etcd:` when your layout differs.
 ## Security / STIG notes
 
 The Security tab automates the checks that can be verified from configuration
-and API state. Rule IDs reference the DISA Kubernetes STIG (`V-2424xx`) and CIS
-benchmarks (`CIS-x.y.z`) plus RKE2-specific requirements (`RKE2-*`); verify
-the ID mapping against the STIG release you are audited against and treat
-`MANUAL` results as items to review. Secrets, tokens and passwords are masked
-before any file content leaves the node.
+and API state. Rule IDs come from the XCCDF of these releases, downloaded from
+`https://dl.dod.cyber.mil/wp-content/uploads/stigs/zip/` (DISA) and the CIS
+benchmark numbering:
+
+| Reference | Release | IDs |
+|---|---|---|
+| DISA Kubernetes STIG | V2R6 (01 Apr 2026) | `V-2423xx`..`V-2424xx`, `V-2455xx`, `V-2548xx`, `V-2748xx` |
+| DISA Rancher Government RKE2 STIG | V2R7 (01 Jul 2026) | `V-2545xx`; `RKE2-*` for hardening-guide prerequisites the STIG does not number |
+| CIS Kubernetes Benchmark | v2.0.1 (Jun 2026) / rke2 self-assessment v1.12 | `CIS-x.y.z` |
+| DISA RHEL STIG | 8 V2R8, 9 V2R9, 10 V1R2 (01 Jul 2026) | per node, matched from `/etc/os-release` |
+| DISA Ubuntu LTS STIG | 20.04 V2R4, 22.04 V2R9, 24.04 V1R6 | per node, matched from `/etc/os-release` |
+
+RHEL rebuilds (Rocky, Alma, CentOS Stream, Oracle) are audited against the
+RHEL STIG of the same major; nodes on other distributions fall back to generic
+`OS-*` IDs. The `Node hardening` sub-tab shows the OS STIG matched per node,
+a pass/fail summary column, and the per-rule results (FIPS, SELinux/AppArmor,
+fapolicyd, auditd, firewall, USBGuard, chrony, and the kernel sysctls the
+STIGs require) - enter on a rule row opens its detail and fix.
+
+The mapping is best-effort: verify it against the release you are audited
+against and treat `MANUAL` results as items to review. Secrets, tokens and
+passwords are masked before any file content leaves the node.
 
 ## Layout
 
@@ -137,7 +177,7 @@ internal/sshrun        SSH runner (agent/key/password, bastion, sudo, known_host
 internal/nodeinfo      node collection script + parser (resources, perms, registries, images, logs)
 internal/etcd          etcd probe script + parser (config source, health, metrics, etcdctl, snapshots)
 internal/logs          log pattern knowledge base + classifier
-internal/stig          STIG/CIS rule engine
+internal/stig          STIG/CIS rule engine (one file per reference: kubernetes, rke2, cis, os + rhel/ubuntu tables)
 internal/helmcheck     chart update lookup (repo index.yaml / Artifact Hub)
 internal/checks        findings engine (thresholds -> CRIT/WARN/INFO)
 internal/ui            Bubble Tea app, tabs, detail views

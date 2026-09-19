@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"k8s-health-tui/internal/checks"
 	etcdpkg "k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/helmcheck"
 	"k8s-health-tui/internal/k8s"
@@ -77,6 +78,22 @@ func (a *App) etcdContent() content {
 			healthByEP[h.Endpoint] = h
 		}
 	}
+	// correlated triage: one block per problem member with the steps to fix it
+	var triage []checks.Finding
+	for _, f := range a.findings {
+		if f.Area == "etcd" && len(f.Steps) > 0 {
+			triage = append(triage, f)
+		}
+	}
+	if len(triage) > 0 {
+		add("", styleTitle.Render("Triage")+styleDim.Render("  what is wrong, in order of severity, and what to do about it"))
+		for _, f := range triage {
+			add(sevText(f.Severity) + " " + styleBold.Render(f.Object) + "  " + f.Message)
+			add(stepLines(f.Steps, a.width-4)...)
+			add("")
+		}
+	}
+
 	add("", styleTitle.Render("Members"))
 	if memberProbe == "" {
 		add(styleDim.Render("  no member list. Per node:"))
@@ -214,6 +231,9 @@ func (a *App) etcdContent() content {
 			add("  " + src)
 		}
 		add("  " + kv("certs", fmt.Sprintf("ca=%s cert=%s", p.CA, p.Cert)))
+		if raft := raftLine(p); raft != "" {
+			add("  " + raft)
+		}
 		if len(p.RKE2Config) > 0 {
 			var kvs []string
 			for _, k := range sortedKeys(p.RKE2Config) {
@@ -330,57 +350,142 @@ func (a *App) etcdContent() content {
 	return linesContent(out)
 }
 
-// etcdTiles renders the summary tiles at the top of the etcd tab.
-func (a *App) etcdTiles() []string {
-	thr := a.cfg.Thresholds
-	var leaderName, memberInfo string
-	var dbPct, dbSize, frag, fsync float64 = nan(), nan(), nan(), nan()
-	var dbNode string
-	healthy, probed := 0, 0
+// etcdSummary is the cluster-wide etcd picture used by the tiles on the etcd
+// and Overview tabs.
+type etcdSummary struct {
+	probed, healthy int
+	noProbeReason   string // why probed == 0
+	dbPct, dbSize   float64
+	frag, fsync     float64
+	dbNode          string
+	memberInfo      string
+	leader          string
+	source          string // where members/health came from: "ssh" or "exec" (kubectl exec)
+}
+
+// etcdSummarise merges the SSH probes with the kubectl-exec probe: SSH probes
+// give per-node /health + /metrics (quota, fsync), the exec probe gives the
+// member list, endpoint health and db sizes for the whole cluster. Either
+// alone is enough to fill the tiles.
+func (a *App) etcdSummarise() etcdSummary {
+	sum := etcdSummary{dbPct: nan(), dbSize: nan(), frag: nan(), fsync: nan()}
+	errs := 0
 	for _, n := range sortedKeys(a.etcd) {
 		p := a.etcd[n]
 		if p.Err != nil {
+			errs++
 			continue
 		}
 		if p.Health != nil {
-			probed++
+			sum.probed++
 			if p.Health.Healthy {
-				healthy++
+				sum.healthy++
 			}
 		}
 		if m := p.Metrics; m != nil {
-			if m.Quota > 0 && (math.IsNaN(dbPct) || m.DBSize/m.Quota*100 > dbPct) {
-				dbPct, dbSize, dbNode = m.DBSize/m.Quota*100, m.DBSize, n
+			if m.Quota > 0 && (math.IsNaN(sum.dbPct) || m.DBSize/m.Quota*100 > sum.dbPct) {
+				sum.dbPct, sum.dbSize, sum.dbNode = m.DBSize/m.Quota*100, m.DBSize, n
 				if m.DBSize > 0 {
-					frag = (m.DBSize - m.DBSizeInUse) / m.DBSize * 100
+					sum.frag = (m.DBSize - m.DBSizeInUse) / m.DBSize * 100
 				}
 			}
-			if math.IsNaN(fsync) || m.WalFsyncAvgMs > fsync {
-				fsync = m.WalFsyncAvgMs
+			if math.IsNaN(sum.fsync) || m.WalFsyncAvgMs > sum.fsync {
+				sum.fsync = m.WalFsyncAvgMs
 			}
 		}
-		if memberInfo == "" && len(p.Members) > 0 {
-			learners := 0
-			for _, m := range p.Members {
-				if m.IsLearner {
-					learners++
+		if sum.memberInfo == "" && len(p.Members) > 0 {
+			sum.memberInfo, sum.leader = memberSummary(p)
+			sum.source = "ssh"
+		}
+	}
+	// kubectl-exec probe fills whatever SSH could not
+	if x := a.etcdExec; x != nil && x.Err == nil {
+		if sum.memberInfo == "" && len(x.Members) > 0 {
+			sum.memberInfo, sum.leader = memberSummary(x)
+			sum.source = "exec"
+		}
+		if sum.probed == 0 && len(x.EndpointHealth) > 0 {
+			for _, h := range x.EndpointHealth {
+				sum.probed++
+				if h.Healthy {
+					sum.healthy++
 				}
 			}
-			memberInfo = fmt.Sprintf("%d members", len(p.Members))
-			if learners > 0 {
-				memberInfo += fmt.Sprintf(", %d learner", learners)
-			}
-			for _, st := range p.Statuses {
-				if st.Leader == st.MemberID {
-					for _, m := range p.Members {
-						if m.ID == st.MemberID {
-							leaderName = m.Name
-						}
-					}
+			sum.source = "exec"
+		}
+		if math.IsNaN(sum.dbSize) {
+			// endpoint status has the sizes but not the quota: absolute size only
+			for _, st := range x.Statuses {
+				if st.DBSize <= 0 || (!math.IsNaN(sum.dbSize) && float64(st.DBSize) <= sum.dbSize) {
+					continue
+				}
+				sum.dbSize = float64(st.DBSize)
+				sum.dbNode = st.Endpoint
+				if m := x.MemberByEndpoint(st.Endpoint); m != nil {
+					sum.dbNode = m.Name
+				}
+				if st.DBSizeInUse > 0 {
+					sum.frag = float64(st.DBSize-st.DBSizeInUse) / float64(st.DBSize) * 100
 				}
 			}
 		}
 	}
+	if sum.probed == 0 {
+		switch {
+		case !a.sshEnabled && a.etcdExec == nil:
+			sum.noProbeReason = "ssh off, exec probe not run"
+		case !a.sshEnabled:
+			sum.noProbeReason = "ssh off"
+		case len(a.etcdPend) > 0:
+			sum.noProbeReason = fmt.Sprintf("probing %d", len(a.etcdPend))
+		case errs > 0:
+			sum.noProbeReason = fmt.Sprintf("%d probe error", errs)
+			if errs > 1 {
+				sum.noProbeReason += "s"
+			}
+		case len(a.etcd) == 0:
+			sum.noProbeReason = "no etcd nodes probed"
+		default:
+			sum.noProbeReason = "no /health reply"
+		}
+		if x := a.etcdExec; x != nil && x.Err != nil {
+			sum.noProbeReason += ", exec failed"
+		}
+	}
+	return sum
+}
+
+// memberSummary renders "N members[, N learner]" and the leader's name.
+func memberSummary(p *etcdpkg.Probe) (info, leader string) {
+	learners := 0
+	for _, m := range p.Members {
+		if m.IsLearner {
+			learners++
+		}
+	}
+	info = fmt.Sprintf("%d members", len(p.Members))
+	if learners > 0 {
+		info += fmt.Sprintf(", %d learner", learners)
+	}
+	for _, st := range p.Statuses {
+		if st.Leader == "" || st.Leader != st.MemberID {
+			continue
+		}
+		for _, m := range p.Members {
+			if m.ID == st.MemberID {
+				leader = m.Name
+			}
+		}
+	}
+	return info, leader
+}
+
+// etcdTiles renders the summary tiles at the top of the etcd tab.
+func (a *App) etcdTiles() []string {
+	thr := a.cfg.Thresholds
+	sum := a.etcdSummarise()
+	dbPct, dbSize, frag, fsync, dbNode := sum.dbPct, sum.dbSize, sum.frag, sum.fsync, sum.dbNode
+	memberInfo, leaderName, healthy, probed := sum.memberInfo, sum.leader, sum.healthy, sum.probed
 	var latest time.Time
 	for _, r := range a.snap.RKE2Snapshots {
 		if r.Status != "failed" && r.Created.After(latest) {
@@ -405,9 +510,24 @@ func (a *App) etcdTiles() []string {
 	if leaderName == "" {
 		leaderName = "-"
 	}
+	leaderLine := kv("leader", leaderName)
+	if sum.source != "" {
+		leaderLine += styleDim.Render(" via " + sum.source)
+	}
+	healthTxt := okText(healthy == probed && probed > 0, fmt.Sprintf("%d/%d", healthy, probed), fmt.Sprintf("%d/%d", healthy, probed))
+	if probed == 0 {
+		healthTxt = styleWarn.Render(sum.noProbeReason)
+	}
+	dbLabel := styleDim.Render("no db size: needs ssh/exec")
+	switch {
+	case !math.IsNaN(dbPct):
+		dbLabel = styleDim.Render(humanBytes(dbSize) + " on " + dbNode)
+	case !math.IsNaN(dbSize):
+		dbLabel = styleDim.Render(humanBytes(dbSize) + " on " + dbNode + " (no quota)")
+	}
 	tiles := []string{
-		tile(tw, "Cluster", memberInfo, kv("leader", leaderName), kv("healthy", okText(healthy == probed && probed > 0, fmt.Sprintf("%d/%d", healthy, probed), fmt.Sprintf("%d/%d", healthy, probed)))),
-		tile(tw, "DB size / quota", gauge(dbPct, gw, thr.EtcdDBWarnPct, 95), sparkStyled(a.values("etcd.db:"+dbNode), sw, 100, thr.EtcdDBWarnPct, 95), styleDim.Render(humanBytes(dbSize)+" on "+dbNode)),
+		tile(tw, "Cluster", memberInfo, leaderLine, kv("healthy", healthTxt)),
+		tile(tw, "DB size / quota", gauge(dbPct, gw, thr.EtcdDBWarnPct, 95), sparkStyled(a.values("etcd.db:"+dbNode), sw, 100, thr.EtcdDBWarnPct, 95), dbLabel),
 		tile(tw, "Fragmentation", gauge(frag, gw, thr.EtcdFragWarnPct, 80), sparkStyled(a.values("etcd.frag:"+dbNode), sw, 100, thr.EtcdFragWarnPct, 80), styleDim.Render("defrag reclaims")),
 		tile(tw, "WAL fsync (worst)", pctStyle(fsync, int(thr.EtcdFsyncWarnMs), int(thr.EtcdFsyncWarnMs*3)).Render(fmtMs(fsync)), sparkStyled(a.values("etcd.fsync:"+dbNode), sw, 0, int(thr.EtcdFsyncWarnMs), int(thr.EtcdFsyncWarnMs*3)), styleDim.Render(fmt.Sprintf("warn > %.0fms", thr.EtcdFsyncWarnMs))),
 		tile(tw, "Latest backup", backup, styleDim.Render(fmt.Sprintf("%d cluster records", len(a.snap.RKE2Snapshots))), styleDim.Render("max age "+humanDur(a.cfg.Etcd.MaxBackupAge))),
@@ -497,8 +617,19 @@ func (a *App) etcdDetail() (string, []string) {
 
 func (a *App) addonsContent() content {
 	s := a.snap
-	var out []string
-	add := func(l ...string) { out = append(out, l...) }
+	// headings and free text get no id (the cursor skips them); table rows
+	// carry an id that addonsDetail dispatches on
+	var out, ids []string
+	add := func(l ...string) {
+		for _, x := range l {
+			out = append(out, x)
+			ids = append(ids, "")
+		}
+	}
+	addRow := func(id, l string) {
+		out = append(out, l)
+		ids = append(ids, id)
+	}
 
 	// CNI
 	cni := detectCNI(s)
@@ -630,6 +761,7 @@ func (a *App) addonsContent() content {
 		}
 	}
 	var rows [][]string
+	var rowIDs []string
 	for _, n := range sortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
@@ -642,16 +774,19 @@ func (a *App) addonsContent() content {
 			agent = okText(strings.Contains(agent, "active running"), agent, agent)
 		}
 		rows = append(rows, []string{n, ni.Settings["server"], agent, ni.Rancher.AgentURL, fmt.Sprint(ni.Rancher.Provisioned), fmt.Sprint(ni.Rancher.Plans)})
+		rowIDs = append(rowIDs, "node:"+n)
 	}
 	if len(rows) > 0 {
-		add("", styleTitle.Render("Node join topology / agents")+styleDim.Render("  (server = rke2 supervisor the node joined through)"))
+		add("", styleTitle.Render("Node join topology / agents")+styleDim.Render("  (server = rke2 supervisor the node joined through; enter = the node's config.yaml)"))
 		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "SERVER (config.yaml)", max: 40}, {title: "RANCHER-SYSTEM-AGENT"}, {title: "AGENT URL", max: 40}, {title: "50-RANCHER"}, {title: "PLANS"}}, rows)
 		add(h)
-		add(lines...)
+		for i, l := range lines {
+			addRow(rowIDs[i], l)
+		}
 	}
 
 	// registries
-	add("", styleTitle.Render("Registries")+styleDim.Render("  (registries.yaml vs what containerd applied; enter for full dumps)"))
+	add("", styleTitle.Render("Registries")+styleDim.Render("  (registries.yaml vs what containerd applied; enter on a node = its registries.yaml + containerd dump)"))
 	regUse := map[string]int{}
 	for i := range s.Pods {
 		for _, c := range s.Pods[i].Spec.Containers {
@@ -663,7 +798,7 @@ func (a *App) addonsContent() content {
 		regs = append(regs, fmt.Sprintf("%s (%d)", r, regUse[r]))
 	}
 	add(wrap("  registries used by running pods: "+strings.Join(regs, ", "), a.width-2)...)
-	rows = nil
+	rows, rowIDs = nil, nil
 	for _, n := range sortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
@@ -684,17 +819,20 @@ func (a *App) addonsContent() content {
 		}
 		sdr := ni.Settings["system-default-registry"]
 		rows = append(rows, []string{n, strings.Join(files, ","), mirrors, applied, sdr, state})
+		rowIDs = append(rowIDs, "registries:"+n)
 	}
 	if len(rows) > 0 {
 		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "FILE"}, {title: "MIRRORS", max: 40}, {title: "CONTAINERD HOSTS", max: 40}, {title: "SYSTEM-DEFAULT-REGISTRY"}, {title: "STATE"}}, rows)
 		add(h)
-		add(lines...)
+		for i, l := range lines {
+			addRow(rowIDs[i], l)
+		}
 	}
 
 	// rke2 HelmCharts
 	if len(s.HelmCharts) > 0 {
-		add("", styleTitle.Render("rke2/k3s bundled HelmCharts")+styleDim.Render("  (helm.cattle.io; upgraded with the rke2 release; HelmChartConfig = your overrides)"))
-		rows = nil
+		add("", styleTitle.Render("rke2/k3s bundled HelmCharts")+styleDim.Render("  (helm.cattle.io; upgraded with the rke2 release; HelmChartConfig = your overrides; enter = values)"))
+		rows, rowIDs = nil, nil
 		for _, hc := range s.HelmCharts {
 			st := okText(!hc.Failed, "ok", "FAILED")
 			cfg := ""
@@ -702,15 +840,95 @@ func (a *App) addonsContent() content {
 				cfg = styleInfo.Render("overrides")
 			}
 			rows = append(rows, []string{hc.Name, hc.Chart, hc.Version, hc.TargetNS, cfg, st})
+			rowIDs = append(rowIDs, "helmchart:"+hc.Namespace+"/"+hc.Name)
 		}
 		h, lines := renderTable(a.width, []column{{title: "NAME"}, {title: "CHART", max: 50}, {title: "VERSION"}, {title: "TARGET NS"}, {title: "CONFIG"}, {title: "STATUS"}}, rows)
 		add(h)
-		add(lines...)
+		for i, l := range lines {
+			addRow(rowIDs[i], l)
+		}
 	}
-	return linesContent(out)
+	c := content{selectable: true}
+	for i, l := range out {
+		c.rows = append(c.rows, row{id: ids[i], text: l})
+	}
+	return c
 }
 
-func (a *App) addonsDetail() (string, []string) {
+// addonsDetail dispatches on the selected row: a node's registries/containerd
+// files, a node's config.yaml, or a bundled HelmChart's values. With nothing
+// selected it dumps everything.
+func (a *App) addonsDetail(id string) (string, []string) {
+	kind, name, _ := strings.Cut(id, ":")
+	w := a.width - 6
+	var out []string
+	dump := func(files []nodeinfo.ConfigFile) {
+		for _, f := range files {
+			out = append(out, styleBold.Render("--- "+f.Path))
+			for _, l := range strings.Split(f.Content, "\n") {
+				out = append(out, wrap(l, w)...)
+			}
+		}
+	}
+	switch kind {
+	case "registries":
+		ni := a.nodes[name]
+		if ni == nil || ni.Err != nil {
+			return "", nil
+		}
+		out = append(out, kv("mirrors in registries.yaml", strings.Join(ni.RegistryMirrors, ", "))+"  "+kv("containerd certs.d hosts", strings.Join(ni.ContainerdHosts, ", "))+"  "+kv("system-default-registry", ni.Settings["system-default-registry"]))
+		if len(ni.Registries) == 0 {
+			out = append(out, styleDim.Render("no /etc/rancher/{rke2,k3s}/registries.yaml"))
+		}
+		dump(ni.Registries)
+		if len(ni.ContainerdConfig) > 0 {
+			out = append(out, "", styleTitle.Render("containerd (generated by rke2 from registries.yaml)"))
+			dump(ni.ContainerdConfig)
+		}
+		return "Registries on " + name, out
+	case "node":
+		ni := a.nodes[name]
+		if ni == nil || ni.Err != nil {
+			return "", nil
+		}
+		out = append(out, kv("rancher-system-agent", ni.Rancher.SystemAgent)+"  "+kv("agent url", ni.Rancher.AgentURL)+"  "+kv("50-rancher.yaml", fmt.Sprint(ni.Rancher.Provisioned))+"  "+kv("plans", fmt.Sprint(ni.Rancher.Plans)))
+		if len(ni.ConfigFiles) == 0 {
+			out = append(out, styleDim.Render("no /etc/rancher/{rke2,k3s}/config.yaml"))
+		}
+		dump(ni.ConfigFiles)
+		return "Node configuration on " + name, out
+	case "helmchart":
+		for _, hc := range a.snap.HelmCharts {
+			if hc.Namespace+"/"+hc.Name != name {
+				continue
+			}
+			out = append(out, kv("chart", hc.Chart)+"  "+kv("version", hc.Version)+"  "+kv("repo", hc.Repo)+"  "+kv("target namespace", hc.TargetNS)+"  "+kv("status", okText(!hc.Failed, "ok", "FAILED")))
+			if hc.JobName != "" {
+				out = append(out, kv("install job", hc.JobName))
+			}
+			if hc.ValuesContent != "" {
+				out = append(out, "", styleTitle.Render("HelmChart valuesContent"))
+				for _, l := range strings.Split(hc.ValuesContent, "\n") {
+					out = append(out, wrap(l, w)...)
+				}
+			}
+			if hc.HasConfig {
+				out = append(out, "", styleTitle.Render("HelmChartConfig overrides"))
+				for _, l := range strings.Split(hc.ConfigValues, "\n") {
+					out = append(out, wrap(l, w)...)
+				}
+			} else {
+				out = append(out, "", styleDim.Render("no HelmChartConfig override"))
+			}
+			return "HelmChart " + name, out
+		}
+		return "", nil
+	}
+	return a.addonsDump()
+}
+
+// addonsDump is the everything-from-every-node fallback.
+func (a *App) addonsDump() (string, []string) {
 	var out []string
 	w := a.width - 6
 	for _, n := range sortedKeys(a.nodes) {
@@ -1089,11 +1307,12 @@ func (a *App) securityContent() content {
 
 // hardeningContent shows per-node OS security facts (runtime vs boot config).
 func (a *App) hardeningContent() content {
-	hdr := []string{styleTitle.Render("Node OS hardening") + styleDim.Render("  each cell = runtime state / boot configuration; ") + styleWarn.Render("≠") + styleDim.Render(" marks a mismatch (a reboot changes the effective state). enter = node dashboard.")}
+	hdr := []string{styleTitle.Render("Node OS hardening") + styleDim.Render("  each cell = runtime state / boot configuration; ") + styleWarn.Render("≠") + styleDim.Render(" marks a mismatch (a reboot changes the effective state). enter = node dashboard, or rule detail on the STIG rows below.")}
 	if !a.sshEnabled {
 		hdr = append(hdr, styleWarn.Render("SSH collection is off - these facts come from the nodes."))
 	}
-	cols := []string{"MAC", "FIPS", "fapolicyd", "auditd", "firewall", "Secure Boot", "Kernel lockdown", "Reboot required"}
+	hdr = append(hdr, a.osBenchmarkLine())
+	cols := []string{"MAC", "FIPS", "fapolicyd", "auditd", "firewall", "Secure Boot", "Kernel lockdown", "Reboot required", "OS STIG"}
 	var rows [][]string
 	var ids []string
 	for i := range a.snap.Nodes {
@@ -1108,6 +1327,22 @@ func (a *App) hardeningContent() content {
 		if osName == "" {
 			osName = a.snap.Nodes[i].Status.NodeInfo.OSImage
 		}
+		counts, _ := stig.OSSummary(a.stigRes, n)
+		osCell := styleDim.Render("no STIG table")
+		if len(counts) > 0 {
+			txt := stig.OSSummaryText(counts)
+			switch {
+			case counts[stig.Fail] > 0:
+				osCell = styleCrit.Render(txt)
+			case counts[stig.Manual] > 0:
+				osCell = styleWarn.Render(txt)
+			default:
+				osCell = styleOK.Render(txt)
+			}
+			if stig.OSBenchmarkFor(ni.OS) == nil {
+				osCell += styleDim.Render(" (generic)")
+			}
+		}
 		items := map[string]nodeinfo.HardeningItem{}
 		for _, it := range ni.HardeningItems() {
 			key := it.Name
@@ -1121,6 +1356,10 @@ func (a *App) hardeningContent() content {
 		}
 		row := []string{n, osName}
 		for _, c := range cols {
+			if c == "OS STIG" {
+				row = append(row, osCell)
+				continue
+			}
 			it, ok := items[c]
 			if !ok {
 				row = append(row, styleDim.Render("-"))
@@ -1141,7 +1380,57 @@ func (a *App) hardeningContent() content {
 	for i, l := range lines {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
+
+	// DISA OS STIG rules (RHEL / Ubuntu) evaluated from the same facts.
+	var srows [][]string
+	var sids []string
+	for i, r := range a.stigRes {
+		if r.Group != "os" || (a.problemOnly && (r.Status == stig.Pass || r.Status == stig.NA)) {
+			continue
+		}
+		ref := r.Ref
+		if ref == "" {
+			ref = "generic"
+		}
+		srows = append(srows, []string{stigStyle(r.Status).Render(fmt.Sprintf("%-7s", r.Status.String())), r.Cat, r.ID, ref, r.Title, r.Detail})
+		sids = append(sids, "stig:"+fmt.Sprint(i))
+	}
+	if len(srows) > 0 {
+		sh, slines := renderTable(a.width, []column{{title: "STATUS"}, {title: "CAT"}, {title: "ID"}, {title: "STIG", max: 28}, {title: "RULE", max: 52}, {title: "DETAIL"}}, srows)
+		c.rows = append(c.rows, row{id: "", text: ""}, row{id: "", text: styleTitle.Render("DISA OS STIG rules") + styleDim.Render("  per-node results; 'a' hides passing rules")}, row{id: "", text: sh})
+		for i, l := range slines {
+			c.rows = append(c.rows, row{id: sids[i], text: l})
+		}
+	}
 	return c
+}
+
+// osBenchmarkLine names the OS STIG release each reachable node is matched to.
+func (a *App) osBenchmarkLine() string {
+	seen := map[string]bool{}
+	var parts []string
+	generic := 0
+	for _, n := range sortedKeys(a.nodes) {
+		ni := a.nodes[n]
+		if ni == nil || ni.Err != nil {
+			continue
+		}
+		if b := stig.OSBenchmarkFor(ni.OS); b != nil {
+			if !seen[b.Name] {
+				seen[b.Name] = true
+				parts = append(parts, styleBold.Render(b.Name)+" "+b.Version)
+			}
+		} else {
+			generic++
+		}
+	}
+	if generic > 0 {
+		parts = append(parts, styleDim.Render(fmt.Sprintf("%d node(s) on an OS without a DISA STIG table (generic OS-* checks)", generic)))
+	}
+	if len(parts) == 0 {
+		return kv("OS STIGs", styleDim.Render("no node facts yet"))
+	}
+	return kv("OS STIGs", strings.Join(parts, "  ·  "))
 }
 
 // hardeningCell renders "runtime/boot" coloured by desirability and mismatch.
@@ -1176,7 +1465,10 @@ func benchmarkLine() string {
 
 func (a *App) securityDetail(id string) (string, []string) {
 	if a.subName() == "Node hardening" {
-		return a.nodeDetail(id)
+		if !strings.HasPrefix(id, "stig:") {
+			return a.nodeDetail(id)
+		}
+		id = strings.TrimPrefix(id, "stig:")
 	}
 	var idx int
 	if _, err := fmt.Sscan(id, &idx); err != nil || idx < 0 || idx >= len(a.stigRes) {
@@ -1184,10 +1476,13 @@ func (a *App) securityDetail(id string) (string, []string) {
 	}
 	r := a.stigRes[idx]
 	w := a.width - 6
-	ref := "custom"
-	for _, b := range stig.Benchmarks {
-		if b.Matches(r.ID) {
-			ref = b.Name + " " + b.Version
+	ref := r.Ref
+	if ref == "" {
+		ref = "custom"
+		for _, b := range stig.Benchmarks {
+			if b.Matches(r.ID) {
+				ref = b.Name + " " + b.Version
+			}
 		}
 	}
 	out := []string{stigStyle(r.Status).Render(r.Status.String()) + "  " + kv("category", r.Cat) + "  " + kv("group", r.Group) + "  " + kv("reference", ref), "", styleBold.Render(r.Title), ""}
@@ -1452,4 +1747,60 @@ func classStyle(c logs.Class) interface{ Render(...string) string } {
 		return styleInfo
 	}
 	return styleDim
+}
+
+// stepLines renders numbered remediation steps, wrapped to width; lines that
+// already carry a sub-number (ranked lists) are indented instead.
+func stepLines(steps []string, width int) []string {
+	var out []string
+	n := 0
+	for _, st := range steps {
+		if strings.HasPrefix(st, "   ") {
+			for _, l := range wrap(strings.TrimSpace(st), width-8) {
+				out = append(out, "        "+styleDim.Render(l))
+			}
+			continue
+		}
+		n++
+		prefix := fmt.Sprintf("  %2d. ", n)
+		for i, l := range wrap(st, width-len(prefix)) {
+			if i > 0 {
+				prefix = strings.Repeat(" ", len(prefix))
+			}
+			out = append(out, prefix+l)
+		}
+	}
+	return out
+}
+
+// raftLine summarises what the node's disk and etcd log say about raft state
+// (readable even when etcd is down).
+func raftLine(p *etcdpkg.Probe) string {
+	var parts []string
+	if p.LocalMemberID != "" {
+		parts = append(parts, kv("member id", p.LocalMemberID))
+	}
+	if ev, ok := p.LastLeader(); ok {
+		who := ev.Leader
+		if who == p.LocalMemberID {
+			who = "this node"
+		}
+		when := ""
+		if !ev.Time.IsZero() {
+			when = " at " + ev.Time.UTC().Format("2006-01-02 15:04 UTC")
+		}
+		parts = append(parts, kv("last election in log", fmt.Sprintf("term %d -> %s%s", ev.Term, who, when)))
+	}
+	if r := p.Raft; r != nil {
+		if r.SnapTerm > 0 || r.SnapIndex > 0 {
+			parts = append(parts, kv("raft snapshot", fmt.Sprintf("term %d index %d", r.SnapTerm, r.SnapIndex)))
+		}
+		if !r.WALLastWrite.IsZero() {
+			parts = append(parts, kv("last WAL write", age(r.WALLastWrite)+" ago"))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "  ")
 }

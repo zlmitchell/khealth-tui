@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"k8s-health-tui/internal/config"
+	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/ui"
 )
@@ -28,6 +30,26 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+		k8s.SetEtcdDiag(func(ctx context.Context, c *k8s.Client, node, pod string, w io.Writer) {
+			p := etcd.ExecProbe(ctx, c, node, pod, "rke2")
+			if p.Err != nil {
+				fmt.Fprintf(w, "  probe: ERROR %v\n", p.Err)
+				return
+			}
+			fmt.Fprintf(w, "  probe: %d members, %d endpoint health entries, %d statuses, %d alarms (%s)\n", len(p.Members), len(p.EndpointHealth), len(p.Statuses), len(p.Alarms), p.Duration.Round(time.Millisecond))
+			for _, m := range p.Members {
+				fmt.Fprintf(w, "    member %s %s %v\n", m.ID, m.Name, m.ClientURLs)
+			}
+			for _, h := range p.EndpointHealth {
+				fmt.Fprintf(w, "    health %s healthy=%v took=%s %s\n", h.Endpoint, h.Healthy, h.Took, h.Error)
+			}
+			for _, st := range p.Statuses {
+				fmt.Fprintf(w, "    status %s v%s db=%d leader=%s raftTerm=%d\n", st.Endpoint, st.Version, st.DBSize, st.Leader, st.RaftTerm)
+			}
+			if p.EtcdctlDiag != "" {
+				fmt.Fprintf(w, "    diag: %s\n", p.EtcdctlDiag)
+			}
+		})
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		client.Diag(ctx, os.Stdout)

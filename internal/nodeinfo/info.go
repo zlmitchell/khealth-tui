@@ -26,7 +26,8 @@ type Info struct {
 	SwapTotal, SwapFree    uint64
 	MemPct                 float64
 	Mounts                 []Mount
-	PVMounts               []PVMount // PV filesystems mounted for pods (df on kubelet volume dirs)
+	PVMounts               []PVMount        // PV filesystems mounted for pods (df on kubelet volume dirs)
+	PVDirs                 map[string]int64 // hostPath/local PV directory -> used KB (du, heavy mode)
 	Services               []Service
 	Units                  []Unit
 	NTPSynced              *bool
@@ -375,6 +376,14 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 		info.Images = parseImages(secs["IMAGES"])
 		info.Containers = parseContainers(secs["CONTAINERS"])
 		info.Tarballs = parseTarballs(secs["TARBALLS"])
+		info.PVDirs = map[string]int64{}
+		for _, l := range nonEmpty(secs["PVDU"]) {
+			if kb, path, ok := strings.Cut(l, "|"); ok {
+				if n, err := strconv.ParseInt(strings.TrimSpace(kb), 10, 64); err == nil {
+					info.PVDirs[path] = n
+				}
+			}
+		}
 		info.Journal = nonEmpty(secs["JOURNAL"])
 		info.LogFiles = parseDumps(secs["LOGFILES"])
 	}
@@ -1047,6 +1056,7 @@ func (i *Info) MergeHeavy(prev *Info) {
 		return
 	}
 	i.Images = prev.Images
+	i.PVDirs = prev.PVDirs
 	i.Containers = prev.Containers
 	i.Tarballs = prev.Tarballs
 	i.Journal = prev.Journal

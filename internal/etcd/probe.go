@@ -49,9 +49,30 @@ type Probe struct {
 	DataDirUsedKB int64
 	DataDirFS     *FS
 
+	// on-disk raft evidence, readable even when etcd is down (power outage)
+	LocalMemberID string        // this node's member id from its own etcd log
+	LeaderEvents  []LeaderEvent // leader elections seen in the local etcd log, oldest first
+	Raft          *RaftOnDisk
+
 	SnapshotDirs []SnapshotDir
 	BackupHints  []string
 	Raw          string
+}
+
+// LeaderEvent is one "X became/elected leader at term N" line from the etcd log.
+type LeaderEvent struct {
+	Time   time.Time
+	Term   uint64
+	Leader string // member id, hex
+	Line   string
+}
+
+// RaftOnDisk is what the data dir says about the member's raft state:
+// snapshot file names are <term>-<index>.snap, WAL names <seq>-<first index>.wal.
+type RaftOnDisk struct {
+	SnapTerm, SnapIndex uint64
+	WALSeq, WALIndex    uint64
+	WALLastWrite        time.Time
 }
 
 // ConfigFile is a masked config excerpt.
@@ -292,6 +313,25 @@ if [ -n "$GW" ] && command -v curl >/dev/null 2>&1; then
   echo; echo "---GWALARMS"; $CURL -X POST "$EP/v3/maintenance/alarm" -H 'Content-Type: application/json' -d '{"action":"GET"}' 2>&1
   echo
 fi
+sec LEADERLOG
+LOGRE='became leader at term|elected leader|changed leader from'
+ETCDLOGS=$(ls -tr /var/log/pods/kube-system_etcd-*/etcd/* 2>/dev/null)
+if [ -n "$ETCDLOGS" ]; then
+  echo "source=/var/log/pods/kube-system_etcd-*/etcd"
+  cat $ETCDLOGS 2>/dev/null | grep -oE '"local-member-id":"[0-9a-f]+"' | tail -1 | cut -d'"' -f4 | sed 's/^/local-member-id=/'
+  cat $ETCDLOGS 2>/dev/null | grep -E "$LOGRE" | tail -30
+elif [ "$DIST" = k3s ]; then
+  echo "source=journalctl -u k3s"
+  journalctl -u k3s -q --no-pager -n 50000 -o short-iso 2>/dev/null | grep -oE '"local-member-id":"[0-9a-f]+"|local-member-id=[0-9a-f]+' | tail -1 | grep -oE '[0-9a-f]{16}' | sed 's/^/local-member-id=/'
+  journalctl -u k3s -q --no-pager -n 50000 -o short-iso 2>/dev/null | grep -E "$LOGRE" | tail -30
+elif [ "$(systemctl show -p LoadState --value etcd 2>/dev/null)" = loaded ]; then
+  echo "source=journalctl -u etcd"
+  journalctl -u etcd -q --no-pager -n 50000 -o short-iso 2>/dev/null | grep -oE '"local-member-id":"[0-9a-f]+"' | tail -1 | cut -d'"' -f4 | sed 's/^/local-member-id=/'
+  journalctl -u etcd -q --no-pager -n 50000 -o short-iso 2>/dev/null | grep -E "$LOGRE" | tail -30
+fi
+sec RAFT
+[ -d "$DATADIR/member/snap" ] && ls "$DATADIR/member/snap"/*.snap 2>/dev/null | sort | tail -1 | sed 's|^|snap=|'
+[ -d "$DATADIR/member/wal" ] && stat -c '%Y %n' "$DATADIR/member/wal"/*.wal 2>/dev/null | sort -n | tail -1 | sed 's|^|wal=|'
 sec DATADIR
 echo "$DATADIR"
 [ -d "$DATADIR" ] && du -sk "$DATADIR" 2>/dev/null | cut -f1
@@ -352,6 +392,8 @@ func Parse(node, out string) *Probe {
 		p.Metrics = parseMetrics(m)
 	}
 	parseEtcdctl(p, secs["ETCDCTL"])
+	parseLeaderLog(p, secs["LEADERLOG"])
+	p.Raft = parseRaft(secs["RAFT"])
 	dd := lines(secs["DATADIR"])
 	if len(dd) > 1 {
 		p.DataDirUsedKB, _ = strconv.ParseInt(strings.TrimSpace(dd[1]), 10, 64)
@@ -395,6 +437,89 @@ func Parse(node, out string) *Probe {
 	}
 	p.BackupHints = lines(secs["BACKUPHINTS"])
 	return p
+}
+
+var (
+	leaderRe     = regexp.MustCompile(`(?:elected leader|changed leader from [0-9a-f]+ to) ([0-9a-f]{8,16}) at term (\d+)|([0-9a-f]{8,16}) became leader at term (\d+)`)
+	logTimeRe    = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})`)
+	snapNameRe   = regexp.MustCompile(`([0-9a-f]{16})-([0-9a-f]{16})\.snap$`)
+	walNameRe    = regexp.MustCompile(`^(\d+) .*?([0-9a-f]{16})-([0-9a-f]{16})\.wal$`)
+	raftTsLayout = []string{time.RFC3339Nano, "2006-01-02T15:04:05Z0700", "2006-01-02T15:04:05.000Z0700"}
+)
+
+func parseLeaderLog(p *Probe, raw string) {
+	for _, l := range lines(raw) {
+		if strings.HasPrefix(l, "source=") {
+			continue
+		}
+		if strings.HasPrefix(l, "local-member-id=") {
+			p.LocalMemberID = strings.TrimPrefix(l, "local-member-id=")
+			continue
+		}
+		g := leaderRe.FindStringSubmatch(l)
+		if g == nil {
+			continue
+		}
+		ev := LeaderEvent{Line: l}
+		if g[1] != "" {
+			ev.Leader = g[1]
+			ev.Term, _ = strconv.ParseUint(g[2], 10, 64)
+		} else {
+			ev.Leader = g[3]
+			ev.Term, _ = strconv.ParseUint(g[4], 10, 64)
+		}
+		if ts := logTimeRe.FindString(l); ts != "" {
+			for _, layout := range raftTsLayout {
+				if t, err := time.Parse(layout, ts); err == nil {
+					ev.Time = t
+					break
+				}
+			}
+		}
+		p.LeaderEvents = append(p.LeaderEvents, ev)
+	}
+}
+
+func parseRaft(raw string) *RaftOnDisk {
+	var r *RaftOnDisk
+	for _, l := range lines(raw) {
+		k, v, ok := strings.Cut(l, "=")
+		if !ok {
+			continue
+		}
+		if r == nil {
+			r = &RaftOnDisk{}
+		}
+		switch k {
+		case "snap":
+			if g := snapNameRe.FindStringSubmatch(v); g != nil {
+				r.SnapTerm, _ = strconv.ParseUint(g[1], 16, 64)
+				r.SnapIndex, _ = strconv.ParseUint(g[2], 16, 64)
+			}
+		case "wal":
+			if g := walNameRe.FindStringSubmatch(v); g != nil {
+				if mt, err := strconv.ParseInt(g[1], 10, 64); err == nil {
+					r.WALLastWrite = time.Unix(mt, 0)
+				}
+				r.WALSeq, _ = strconv.ParseUint(g[2], 16, 64)
+				r.WALIndex, _ = strconv.ParseUint(g[3], 16, 64)
+			}
+		}
+	}
+	return r
+}
+
+// LastLeader returns the most recent leader election this node's log knows
+// about: highest term wins, then latest timestamp.
+func (p *Probe) LastLeader() (LeaderEvent, bool) {
+	var best LeaderEvent
+	found := false
+	for _, ev := range p.LeaderEvents {
+		if !found || ev.Term > best.Term || (ev.Term == best.Term && ev.Time.After(best.Time)) {
+			best, found = ev, true
+		}
+	}
+	return best, found
 }
 
 // LatestSnapshot returns the most recent snapshot file across all dirs.

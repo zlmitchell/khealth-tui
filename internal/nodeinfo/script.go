@@ -15,9 +15,11 @@ type Options struct {
 	LogLines      int      // journalctl -n
 	LogSince      string   // journalctl --since
 	KnownTarballs []string // "path|size|mtime" entries whose manifests are already known
+	PVPaths       []string // hostPath/local PV directories to measure with du (heavy)
 }
 
 var safeSince = regexp.MustCompile(`^[-+0-9a-zA-Z: ]{1,40}$`)
+var safePath = regexp.MustCompile(`^/[A-Za-z0-9_./@:+-]{1,400}$`)
 
 // Script returns the POSIX sh script executed on each node.
 func Script(o Options) string {
@@ -31,6 +33,12 @@ func Script(o Options) string {
 	}
 	known := strings.Join(o.KnownTarballs, "|")
 	known = strings.ReplaceAll(known, "'", "")
+	var paths []string
+	for _, pp := range o.PVPaths {
+		if safePath.MatchString(pp) {
+			paths = append(paths, pp)
+		}
+	}
 
 	var b strings.Builder
 	b.WriteString(baseScript)
@@ -38,6 +46,7 @@ func Script(o Options) string {
 		h := strings.ReplaceAll(heavyScript, "__LINES__", fmt.Sprint(lines))
 		h = strings.ReplaceAll(h, "__SINCE__", since)
 		h = strings.ReplaceAll(h, "__KNOWN__", known)
+		h = strings.ReplaceAll(h, "__PVPATHS__", strings.Join(paths, " "))
 		b.WriteString(h)
 	}
 	b.WriteString("\necho '===END'\n")
@@ -102,7 +111,7 @@ sec KUBELETCMD
 p=$(pidof kubelet 2>/dev/null | cut -d' ' -f1)
 [ -n "$p" ] && tr '\0' '\n' < /proc/$p/cmdline
 sec SYSCTL
-for k in vm.overcommit_memory vm.panic_on_oom kernel.panic kernel.panic_on_oops kernel.keys.root_maxbytes kernel.keys.root_maxkeys net.ipv4.ip_forward net.bridge.bridge-nf-call-iptables fs.inotify.max_user_instances fs.inotify.max_user_watches; do
+for k in vm.overcommit_memory vm.panic_on_oom kernel.panic kernel.panic_on_oops kernel.keys.root_maxbytes kernel.keys.root_maxkeys net.ipv4.ip_forward net.bridge.bridge-nf-call-iptables fs.inotify.max_user_instances fs.inotify.max_user_watches kernel.randomize_va_space kernel.dmesg_restrict kernel.kptr_restrict kernel.yama.ptrace_scope kernel.core_pattern fs.protected_symlinks fs.protected_hardlinks net.ipv4.conf.all.accept_redirects net.ipv4.conf.default.accept_redirects net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.icmp_echo_ignore_broadcasts; do
   echo "$k=$(sysctl -n $k 2>/dev/null)"
 done
 sec PERMS
@@ -125,7 +134,7 @@ echo "fips=$(cat /proc/sys/crypto/fips_enabled 2>/dev/null)"
 command -v fips-mode-setup >/dev/null 2>&1 && echo "fips_setup=$(fips-mode-setup --check 2>/dev/null | head -1)"
 [ -f /sys/module/apparmor/parameters/enabled ] && echo "apparmor=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)"
 command -v aa-status >/dev/null 2>&1 && echo "apparmor_enforced=$(aa-status --enforced 2>/dev/null)"
-for s in fapolicyd auditd firewalld ufw apparmor unattended-upgrades dnf-automatic.timer usbguard sssd; do
+for s in fapolicyd auditd firewalld ufw apparmor unattended-upgrades dnf-automatic.timer usbguard sssd chronyd chrony systemd-timesyncd; do
   st=$(systemctl show -p LoadState,ActiveState,UnitFileState --value "$s" 2>/dev/null | tr '\n' ' ')
   case "$st" in loaded*) echo "svc_$s=$st";; esac
 done
@@ -245,6 +254,14 @@ for IMGDIR in /var/lib/rancher/rke2/agent/images /var/lib/rancher/k3s/agent/imag
     esac
     echo
   done
+done
+sec PVDU
+# hostPath/local PVs (e.g. local-path-provisioner): the kubelet has no metrics
+# for them, so measure the directories directly
+for d in __PVPATHS__; do
+  [ -d "$d" ] || continue
+  u=$(timeout 60 du -skx "$d" 2>/dev/null | cut -f1)
+  [ -n "$u" ] && echo "$u|$d"
 done
 sec JOURNAL
 journalctl --no-pager -o short-iso -q -n __LINES__ --since '__SINCE__' -u rke2-server -u rke2-agent -u k3s -u k3s-agent -u kubelet -u containerd -u rancher-system-agent -u etcd 2>/dev/null

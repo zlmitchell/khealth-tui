@@ -3,9 +3,7 @@ package ui
 import (
 	"fmt"
 	"math"
-	"sort"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -59,28 +57,9 @@ func (a *App) overviewContent() content {
 			info++
 		}
 	}
-	etcdDB, etcdFsync := nan(), nan()
-	etcdHealthy, etcdProbed := 0, 0
-	var etcdNode string
-	for _, n := range sortedKeys(a.etcd) {
-		p := a.etcd[n]
-		if p.Err != nil || p.Metrics == nil {
-			continue
-		}
-		etcdProbed++
-		if p.Health != nil && p.Health.Healthy {
-			etcdHealthy++
-		}
-		if p.Metrics.Quota > 0 {
-			pct := p.Metrics.DBSize / p.Metrics.Quota * 100
-			if math.IsNaN(etcdDB) || pct > etcdDB {
-				etcdDB, etcdNode = pct, n
-			}
-		}
-		if math.IsNaN(etcdFsync) || p.Metrics.WalFsyncAvgMs > etcdFsync {
-			etcdFsync = p.Metrics.WalFsyncAvgMs
-		}
-	}
+	etcdSum := a.etcdSummarise()
+	etcdDB, etcdFsync, etcdNode := etcdSum.dbPct, etcdSum.fsync, etcdSum.dbNode
+	etcdHealthy, etcdProbed := etcdSum.healthy, etcdSum.probed
 	tw, n := tileWidths(a.width, 6)
 	gw := tw - 4 - 5 // gauge bar width inside a tile (padding + "100%")
 	if gw < 6 {
@@ -115,7 +94,7 @@ func (a *App) overviewContent() content {
 			sparkStyled(a.values("cluster.disk"), sw, 100, thr.DiskWarnPct, thr.DiskCritPct),
 			styleDim.Render(worstDisk(a))),
 		tile(tw, "etcd",
-			etcdTileLine(etcdProbed, etcdHealthy, etcdFsync, thr),
+			etcdTileLine(etcdProbed, etcdHealthy, etcdFsync, etcdSum.noProbeReason, thr),
 			gauge(etcdDB, gw, thr.EtcdDBWarnPct, 95),
 			sparkStyled(a.values("etcd.db:"+etcdNode), sw, 100, thr.EtcdDBWarnPct, 95)),
 	}
@@ -226,9 +205,9 @@ func worstDisk(a *App) string {
 	return where
 }
 
-func etcdTileLine(probed, healthy int, fsync float64, thr config.Thresholds) string {
+func etcdTileLine(probed, healthy int, fsync float64, noProbe string, thr config.Thresholds) string {
 	if probed == 0 {
-		return styleDim.Render("no probes (ssh)")
+		return styleDim.Render("no probes: " + noProbe)
 	}
 	out := okText(healthy == probed, fmt.Sprintf("%d/%d ok", healthy, probed), fmt.Sprintf("%d/%d ok", healthy, probed))
 	if !math.IsNaN(fsync) {
@@ -472,9 +451,9 @@ func (a *App) storageContent() content {
 	}
 
 	usage := checks.MergePVCUsage(s, a.nodes)
-	usedNote := "used = kubelet stats/summary (nodes/proxy) or df over SSH on the mounting node"
+	usedNote := "used = kubelet stats/summary, or over SSH: df of the mount / du of hostPath dirs (local-path: request not enforced)"
 	if len(usage) == 0 {
-		usedNote = "no usage data: claims must be mounted by a running pod; needs nodes/proxy RBAC or SSH"
+		usedNote = "no usage data yet: kubelet reports only CSI/block volumes; hostPath/local-path dirs are measured with du on the full SSH cycle (R)"
 		if s.PVCUsageErr != "" {
 			usedNote += "; stats/summary error: " + firstLine(s.PVCUsageErr)
 		}
@@ -601,6 +580,10 @@ func (a *App) detailFor(t tab, id string) (string, []string) {
 			if f.Hint != "" {
 				lines = append(lines, "", styleDim.Render("hint: ")+f.Hint)
 			}
+			if len(f.Steps) > 0 {
+				lines = append(lines, "", styleTitle.Render("steps"))
+				lines = append(lines, stepLines(f.Steps, a.width-6)...)
+			}
 			return "Finding", lines
 		}
 	case tabNodes:
@@ -622,7 +605,7 @@ func (a *App) detailFor(t tab, id string) (string, []string) {
 	case tabEtcd:
 		return a.etcdDetail()
 	case tabAddons:
-		return a.addonsDetail()
+		return a.addonsDetail(id)
 	case tabHelm:
 		return a.helmDetail(id)
 	case tabImages:
@@ -635,164 +618,6 @@ func (a *App) detailFor(t tab, id string) (string, []string) {
 		return a.rke2Detail(id)
 	}
 	return "", nil
-}
-
-func (a *App) nodeDetail(name string) (string, []string) {
-	s := a.snap
-	var n *corev1.Node
-	for i := range s.Nodes {
-		if s.Nodes[i].Name == name {
-			n = &s.Nodes[i]
-		}
-	}
-	if n == nil {
-		return "", nil
-	}
-	w := a.width - 6
-	var out []string
-	add := func(l ...string) { out = append(out, l...) }
-	add(kv("roles", strings.Join(k8s.NodeRoles(n), ",")) + "  " + kv("kubelet", n.Status.NodeInfo.KubeletVersion) + "  " + kv("runtime", n.Status.NodeInfo.ContainerRuntimeVersion))
-	add(kv("os", n.Status.NodeInfo.OSImage) + "  " + kv("kernel", n.Status.NodeInfo.KernelVersion) + "  " + kv("arch", n.Status.NodeInfo.Architecture))
-	var addrs []string
-	for _, ad := range n.Status.Addresses {
-		addrs = append(addrs, fmt.Sprintf("%s=%s", ad.Type, ad.Address))
-	}
-	add(kv("addresses", strings.Join(addrs, " ")))
-	add(kv("pod CIDR", strings.Join(n.Spec.PodCIDRs, ",")) + "  " + kv("provider", n.Spec.ProviderID))
-	var conds []string
-	for _, c := range n.Status.Conditions {
-		txt := fmt.Sprintf("%s=%s", c.Type, c.Status)
-		bad := (c.Type == corev1.NodeReady && c.Status != corev1.ConditionTrue) || (c.Type != corev1.NodeReady && c.Status == corev1.ConditionTrue)
-		if bad {
-			txt = styleCrit.Render(txt) + styleDim.Render(" ("+c.Reason+")")
-		} else {
-			txt = styleOK.Render(txt)
-		}
-		conds = append(conds, txt)
-	}
-	add(kv("conditions", strings.Join(conds, " ")))
-	if len(n.Spec.Taints) > 0 {
-		var ts []string
-		for _, t := range n.Spec.Taints {
-			ts = append(ts, fmt.Sprintf("%s=%s:%s", t.Key, t.Value, t.Effect))
-		}
-		add(kv("taints", strings.Join(ts, " ")))
-	}
-	var pods []corev1.Pod
-	for i := range s.Pods {
-		if s.Pods[i].Spec.NodeName == name {
-			pods = append(pods, s.Pods[i])
-		}
-	}
-	cpuReq, memReq := k8s.SumRequests(pods)
-	cpuAlloc := k8s.QuantityMilli(n.Status.Allocatable, corev1.ResourceCPU)
-	memAlloc := k8s.QuantityValue(n.Status.Allocatable, corev1.ResourceMemory)
-	podAlloc := k8s.QuantityValue(n.Status.Allocatable, corev1.ResourcePods)
-	add(kv("allocatable", fmt.Sprintf("cpu %dm, mem %s, pods %d", cpuAlloc, humanBytes(float64(memAlloc)), podAlloc)))
-	add(kv("requests", fmt.Sprintf("cpu %dm (%s), mem %s (%s), pods %d", cpuReq, pctOf(cpuReq, cpuAlloc), humanBytes(float64(memReq)), pctOf(memReq, memAlloc), len(pods))))
-	if m, ok := s.NodeMetrics[name]; ok {
-		add(kv("metrics-server usage", fmt.Sprintf("cpu %dm (%s), mem %s (%s)", m.CPUMilli, pctOf(m.CPUMilli, cpuAlloc), humanBytes(float64(m.MemBytes)), pctOf(m.MemBytes, memAlloc))))
-	}
-	for _, img := range n.Status.Images {
-		_ = img
-	}
-	add(kv("images cached on node (API)", fmt.Sprint(len(n.Status.Images))))
-
-	ni := a.nodes[name]
-	add("", styleTitle.Render("SSH collection"))
-	switch {
-	case ni == nil && a.pending[name]:
-		add(styleDim.Render("  collecting..."))
-	case ni == nil:
-		add(styleDim.Render("  no data (SSH disabled)"))
-	case ni.Err != nil:
-		add(styleCrit.Render("  error: " + ni.Err.Error()))
-	default:
-		add(kv("host", ni.Host) + "  " + kv("hostname", ni.Hostname) + "  " + kv("kernel", ni.Kernel) + "  " + kv("collected", age(ni.Collected)+" ago in "+humanDur(ni.Duration)) + "  " + kv("dist", ni.Dist))
-		add(kv("uptime", humanDur(ni.Uptime)) + "  " + kv("load", fmt.Sprintf("%.2f %.2f %.2f on %d cpus", ni.Load1, ni.Load5, ni.Load15, ni.CPUs)))
-		add(kv("cpu   ", gauge(ni.CPUPct, 20, a.cfg.Thresholds.CPUWarnPct, 95)) + "  " + sparkStyled(a.values("node.cpu:"+name), 30, 100, a.cfg.Thresholds.CPUWarnPct, 95))
-		add(kv("memory", gauge(ni.MemPct, 20, a.cfg.Thresholds.MemWarnPct, a.cfg.Thresholds.MemCritPct)) + "  " + sparkStyled(a.values("node.mem:"+name), 30, 100, a.cfg.Thresholds.MemWarnPct, a.cfg.Thresholds.MemCritPct) + "  " + styleDim.Render(fmt.Sprintf("%s total, %s available", humanBytes(float64(ni.MemTotal)), humanBytes(float64(ni.MemAvail)))))
-		loadPct := nan()
-		if ni.CPUs > 0 {
-			loadPct = ni.Load1 / float64(ni.CPUs) * 100
-		}
-		add(kv("load/cpu", gauge(loadPct, 20, int(a.cfg.Thresholds.LoadPerCPUWarn*100), 300)) + "  " + sparkStyled(a.values("node.load:"+name), 30, 0, int(a.cfg.Thresholds.LoadPerCPUWarn*100), 300) + "  " + kv("swap", fmt.Sprintf("%s total, %s used", humanBytes(float64(ni.SwapTotal)), humanBytes(float64(ni.SwapTotal-ni.SwapFree)))))
-		ntp := "unknown"
-		if ni.NTPSynced != nil {
-			ntp = okText(*ni.NTPSynced, "synchronised", "NOT synchronised")
-		}
-		add(kv("ntp", ntp) + "  " + kv("clock offset", fmt.Sprint(ni.ClockOffset)) + "  " + kv("os", ni.OS.Pretty))
-		if len(ni.Hardening) > 0 {
-			var kvs []string
-			for _, k := range sortedKeys(ni.Hardening) {
-				kvs = append(kvs, k+"="+ni.Hardening[k])
-			}
-			add(wrap("hardening: "+strings.Join(kvs, "  "), w)...)
-		}
-		var svcs []string
-		for _, svc := range ni.Services {
-			svcs = append(svcs, okText(svc.Active == "active", svc.Name, svc.Name+":"+svc.Active))
-		}
-		add(kv("services", strings.Join(svcs, " ")))
-		for _, u := range ni.Units {
-			add(kv("unit "+u.Name, fmt.Sprintf("%s/%s restarts=%d started=%s result=%s", u.Active, u.Sub, u.NRestarts, age(u.Started)+" ago", u.Result)))
-		}
-		if len(ni.Settings) > 0 {
-			var kvs []string
-			for _, k := range sortedKeys(ni.Settings) {
-				kvs = append(kvs, k+"="+ni.Settings[k])
-			}
-			add(kv("rke2 config", strings.Join(kvs, " ")))
-		}
-		if ni.Rancher.SystemAgent != "" || ni.Rancher.Provisioned {
-			add(kv("rancher", fmt.Sprintf("system-agent=%s provisioned=%v url=%s plans=%d", strings.TrimSpace(ni.Rancher.SystemAgent), ni.Rancher.Provisioned, ni.Rancher.AgentURL, ni.Rancher.Plans)))
-		}
-		add("", styleTitle.Render("Filesystems"))
-		var rows [][]string
-		for _, m := range ni.Mounts {
-			rows = append(rows, []string{m.Mountpoint, m.Filesystem, m.Type, humanKB(m.SizeKB), humanKB(m.UsedKB), humanKB(m.AvailKB), gauge(float64(m.UsePct), 14, a.cfg.Thresholds.DiskWarnPct, a.cfg.Thresholds.DiskCritPct), gauge(float64(m.InodePct), 8, a.cfg.Thresholds.InodeWarnPct, 95)})
-		}
-		h, lines := renderTable(w, []column{{title: "MOUNT", max: 36}, {title: "DEVICE", max: 30}, {title: "TYPE"}, {title: "SIZE", right: true}, {title: "USED", right: true}, {title: "AVAIL", right: true}, {title: "USE"}, {title: "INODES"}}, rows)
-		add(h)
-		add(lines...)
-		if len(ni.Certs) > 0 {
-			add("", styleTitle.Render("Certificates"))
-			rows = nil
-			sort.Slice(ni.Certs, func(i, j int) bool { return ni.Certs[i].NotAfter.Before(ni.Certs[j].NotAfter) })
-			for _, c := range ni.Certs {
-				left := time.Until(c.NotAfter)
-				txt := fmt.Sprintf("%dd", int(left.Hours()/24))
-				switch {
-				case left <= 0:
-					txt = styleCrit.Render("EXPIRED")
-				case left < a.cfg.Thresholds.CertExpiryWarn:
-					txt = styleWarn.Render(txt)
-				default:
-					txt = styleOK.Render(txt)
-				}
-				rows = append(rows, []string{c.Path, c.NotAfter.Format("2006-01-02"), txt})
-			}
-			h, lines = renderTable(w, []column{{title: "FILE"}, {title: "EXPIRES"}, {title: "LEFT", right: true}}, rows)
-			add(h)
-			add(lines...)
-		}
-		if len(ni.Sysctl) > 0 {
-			var kvs []string
-			for _, k := range sortedKeys(ni.Sysctl) {
-				kvs = append(kvs, k+"="+ni.Sysctl[k])
-			}
-			add("", kv("sysctl", strings.Join(kvs, " ")))
-		}
-		if len(ni.KubeletFlags) > 0 {
-			var kvs []string
-			for _, k := range sortedKeys(ni.KubeletFlags) {
-				kvs = append(kvs, "--"+k+"="+ni.KubeletFlags[k])
-			}
-			add("", styleTitle.Render("kubelet process args"))
-			add(wrap(strings.Join(kvs, " "), w)...)
-		}
-	}
-	return "Node " + name, out
 }
 
 // nodeDashboard renders the tile row and the security at-a-glance table for a node.
@@ -845,37 +670,6 @@ func (a *App) nodeDashboard(n *corev1.Node, w int) []string {
 		tile(tw, "Pods", gauge(podPct, gw, 80, 90), styleDim.Render(fmt.Sprintf("%d running / %d max", podsOn, maxPods))),
 	}
 	out = append(out, tileRow(tiles[:cnt])...)
-	if ni != nil && ni.Err == nil {
-		items := ni.HardeningItems()
-		if len(items) > 0 {
-			out = append(out, styleTitle.Render("Security at a glance")+styleDim.Render("  runtime vs boot configuration"))
-			var rows [][]string
-			for _, it := range items {
-				state := styleOK.Render("ok")
-				switch {
-				case it.Mismatch:
-					state = styleWarn.Render("MISMATCH: reboot changes state")
-				case !it.OK:
-					state = styleWarn.Render("not hardened")
-				}
-				rows = append(rows, []string{it.Name, it.Runtime, it.Boot, state, it.Detail})
-			}
-			h, lines := renderTable(w, []column{{title: "ITEM"}, {title: "RUNTIME"}, {title: "BOOT CONFIG"}, {title: "ASSESSMENT"}, {title: "DETAIL"}}, rows)
-			out = append(out, h)
-			out = append(out, lines...)
-		}
-		var svcs []string
-		for _, u := range ni.Units {
-			txt := fmt.Sprintf("%s %s", u.Name, u.Active)
-			if u.NRestarts > 0 {
-				txt += fmt.Sprintf(" (restarts %d)", u.NRestarts)
-			}
-			svcs = append(svcs, okText(u.Active == "active", txt, txt))
-		}
-		if len(svcs) > 0 {
-			out = append(out, kv("k8s units", strings.Join(svcs, "  ")))
-		}
-	}
 	out = append(out, "")
 	return out
 }

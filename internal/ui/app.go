@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s-health-tui/internal/checks"
 	"k8s-health-tui/internal/config"
@@ -103,6 +104,7 @@ type App struct {
 	pending    map[string]bool
 	etcd       map[string]*etcd.Probe
 	etcdPend   map[string]bool
+	knownNodes []corev1.Node // last node list the API returned; used when the apiserver is down
 	s3         *k8s.S3SecretInfo
 	logSum     map[string]*logs.Summary
 	stigRes    []stig.Result
@@ -318,14 +320,27 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 	for _, n := range a.cfg.SSH.Nodes {
 		only[n] = true
 	}
-	for i := range snap.Nodes {
-		n := &snap.Nodes[i]
+	// hostPath/local PV directories (local-path-provisioner etc.) measured with du
+	var pvPaths []string
+	for i := range snap.PVs {
+		pv := &snap.PVs[i]
+		if pv.Spec.HostPath != nil {
+			pvPaths = append(pvPaths, pv.Spec.HostPath.Path)
+		} else if pv.Spec.Local != nil {
+			pvPaths = append(pvPaths, pv.Spec.Local.Path)
+		}
+	}
+	// apiserver down (power outage, quorum lost): keep probing the nodes we
+	// knew, or the ssh.hosts map, and run the etcd probe on all of them
+	nodes, offline := a.sshTargets(snap)
+	for i := range nodes {
+		n := &nodes[i]
 		if len(only) > 0 && !only[n.Name] {
 			continue
 		}
 		host := a.nodeAddress(n)
 		name := n.Name
-		opts := nodeinfo.Options{Heavy: heavy, LogLines: a.cfg.Logs.Lines, LogSince: a.cfg.Logs.Since}
+		opts := nodeinfo.Options{Heavy: heavy, LogLines: a.cfg.Logs.Lines, LogSince: a.cfg.Logs.Since, PVPaths: pvPaths}
 		if prev := a.nodes[name]; prev != nil {
 			opts.KnownTarballs = prev.TarballKeys()
 		}
@@ -345,7 +360,7 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 			}
 			return nodeMsg{seq: seq, info: info}
 		})
-		if k8s.IsEtcdNode(snap.Nodes, n) {
+		if offline || k8s.IsEtcdNode(nodes, n) {
 			a.etcdPend[name] = true
 			script := etcd.Script(a.cfg.Etcd)
 			cmds = append(cmds, func() tea.Msg {
@@ -363,6 +378,24 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 		}
 	}
 	return tea.Batch(cmds...)
+}
+
+// sshTargets returns the nodes to collect from. When the API returned no
+// nodes (apiserver/etcd down) it falls back to the last good list, then to
+// the ssh.hosts map, and reports offline=true so every host gets the etcd
+// probe (roles are unknown).
+func (a *App) sshTargets(snap *k8s.Snapshot) ([]corev1.Node, bool) {
+	if len(snap.Nodes) > 0 {
+		return snap.Nodes, false
+	}
+	if len(a.knownNodes) > 0 {
+		return a.knownNodes, true
+	}
+	var out []corev1.Node
+	for _, name := range sortedKeys(a.cfg.SSH.Hosts) {
+		out = append(out, corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	}
+	return out, true
 }
 
 // etcdExecCmd runs etcdctl inside an etcd static pod through the API
@@ -585,16 +618,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.refreshing = false
 		a.lastRefresh = time.Now()
 		a.cycle++
-		// drop nodes that no longer exist
-		names := map[string]bool{}
-		for i := range a.snap.Nodes {
-			names[a.snap.Nodes[i].Name] = true
-		}
-		for n := range a.nodes {
-			if !names[n] {
-				delete(a.nodes, n)
-				delete(a.etcd, n)
-				delete(a.logSum, n)
+		// drop nodes that no longer exist - only when the API actually
+		// answered; an empty list during an outage must not erase what we know
+		if len(a.snap.Nodes) > 0 {
+			a.knownNodes = a.snap.Nodes
+			names := map[string]bool{}
+			for i := range a.snap.Nodes {
+				names[a.snap.Nodes[i].Name] = true
+			}
+			for n := range a.nodes {
+				if !names[n] {
+					delete(a.nodes, n)
+					delete(a.etcd, n)
+					delete(a.logSum, n)
+				}
 			}
 		}
 		a.crdCounts = nil
@@ -665,6 +702,23 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return a, tea.Quit
 	}
+	before := a.viewSignature()
+	model, cmd := a.handleKeyInner(m)
+	if a.viewSignature() != before {
+		// the frame layout changed (tab, sub-tab, inspector depth, overlay):
+		// repaint from scratch so no stale rows survive on any terminal
+		cmd = tea.Batch(cmd, tea.ClearScreen)
+	}
+	return model, cmd
+}
+
+// viewSignature identifies the structural layout of the current view.
+func (a *App) viewSignature() string {
+	return fmt.Sprintf("%d|%s|%d|%d|%s", a.tab, a.subName(), len(a.inspect), a.overlay, a.logsNode)
+}
+
+func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := m.String()
 	if a.overlay != ovNone {
 		return a.handleOverlayKey(m)
 	}
@@ -845,9 +899,11 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g", "home":
 		a.cursor[a.tab] = 0
 		a.scroll[a.tab] = 0
+		a.clamp(a.currentContent())
 	case "G", "end":
 		a.cursor[a.tab] = 1 << 30
 		a.scroll[a.tab] = 1 << 30
+		a.clamp(a.currentContent())
 	case "pgdown", "ctrl+d", " ":
 		a.move(a.bodyHeight() - 2)
 	case "pgup", "ctrl+u":
@@ -858,10 +914,30 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *App) move(delta int) {
 	c := a.currentContent()
-	if c.selectable {
-		a.cursor[a.tab] += delta
-	} else {
+	if !c.selectable {
 		a.scroll[a.tab] += delta
+		a.clamp(c)
+		return
+	}
+	rows := a.filteredRows(c)
+	target := a.cursor[a.tab] + delta
+	if target < 0 {
+		target = 0
+	}
+	if target >= len(rows) {
+		target = len(rows) - 1
+	}
+	dir := 1
+	if delta < 0 {
+		dir = -1
+	}
+	// headings and blank lines carry no id: land on the next real row in the
+	// direction of travel, or stay put when there is none
+	for i := target; i >= 0 && i < len(rows); i += dir {
+		if rows[i].id != "" {
+			a.cursor[a.tab] = i
+			break
+		}
 	}
 	a.clamp(c)
 }
@@ -883,6 +959,9 @@ func (a *App) clamp(c content) {
 		if a.cursor[a.tab] >= len(rows) {
 			a.cursor[a.tab] = len(rows) - 1
 		}
+		if rows[a.cursor[a.tab]].id == "" {
+			a.cursor[a.tab] = nearestRow(rows, a.cursor[a.tab])
+		}
 		if a.cursor[a.tab] < a.scroll[a.tab] {
 			a.scroll[a.tab] = a.cursor[a.tab]
 		}
@@ -901,6 +980,22 @@ func (a *App) clamp(c content) {
 	if a.scroll[a.tab] < 0 {
 		a.scroll[a.tab] = 0
 	}
+}
+
+// nearestRow returns the index of the closest row with an id (a selectable
+// row), preferring the ones after i; i itself when none has an id.
+func nearestRow(rows []row, i int) int {
+	for j := i; j < len(rows); j++ {
+		if rows[j].id != "" {
+			return j
+		}
+	}
+	for j := i - 1; j >= 0; j-- {
+		if rows[j].id != "" {
+			return j
+		}
+	}
+	return i
 }
 
 func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1114,7 +1209,7 @@ func fitScreen(frame string, width, height int) string {
 }
 
 func (a *App) renderHeader() string {
-	parts := []string{styleTitle.Render(" khealth")}
+	parts := []string{styleTitle.Render(" khealth") + styleDim.Render(" "+config.Version)}
 	if a.snap != nil {
 		parts = append(parts, kv("ctx", a.client.Context), kv("k8s", a.snap.Version), kv("dist", a.snap.Distribution))
 		ready := 0

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -34,6 +35,23 @@ func (c *Client) Diag(ctx context.Context, w io.Writer) {
 		}
 	}
 	fmt.Fprintf(w, "nodes: %d   PVCs: %d (%d bound)\n\n", len(nodes.Items), len(pvcs.Items), bound)
+	if pvs, err := c.CS.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{}); err == nil {
+		kinds := map[string]int{}
+		fmt.Fprintln(w, "== persistent volumes (source type decides whether the kubelet can report usage) ==")
+		for i := range pvs.Items {
+			pv := &pvs.Items[i]
+			src, path := pvSource(pv)
+			kinds[src]++
+			if i < 30 {
+				claim := ""
+				if pv.Spec.ClaimRef != nil {
+					claim = pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
+				}
+				fmt.Fprintf(w, "  %-45s %-10s %-45s %s %s\n", pv.Name, src, claim, pv.Spec.StorageClassName, path)
+			}
+		}
+		fmt.Fprintf(w, "  by source: %v\n\n", kinds)
+	}
 
 	pods, _ := c.CS.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	mounted := map[string][]string{} // node -> ns/claim
@@ -67,6 +85,9 @@ func (c *Client) Diag(ctx context.Context, w io.Writer) {
 				fmt.Fprintf(w, "                 body: %s\n", firstLineOf(string(raw)))
 			}
 			continue
+		}
+		if dump := os.Getenv("KHT_DIAG_DUMP"); dump != "" {
+			_ = os.WriteFile(dump+"."+n.Name+".json", raw, 0o600)
 		}
 		usage, perr := c.kubeletVolumeStats(ctx, n.Name)
 		fmt.Fprintf(w, "  stats/summary: ok, %d bytes (%s); parsed PVC volumes: %d", len(raw), time.Since(t).Round(time.Millisecond), len(usage))
@@ -110,11 +131,14 @@ func (c *Client) Diag(ctx context.Context, w io.Writer) {
 		p := &pods.Items[i]
 		if p.Namespace == "kube-system" && p.Labels["component"] == "etcd" && p.Status.Phase == corev1.PodRunning {
 			found = true
-			out, errOut, err := c.ExecInPod(ctx, p.Namespace, p.Name, "etcd", []string{"sh", "-c", "etcdctl version 2>&1 | head -1"})
+			out, errOut, err := c.ExecInPod(ctx, p.Namespace, p.Name, "etcd", []string{"etcdctl", "version"})
 			if err != nil {
 				fmt.Fprintf(w, "  %s: ERROR %v %s\n", p.Name, firstLineOf(err.Error()), firstLineOf(errOut))
 			} else {
 				fmt.Fprintf(w, "  %s: ok (%s)\n", p.Name, firstLineOf(out))
+			}
+			if diagEtcd != nil {
+				diagEtcd(ctx, c, p.Spec.NodeName, p.Name, w)
 			}
 			break
 		}
@@ -152,6 +176,34 @@ func (c *Client) Diag(ctx context.Context, w io.Writer) {
 			fmt.Fprintf(w, "  %-28s ok\n", r.name)
 		}
 	}
+}
+
+// diagEtcd is set by the etcd package consumer (main) to avoid an import cycle.
+var diagEtcd func(ctx context.Context, c *Client, node, pod string, w io.Writer)
+
+// SetEtcdDiag registers the etcd probe used by Diag.
+func SetEtcdDiag(f func(ctx context.Context, c *Client, node, pod string, w io.Writer)) { diagEtcd = f }
+
+// pvSource names the volume source of a PV and its host path when local.
+func pvSource(pv *corev1.PersistentVolume) (string, string) {
+	src := pv.Spec.PersistentVolumeSource
+	switch {
+	case src.CSI != nil:
+		return "csi:" + src.CSI.Driver, ""
+	case src.HostPath != nil:
+		return "hostPath", src.HostPath.Path
+	case src.Local != nil:
+		return "local", src.Local.Path
+	case src.NFS != nil:
+		return "nfs", src.NFS.Server + ":" + src.NFS.Path
+	case src.ISCSI != nil:
+		return "iscsi", ""
+	case src.RBD != nil:
+		return "rbd", ""
+	case src.CephFS != nil:
+		return "cephfs", ""
+	}
+	return "other", ""
 }
 
 func firstLineOf(s string) string {

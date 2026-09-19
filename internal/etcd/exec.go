@@ -42,9 +42,11 @@ func ExecProbe(ctx context.Context, ex Execer, node, pod, dist string) *Probe {
 	defer func() { p.Duration = time.Since(start) }()
 	ca, cert, key := CertPaths(dist)
 	p.CA, p.Cert, p.Key = ca, cert, key
-	base := fmt.Sprintf("ETCDCTL_API=3 etcdctl --cacert=%s --cert=%s --key=%s", ca, cert, key)
-	run := func(script string) (string, error) {
-		out, errOut, err := ex.ExecInPod(ctx, "kube-system", pod, "etcd", []string{"sh", "-c", script})
+	// rke2's hardened-etcd image has no shell: exec etcdctl directly (etcd 3.4+ defaults to the v3 API)
+	base := []string{"etcdctl", "--cacert=" + ca, "--cert=" + cert, "--key=" + key}
+	run := func(args ...string) (string, error) {
+		argv := append(append([]string{}, base...), args...)
+		out, errOut, err := ex.ExecInPod(ctx, "kube-system", pod, "etcd", argv)
 		if err != nil && strings.TrimSpace(out) == "" {
 			return "", fmt.Errorf("%v: %s", err, firstLine(errOut))
 		}
@@ -55,13 +57,15 @@ func ExecProbe(ctx context.Context, ex Execer, node, pod, dist string) *Probe {
 	}
 
 	// 1. members
-	out, err := run(base + " --endpoints=https://127.0.0.1:2379 member list -w json")
+	out, err := run("--endpoints=https://127.0.0.1:2379", "member", "list", "-w", "json")
 	if err != nil {
 		p.Err = fmt.Errorf("member list: %w", err)
 		p.EtcdctlDiag = p.Err.Error()
 		return p
 	}
 	parseEtcdctl(p, "---MEMBERS\n"+out+"\n")
+	membersRaw := strings.TrimSpace(out)
+	p.EtcdctlOut = membersRaw
 	if len(p.Members) == 0 {
 		p.Err = fmt.Errorf("member list returned no members: %s", firstLine(out))
 		p.EtcdctlDiag = p.Err.Error()
@@ -74,20 +78,25 @@ func ExecProbe(ctx context.Context, ex Execer, node, pod, dist string) *Probe {
 	if len(eps) == 0 {
 		eps = []string{"https://127.0.0.1:2379"}
 	}
-	epFlag := " --endpoints=" + strings.Join(eps, ",")
+	epFlag := "--endpoints=" + strings.Join(eps, ",")
 	p.Endpoint = strings.Join(eps, ",")
 
-	// 2. health + status per endpoint, 3. alarms (non-zero exit is expected when a member is down)
-	script := base + epFlag + " endpoint health -w json; echo; echo ---STATUS; " +
-		base + epFlag + " endpoint status -w json; echo; echo ---ALARMS; " +
-		base + " --endpoints=https://127.0.0.1:2379 alarm list -w json; echo"
-	out, err = run(script)
-	if err != nil {
-		p.EtcdctlDiag = "health/status: " + err.Error()
-		return p
+	// 2. health + status against every member's client URL (a down member
+	// makes etcdctl exit non-zero but the JSON for the others is still printed)
+	healthRaw, herr := run(epFlag, "endpoint", "health", "-w", "json")
+	statusRaw, serr := run(epFlag, "endpoint", "status", "-w", "json")
+	alarmRaw, aerr := run("--endpoints=https://127.0.0.1:2379", "alarm", "list", "-w", "json")
+	var diags []string
+	for _, e := range []error{herr, serr, aerr} {
+		if e != nil {
+			diags = append(diags, e.Error())
+		}
 	}
-	healthRaw, rest, _ := strings.Cut(out, "---STATUS")
-	parseEtcdctl(p, "---STATUS"+rest)
+	if len(diags) > 0 {
+		p.EtcdctlDiag = strings.Join(diags, "; ")
+	}
+	out = "---MEMBERS\n(see above)\n---STATUS\n" + statusRaw + "\n---ALARMS\n" + alarmRaw + "\n"
+	parseEtcdctl(p, "---STATUS\n"+statusRaw+"\n---ALARMS\n"+alarmRaw+"\n")
 	p.EndpointHealth = parseEndpointHealth(healthRaw)
 	allOK := len(p.EndpointHealth) > 0
 	var bad []string
@@ -98,7 +107,7 @@ func ExecProbe(ctx context.Context, ex Execer, node, pod, dist string) *Probe {
 		}
 	}
 	p.Health = &Health{Healthy: allOK, Reason: strings.Join(bad, "; "), Raw: strings.TrimSpace(healthRaw)}
-	p.EtcdctlOut = out
+	p.EtcdctlOut = "member list:\n" + strings.TrimSpace(p.EtcdctlOut) + "\nendpoint health:\n" + strings.TrimSpace(healthRaw) + "\n" + out
 	return p
 }
 
