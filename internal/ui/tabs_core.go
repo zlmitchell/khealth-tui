@@ -325,141 +325,19 @@ func (a *App) nodesContent() content {
 	return c
 }
 
-// ---------- Workloads ----------
-
-func (a *App) workloadsContent() content {
-	s := a.snap
-	var hdr []string
-	var bad []string
-	for i := range s.Deployments {
-		d := &s.Deployments[i]
-		if !a.inNamespace(d.Namespace) {
-			continue
-		}
-		if d.Spec.Replicas != nil && *d.Spec.Replicas > 0 && d.Status.UnavailableReplicas > 0 {
-			bad = append(bad, styleWarn.Render(fmt.Sprintf("deploy %s/%s %d/%d", d.Namespace, d.Name, d.Status.AvailableReplicas, *d.Spec.Replicas)))
-		}
+// openEvent shows an event in the inspector with its involved object as a reference.
+func (a *App) openEvent(id string) {
+	var idx int
+	if _, err := fmt.Sscan(id, &idx); err != nil || idx < 0 || idx >= len(a.snap.Events) {
+		return
 	}
-	for i := range s.DaemonSets {
-		d := &s.DaemonSets[i]
-		if !a.inNamespace(d.Namespace) {
-			continue
-		}
-		if d.Status.NumberReady < d.Status.DesiredNumberScheduled {
-			bad = append(bad, styleWarn.Render(fmt.Sprintf("ds %s/%s %d/%d", d.Namespace, d.Name, d.Status.NumberReady, d.Status.DesiredNumberScheduled)))
-		}
+	e := &a.snap.Events[idx]
+	meta := []string{
+		kv("reason", styleWarn.Render(e.Reason)) + "  " + kv("count", fmt.Sprint(k8s.EventCount(e))) + "  " + kv("first", age(e.FirstTimestamp.Time)+" ago") + "  " + kv("last", age(k8s.EventTime(e))+" ago") + "  " + kv("source", e.Source.Component+" "+e.Source.Host),
 	}
-	for i := range s.StatefulSets {
-		d := &s.StatefulSets[i]
-		if !a.inNamespace(d.Namespace) {
-			continue
-		}
-		if d.Spec.Replicas != nil && d.Status.ReadyReplicas < *d.Spec.Replicas {
-			bad = append(bad, styleWarn.Render(fmt.Sprintf("sts %s/%s %d/%d", d.Namespace, d.Name, d.Status.ReadyReplicas, *d.Spec.Replicas)))
-		}
-	}
-	nDep, nDS, nSTS, nJob, nCron := 0, 0, 0, 0, 0
-	for i := range s.Deployments {
-		if a.inNamespace(s.Deployments[i].Namespace) {
-			nDep++
-		}
-	}
-	for i := range s.DaemonSets {
-		if a.inNamespace(s.DaemonSets[i].Namespace) {
-			nDS++
-		}
-	}
-	for i := range s.StatefulSets {
-		if a.inNamespace(s.StatefulSets[i].Namespace) {
-			nSTS++
-		}
-	}
-	for i := range s.Jobs {
-		if a.inNamespace(s.Jobs[i].Namespace) {
-			nJob++
-		}
-	}
-	for i := range s.CronJobs {
-		if a.inNamespace(s.CronJobs[i].Namespace) {
-			nCron++
-		}
-	}
-	hdr = append(hdr, styleTitle.Render("Workloads")+"  "+kv("deployments", fmt.Sprint(nDep))+"  "+kv("daemonsets", fmt.Sprint(nDS))+"  "+kv("statefulsets", fmt.Sprint(nSTS))+"  "+kv("jobs", fmt.Sprint(nJob))+"  "+kv("cronjobs", fmt.Sprint(nCron)))
-	var okPods, badPods, pendPods, donePods float64
-	for i := range s.Pods {
-		p := &s.Pods[i]
-		if !a.inNamespace(p.Namespace) {
-			continue
-		}
-		switch {
-		case p.Status.Phase == corev1.PodSucceeded:
-			donePods++
-		case p.Status.Phase == corev1.PodPending:
-			pendPods++
-		case k8s.PodHealthy(p):
-			okPods++
-		default:
-			badPods++
-		}
-	}
-	psegs := []seg{{okPods, styleOK, "healthy"}, {badPods, styleCrit, "unhealthy"}, {pendPods, styleWarn, "pending"}, {donePods, styleDim, "completed"}}
-	hdr = append(hdr, kv("pods", stacked(40, psegs))+"  "+legend(psegs)+"  "+styleDim.Render("unhealthy trend ")+sparkStyled(a.values("pods.unhealthy"), 16, 0, 1, 5))
-	if len(bad) > 0 {
-		hdr = append(hdr, "unhealthy: "+strings.Join(bad, "  "))
-	} else {
-		hdr = append(hdr, styleOK.Render("all controllers at desired replicas"))
-	}
-	var rows [][]string
-	var ids []string
-	total := 0
-	for i := range s.Pods {
-		p := &s.Pods[i]
-		if !a.inNamespace(p.Namespace) {
-			continue
-		}
-		total++
-		healthy := k8s.PodHealthy(p)
-		if a.problemOnly && healthy {
-			continue
-		}
-		st := k8s.PodStatus(p)
-		stText := st
-		switch {
-		case st == "Running" || st == "Completed" || st == "Succeeded":
-			stText = styleOK.Render(st)
-		case st == "CrashLoopBackOff" || strings.Contains(st, "Err") || strings.Contains(st, "BackOff") || st == "Failed" || st == "Error":
-			stText = styleCrit.Render(st)
-		default:
-			stText = styleWarn.Render(st)
-		}
-		r, t := k8s.PodReady(p)
-		readyText := fmt.Sprintf("%d/%d", r, t)
-		if r < t && p.Status.Phase == corev1.PodRunning {
-			readyText = styleWarn.Render(readyText)
-		}
-		restarts, last := k8s.PodRestarts(p)
-		rsText := fmt.Sprint(restarts)
-		if restarts > 0 && !last.IsZero() {
-			rsText += styleDim.Render(" (" + age(last) + " ago)")
-			if restarts >= a.cfg.Thresholds.RestartWarn {
-				rsText = styleWarn.Render(fmt.Sprint(restarts)) + styleDim.Render(" ("+age(last)+" ago)")
-			}
-		}
-		rows = append(rows, []string{p.Namespace, p.Name, readyText, stText, rsText, age(p.CreationTimestamp.Time), p.Spec.NodeName})
-		ids = append(ids, p.Namespace+"/"+p.Name)
-	}
-	mode := "all pods"
-	if a.problemOnly {
-		mode = "problem pods only (a toggles)"
-	}
-	hdr = append(hdr, styleDim.Render(fmt.Sprintf("%d pods, showing %d - %s", total, len(rows), mode)))
-	h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 28}, {title: "NAME", max: 60}, {title: "READY", right: true}, {title: "STATUS"}, {title: "RESTARTS"}, {title: "AGE", right: true}, {title: "NODE"}}, rows)
-	hdr = append(hdr, h)
-	c := content{header: hdr, selectable: true, empty: styleOK.Render("no pods to show")}
-	for i, l := range lines {
-		c.rows = append(c.rows, row{id: ids[i], text: l})
-	}
-	return c
+	meta = append(meta, wrap(e.Message, a.width-6)...)
+	refs := []k8s.ObjRef{{APIVersion: e.InvolvedObject.APIVersion, Kind: e.InvolvedObject.Kind, Namespace: e.InvolvedObject.Namespace, Name: e.InvolvedObject.Name, Via: "involved object"}}
+	a.openInspectList("Event "+e.Namespace+"/"+e.Name, meta, refs)
 }
 
 // ---------- Events ----------
@@ -522,13 +400,14 @@ func (a *App) storageContent() content {
 		}
 	}
 	var usedBytes, capBytes float64
-	for _, u := range s.PVCUsage {
+	usageAll := checks.MergePVCUsage(s, a.nodes)
+	for _, u := range usageAll {
 		usedBytes += float64(u.Used)
 		capBytes += float64(u.Capacity)
 	}
 	usedTxt := styleDim.Render("n/a")
 	if capBytes > 0 {
-		usedTxt = gauge(usedBytes/capBytes*100, 12, thr.DiskWarnPct, thr.DiskCritPct) + styleDim.Render(fmt.Sprintf(" %s of %s across %d mounted claims", humanBytes(usedBytes), humanBytes(capBytes), len(s.PVCUsage)))
+		usedTxt = gauge(usedBytes/capBytes*100, 12, thr.DiskWarnPct, thr.DiskCritPct) + styleDim.Render(fmt.Sprintf(" %s of %s across %d mounted claims", humanBytes(usedBytes), humanBytes(capBytes), len(usageAll)))
 	}
 	add(styleTitle.Render("Storage") + "  " + kv("PVCs", stacked(24, pvcSegs)) + " " + legend(pvcSegs) + "  " + kv("PVs", stacked(24, pvSegs)) + " " + legend(pvSegs) + "  " + kv("provisioned", humanBytes(pvBytes)))
 	add(kv("PVC usage", usedTxt))
@@ -592,9 +471,13 @@ func (a *App) storageContent() content {
 		add(lines...)
 	}
 
-	usedNote := "used = kubelet stats/summary of the node mounting the claim"
-	if len(s.PVCUsage) == 0 {
-		usedNote = "no usage data (needs nodes/proxy RBAC and mounted claims)"
+	usage := checks.MergePVCUsage(s, a.nodes)
+	usedNote := "used = kubelet stats/summary (nodes/proxy) or df over SSH on the mounting node"
+	if len(usage) == 0 {
+		usedNote = "no usage data: claims must be mounted by a running pod; needs nodes/proxy RBAC or SSH"
+		if s.PVCUsageErr != "" {
+			usedNote += "; stats/summary error: " + firstLine(s.PVCUsageErr)
+		}
 	}
 	add("", styleTitle.Render("PersistentVolumeClaims")+styleDim.Render("  (namespace filter applies; "+usedNote+")"))
 	rows = nil
@@ -624,7 +507,7 @@ func (a *App) storageContent() content {
 		}
 		used := styleDim.Render("-")
 		mounted := ""
-		if u, ok := s.PVCUsage[p.Namespace+"/"+p.Name]; ok {
+		if u, ok := usage[p.Namespace+"/"+p.Name]; ok {
 			used = gauge(u.UsedPct(), 10, thr.DiskWarnPct, thr.DiskCritPct) + styleDim.Render(" "+humanBytes(float64(u.Used))+"/"+humanBytes(float64(u.Capacity)))
 			mounted = u.Node
 		}
@@ -723,7 +606,7 @@ func (a *App) detailFor(t tab, id string) (string, []string) {
 	case tabNodes:
 		return a.nodeDetail(id)
 	case tabWorkloads:
-		return a.podDetail(id)
+		return a.podDetail(strings.TrimPrefix(strings.ReplaceAll(id, "|", "/"), "Pod/"))
 	case tabEvents:
 		var idx int
 		if _, err := fmt.Sscan(id, &idx); err == nil && idx >= 0 && idx < len(a.snap.Events) {

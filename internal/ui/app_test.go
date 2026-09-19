@@ -110,6 +110,23 @@ func TestRenderAllTabsAndDetails(t *testing.T) {
 	if c := a.currentContent(); len(a.filteredRows(c)) != 1 {
 		t.Errorf("filter should leave 1 row")
 	}
+	// workload inspector: deployment row -> inspector with pod refs
+	a.filters[tabWorkloads] = ""
+	a.cursor[tabWorkloads] = 0
+	a.openWorkload(wlID("Deployment", "default", "web"))
+	if a.overlay != ovInspect || len(a.inspect) != 1 {
+		t.Fatalf("expected inspector, overlay=%v levels=%d", a.overlay, len(a.inspect))
+	}
+	_ = a.View()
+	a.handleInspectKey("esc")
+	if a.overlay != ovNone {
+		t.Errorf("esc should close the inspector")
+	}
+	a.wlPods = true
+	_ = a.View()
+	a.wlPods = false
+	a.tab = tabCRDs
+	_ = a.View()
 	a.overlay = ovNamespace
 	a.nsInput.SetValue("team")
 	if opts := a.nsOptions(); len(opts) != 2 || opts[1] != "team-a" {

@@ -16,8 +16,16 @@ import (
 // action is a mutating CLI command that needs explicit confirmation.
 type action struct {
 	title string
-	argv  []string
+	argv  []string                                  // CLI form
+	run   func(ctx context.Context) (string, error) // in-process form (API patch)
 	desc  []string
+}
+
+func (a *action) command() string {
+	if a.run != nil {
+		return "(API call)"
+	}
+	return strings.Join(a.argv, " ")
 }
 
 type actionDoneMsg struct {
@@ -150,11 +158,15 @@ func (a *App) confirmRollback(rev k8s.HelmRevision) {
 // runAction executes the pending action in the background.
 func (a *App) runAction(act *action) tea.Cmd {
 	a.actionRunning = true
-	a.setStatus("running: " + strings.Join(act.argv, " "))
+	a.setStatus("running: " + act.command())
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 		start := time.Now()
+		if act.run != nil {
+			out, err := act.run(ctx)
+			return actionDoneMsg{act: act, out: out, err: err, dur: time.Since(start)}
+		}
 		cmd := exec.CommandContext(ctx, act.argv[0], act.argv[1:]...)
 		out, err := cmd.CombinedOutput()
 		return actionDoneMsg{act: act, out: string(out), err: err, dur: time.Since(start)}
@@ -163,7 +175,7 @@ func (a *App) runAction(act *action) tea.Cmd {
 
 func (a *App) handleActionDone(m actionDoneMsg) tea.Cmd {
 	a.actionRunning = false
-	lines := []string{styleDim.Render("$ " + strings.Join(m.act.argv, " ")), ""}
+	lines := []string{styleDim.Render("$ " + m.act.command()), ""}
 	for _, l := range strings.Split(strings.TrimRight(m.out, "\n"), "\n") {
 		lines = append(lines, wrap(l, a.width-6)...)
 	}
@@ -227,7 +239,7 @@ func (a *App) renderActionOverlay() (string, []string) {
 			return "", nil
 		}
 		lines := []string{styleBold.Render(a.pendingAct.title), ""}
-		lines = append(lines, wrap("$ "+strings.Join(a.pendingAct.argv, " "), a.width-6)...)
+		lines = append(lines, wrap("$ "+a.pendingAct.command(), a.width-6)...)
 		lines = append(lines, "")
 		for _, d := range a.pendingAct.desc {
 			lines = append(lines, wrap(d, a.width-6)...)

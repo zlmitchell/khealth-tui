@@ -41,11 +41,12 @@ const (
 	tabSecurity
 	tabLogs
 	tabRKE2
+	tabCRDs
 	tabCount
 )
 
-var tabNames = [...]string{"Overview", "Nodes", "Workloads", "etcd", "Storage", "Events", "Addons", "Helm", "Images", "Security", "Logs", "RKE2"}
-var tabKeys = [...]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="}
+var tabNames = [...]string{"Overview", "Nodes", "Workloads", "etcd", "Storage", "Events", "Addons", "Helm", "Images", "Security", "Logs", "RKE2", "CRDs"}
+var tabKeys = [...]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "c"}
 
 type overlayKind int
 
@@ -56,6 +57,7 @@ const (
 	ovDetail
 	ovConfirm
 	ovRevisions
+	ovInspect
 )
 
 // row is one selectable/scrollable line of a tab.
@@ -127,6 +129,13 @@ type App struct {
 	revRelease    *k8s.HelmRelease
 	revCursor     int
 	actionRunning bool
+
+	inspect     []inspectLevel
+	inspectSeq  int
+	crdCounts   []k8s.CRDInfo
+	crdCounting bool
+	etcdExec    *etcd.Probe
+	wlPods      bool
 }
 
 type snapshotMsg struct {
@@ -143,6 +152,10 @@ type etcdMsg struct {
 }
 type s3Msg struct{ info *k8s.S3SecretInfo }
 type helmMsg struct{ latest map[string]helmcheck.Latest }
+type etcdExecMsg struct {
+	seq   int
+	probe *etcd.Probe
+}
 type tickMsg struct{ seq int }
 
 // New creates the application model.
@@ -279,6 +292,39 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// etcdExecCmd runs etcdctl inside an etcd static pod through the API
+// (kubectl exec equivalent). Tries pods in order until one answers.
+func (a *App) etcdExecCmd(snap *k8s.Snapshot) tea.Cmd {
+	if snap == nil {
+		return nil
+	}
+	pods := snap.EtcdPods()
+	if len(pods) == 0 {
+		return nil
+	}
+	seq := a.seq
+	client := a.client
+	dist := snap.Distribution
+	names := sortedKeys(pods)
+	podNames := map[string]string{}
+	for _, n := range names {
+		podNames[n] = pods[n].Name
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		var last *etcd.Probe
+		for _, n := range names {
+			p := etcd.ExecProbe(ctx, client, n, podNames[n], dist)
+			last = p
+			if p.Err == nil && len(p.Members) > 0 {
+				break
+			}
+		}
+		return etcdExecMsg{seq: seq, probe: last}
+	}
+}
+
 func (a *App) helmCmd(snap *k8s.Snapshot) tea.Cmd {
 	if a.helm == nil || snap == nil || len(snap.HelmReleases) == 0 {
 		return nil
@@ -325,7 +371,7 @@ func (a *App) recompute() {
 	}
 	a.stigRes = stig.Evaluate(stig.Input{Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd})
 	a.findings = checks.Evaluate(checks.Input{
-		Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, S3: a.s3, Logs: a.logSum, Stig: a.stigRes,
+		Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec, S3: a.s3, Logs: a.logSum, Stig: a.stigRes,
 		HelmLatest: a.helmLatest, SSHEnabled: a.sshEnabled, SSHErr: a.sshErr, Cfg: a.cfg, Now: time.Now(),
 	})
 }
@@ -478,9 +524,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				delete(a.logSum, n)
 			}
 		}
+		a.crdCounts = nil
+		a.crdCounting = false
 		a.recompute()
 		a.recordSnapshot()
-		return a, tea.Batch(a.collectCmds(a.snap), a.helmCmd(a.snap), a.tickCmd())
+		var crdCmd tea.Cmd
+		if a.tab == tabCRDs {
+			crdCmd = a.crdCountCmd()
+		}
+		return a, tea.Batch(a.collectCmds(a.snap), a.helmCmd(a.snap), a.etcdExecCmd(a.snap), crdCmd, a.tickCmd())
 	case nodeMsg:
 		if m.seq != a.seq {
 			return a, nil
@@ -513,6 +565,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case actionDoneMsg:
 		return a, a.handleActionDone(m)
+	case etcdExecMsg:
+		if m.seq != a.seq {
+			return a, nil
+		}
+		a.etcdExec = m.probe
+		a.recompute()
+		return a, nil
+	case inspectMsg:
+		a.handleInspectMsg(m)
+		return a, nil
+	case crdCountMsg:
+		a.crdCounting = false
+		if m.seq == a.seq {
+			a.crdCounts = m.crds
+		}
+		return a, nil
 	case tea.KeyMsg:
 		return a.handleKey(m)
 	}
@@ -550,6 +618,24 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	for i, k := range tabKeys {
 		if key == k {
 			a.tab = tab(i)
+			if a.tab == tabCRDs {
+				return a, a.crdCountCmd()
+			}
+			return a, nil
+		}
+	}
+	if a.tab == tabWorkloads && a.snap != nil {
+		switch key {
+		case "p":
+			a.wlPods = !a.wlPods
+			a.cursor[a.tab], a.scroll[a.tab] = 0, 0
+			return a, nil
+		case "t":
+			if a.actionRunning {
+				a.setStatus("an action is still running")
+				return a, nil
+			}
+			a.startRolloutRestart()
 			return a, nil
 		}
 	}
@@ -576,8 +662,14 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	case "tab", "]", "right", "l":
 		a.tab = (a.tab + 1) % tabCount
+		if a.tab == tabCRDs {
+			return a, a.crdCountCmd()
+		}
 	case "shift+tab", "[", "left", "h":
 		a.tab = (a.tab + tabCount - 1) % tabCount
+		if a.tab == tabCRDs {
+			return a, a.crdCountCmd()
+		}
 	case "n":
 		a.overlay = ovNamespace
 		a.nsInput.SetValue("")
@@ -632,6 +724,17 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.logsNode = id
 				a.cursor[a.tab], a.scroll[a.tab], a.filters[a.tab] = 0, 0, ""
 			}
+			return a, nil
+		}
+		if a.tab == tabWorkloads && a.snap != nil {
+			a.openWorkload(a.selectedID())
+			return a, nil
+		}
+		if a.tab == tabCRDs && a.snap != nil {
+			return a, a.openCRDInstances(a.selectedID())
+		}
+		if a.tab == tabEvents && a.snap != nil {
+			a.openEvent(a.selectedID())
 			return a, nil
 		}
 		a.openDetail()
@@ -705,6 +808,8 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch a.overlay {
 	case ovConfirm, ovRevisions:
 		return a.handleActionOverlayKey(key)
+	case ovInspect:
+		return a.handleInspectKey(key)
 	case ovNamespace:
 		switch key {
 		case "esc":
@@ -819,6 +924,8 @@ func (a *App) currentContent() content {
 		return a.logsContent()
 	case tabRKE2:
 		return a.rke2Content()
+	case tabCRDs:
+		return a.crdsContent()
 	}
 	return content{}
 }
@@ -1017,7 +1124,7 @@ func (a *App) renderBody() string {
 }
 
 func (a *App) renderFooter() string {
-	keys := []string{"tab/1-9 switch", "j/k move", "enter detail", "n namespace", "/ filter", "a problems", "r refresh", "R full", "s ssh", "? help", "q quit"}
+	keys := []string{"tab/1-9 switch", "j/k move", "enter inspect", "n namespace", "/ filter", "a problems", "r refresh", "R full", "s ssh", "? help", "q quit"}
 	var parts []string
 	for _, k := range keys {
 		kk, rest, _ := strings.Cut(k, " ")
@@ -1054,6 +1161,8 @@ func (a *App) renderOverlay() string {
 		}
 	case ovConfirm, ovRevisions:
 		title, lines = a.renderActionOverlay()
+	case ovInspect:
+		title, lines = a.renderInspect()
 	case ovDetail:
 		title = a.detailTitle
 		visible := h - 4
@@ -1102,7 +1211,9 @@ func helpLines() []string {
 		styleBold.Render("Tabs"),
 		"  Overview   cluster summary, API health, ranked findings",
 		"  Nodes      conditions + live CPU/mem/disk/load from SSH (or metrics-server), certs, services",
-		"  Workloads  unhealthy deployments/daemonsets/statefulsets/jobs and pod list",
+		"  Workloads  controllers (deploy/ds/sts/job/cronjob) then pods not owned by one; p = all pods; t = rollout restart;",
+		"             enter opens the object inspector: owner/child/secret/configmap/PVC/SA references, enter again drills down, esc back",
+		"  CRDs       every CustomResourceDefinition with instance counts; enter lists instances, enter again inspects one",
 		"  etcd       members, health, db size/quota/fragmentation, fsync latency, config source, snapshots/backups",
 		"  Storage    StorageClasses, CSI drivers, PVs/PVCs and node filesystems",
 		"  Events     warning events",

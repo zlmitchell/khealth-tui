@@ -52,6 +52,7 @@ type Input struct {
 	Snap       *k8s.Snapshot
 	Nodes      map[string]*nodeinfo.Info
 	Etcd       map[string]*etcd.Probe
+	EtcdExec   *etcd.Probe // cluster-wide view via kubectl exec (optional)
 	S3         *k8s.S3SecretInfo
 	Logs       map[string]*logs.Summary
 	Stig       []stig.Result
@@ -322,7 +323,7 @@ func Evaluate(in Input) []Finding {
 	}
 
 	// ---- storage ----
-	for key, u := range s.PVCUsage {
+	for key, u := range MergePVCUsage(s, in.Nodes) {
 		pct := u.UsedPct()
 		switch {
 		case pct >= float64(thr.DiskCritPct):
@@ -445,6 +446,44 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string)) {
 	leaders := map[string]bool{}
 	memberCounts := map[int]bool{}
 
+	if x := in.EtcdExec; x != nil && x.Err == nil {
+		for _, h := range x.EndpointHealth {
+			if !h.Healthy {
+				who := h.Endpoint
+				if m := x.MemberByEndpoint(h.Endpoint); m != nil {
+					who = m.Name
+				}
+				add(SevCrit, "etcd", who, "endpoint unhealthy: "+firstLine(h.Error), "etcdctl endpoint health via "+x.EtcdctlVia)
+			}
+		}
+		for _, a := range x.Alarms {
+			add(SevCrit, "etcd", "cluster", "alarm "+a.Type+" on member "+a.MemberID, "etcdctl alarm disarm after compaction/defrag")
+		}
+		if len(x.Members) > 0 && etcdNodes > 0 && len(x.Members) != etcdNodes {
+			add(SevWarn, "etcd", "cluster", fmt.Sprintf("%d etcd members but %d etcd nodes in the cluster", len(x.Members), etcdNodes), "stale member? etcdctl member list")
+		}
+		for _, m := range x.Members {
+			if m.IsLearner {
+				add(SevInfo, "etcd", "cluster", "member "+m.Name+" is a learner", "")
+			}
+		}
+		vers := map[string]bool{}
+		for _, st := range x.Statuses {
+			if st.Leader != "" {
+				leaders[st.Leader] = true
+			}
+			if st.Version != "" {
+				vers[st.Version] = true
+			}
+			for _, e := range st.Errors {
+				add(SevCrit, "etcd", "cluster", "endpoint "+st.Endpoint+": "+e, "")
+			}
+		}
+		if len(vers) > 1 {
+			add(SevWarn, "etcd", "cluster", "mixed etcd versions across members", "finish the upgrade")
+		}
+	}
+
 	for name, p := range in.Etcd {
 		if p == nil {
 			continue
@@ -501,7 +540,7 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string)) {
 		for _, a := range p.Alarms {
 			add(SevCrit, "etcd", name, "alarm "+a.Type+" on member "+a.MemberID, "etcdctl alarm disarm after compaction/defrag")
 		}
-		if len(p.Members) > 0 {
+		if len(p.Members) > 0 && in.EtcdExec == nil {
 			memberCounts[len(p.Members)] = true
 			if len(p.Members) != etcdNodes && etcdNodes > 0 {
 				add(SevWarn, "etcd", name, fmt.Sprintf("%d etcd members but %d etcd nodes in the cluster", len(p.Members), etcdNodes), "stale member? etcdctl member list")
@@ -614,6 +653,46 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string)) {
 			add(SevWarn, "etcd", "backups", "S3 snapshots enabled but no snapshot record is marked as uploaded to S3", "check S3 credentials/endpoint in rke2-server logs")
 		}
 	}
+}
+
+// MergePVCUsage combines kubelet stats/summary usage with the SSH df fallback
+// (PV mount paths mapped to claims through the PV's claimRef).
+func MergePVCUsage(s *k8s.Snapshot, nodes map[string]*nodeinfo.Info) map[string]k8s.VolumeUsage {
+	out := map[string]k8s.VolumeUsage{}
+	for k, v := range s.PVCUsage {
+		out[k] = v
+	}
+	if len(nodes) == 0 {
+		return out
+	}
+	claimByPV := map[string]string{}
+	for i := range s.PVs {
+		pv := &s.PVs[i]
+		if pv.Spec.ClaimRef != nil {
+			claimByPV[pv.Name] = pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
+		}
+	}
+	for i := range s.PVCs {
+		if v := s.PVCs[i].Spec.VolumeName; v != "" {
+			claimByPV[v] = s.PVCs[i].Namespace + "/" + s.PVCs[i].Name
+		}
+	}
+	for node, ni := range nodes {
+		if ni == nil || ni.Err != nil {
+			continue
+		}
+		for _, m := range ni.PVMounts {
+			key, ok := claimByPV[m.PV]
+			if !ok {
+				continue
+			}
+			if _, have := out[key]; have {
+				continue
+			}
+			out[key] = k8s.VolumeUsage{Capacity: m.SizeKB * 1024, Used: m.UsedKB * 1024, Available: m.AvailKB * 1024, Node: node, Pod: "(ssh df)"}
+		}
+	}
+	return out
 }
 
 func firstLine(s string) string {

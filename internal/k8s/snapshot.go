@@ -59,7 +59,10 @@ type Snapshot struct {
 
 	// PVCUsage is filesystem usage of mounted PVCs from kubelet stats/summary,
 	// keyed by "namespace/claim".
-	PVCUsage map[string]VolumeUsage
+	PVCUsage    map[string]VolumeUsage
+	PVCUsageErr string // first error from stats/summary (RBAC etc.)
+
+	CRDs []CRDInfo
 
 	RKE2Snapshots []EtcdSnapshotRecord
 	HelmCharts    []HelmChartCR
@@ -416,6 +419,16 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		s.Rancher = r
 		mu.Unlock()
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		crds, err := c.ListCRDs(ctx)
+		mu.Lock()
+		if err == nil {
+			s.CRDs = crds
+		}
+		mu.Unlock()
+	}()
 	wg.Wait()
 
 	// kubelet configz needs the node list first
@@ -428,11 +441,14 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			cfg, err := c.kubeletConfigz(ctx, name)
-			usage, _ := c.kubeletVolumeStats(ctx, name)
+			usage, uerr := c.kubeletVolumeStats(ctx, name)
 			mu.Lock()
 			defer mu.Unlock()
 			for k, v := range usage {
 				s.PVCUsage[k] = v
+			}
+			if uerr != nil && s.PVCUsageErr == "" {
+				s.PVCUsageErr = uerr.Error()
 			}
 			if err != nil {
 				if s.KubeletCfgErr == "" {

@@ -26,6 +26,7 @@ type Info struct {
 	SwapTotal, SwapFree    uint64
 	MemPct                 float64
 	Mounts                 []Mount
+	PVMounts               []PVMount // PV filesystems mounted for pods (df on kubelet volume dirs)
 	Services               []Service
 	Units                  []Unit
 	NTPSynced              *bool
@@ -67,6 +68,14 @@ type Mount struct {
 	SizeKB, UsedKB, AvailKB      int64
 	UsePct                       int
 	InodePct                     int
+}
+
+// PVMount is a pod volume mount reported by df on the node.
+type PVMount struct {
+	PV                      string // volume/PV name from the mount path
+	Mountpoint              string
+	SizeKB, UsedKB, AvailKB int64
+	UsePct                  int
 }
 
 // Service is a systemd unit state.
@@ -184,6 +193,7 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	parseMem(info, secs["MEM"])
 	info.Mounts = parseDF(secs["DF"])
 	applyInodes(info.Mounts, secs["DFI"])
+	info.PVMounts = parsePVMounts(secs["PVMOUNTS"])
 	for _, l := range nonEmpty(secs["SVC"]) {
 		f := strings.Fields(l)
 		if len(f) >= 4 {
@@ -453,6 +463,36 @@ func parseDF(s string) []Mount {
 		out = append(out, m)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Mountpoint < out[j].Mountpoint })
+	return out
+}
+
+// parsePVMounts reads "size|used|avail|use%|mountpoint" lines and derives the
+// PV name from paths like .../volumes/kubernetes.io~csi/pvc-1234/mount.
+func parsePVMounts(s string) []PVMount {
+	var out []PVMount
+	seen := map[string]bool{}
+	for _, l := range nonEmpty(s) {
+		f := strings.SplitN(l, "|", 5)
+		if len(f) != 5 {
+			continue
+		}
+		m := PVMount{Mountpoint: f[4]}
+		m.SizeKB, _ = strconv.ParseInt(f[0], 10, 64)
+		m.UsedKB, _ = strconv.ParseInt(f[1], 10, 64)
+		m.AvailKB, _ = strconv.ParseInt(f[2], 10, 64)
+		m.UsePct, _ = strconv.Atoi(strings.TrimSuffix(f[3], "%"))
+		parts := strings.Split(m.Mountpoint, "/")
+		for i, seg := range parts {
+			if strings.HasPrefix(seg, "kubernetes.io~") && i+1 < len(parts) {
+				m.PV = parts[i+1]
+			}
+		}
+		if m.PV == "" || seen[m.PV] {
+			continue
+		}
+		seen[m.PV] = true
+		out = append(out, m)
+	}
 	return out
 }
 

@@ -42,22 +42,38 @@ func (a *App) etcdContent() content {
 		}
 	}
 
-	// members (from any probe that has them)
+	// members: kubectl-exec probe first (cluster-wide), else any SSH probe
 	var memberProbe string
-	for _, n := range sortedKeys(a.etcd) {
-		if len(a.etcd[n].Members) > 0 {
-			memberProbe = n
-			break
+	probes := map[string]*etcdpkg.Probe{}
+	for n, p := range a.etcd {
+		probes[n] = p
+	}
+	if x := a.etcdExec; x != nil && x.Err == nil && len(x.Members) > 0 {
+		memberProbe = "kubectl-exec"
+		probes[memberProbe] = x
+	} else {
+		for _, n := range sortedKeys(a.etcd) {
+			if len(a.etcd[n].Members) > 0 {
+				memberProbe = n
+				break
+			}
 		}
+	}
+	if x := a.etcdExec; x != nil && x.Err != nil {
+		add(styleDim.Render("kubectl exec probe: ") + styleWarn.Render(firstLine(x.Err.Error())) + styleDim.Render("  (needs pods/exec on kube-system; SSH probes still apply)"))
 	}
 	// statuses can come from one etcdctl --cluster call or one gateway call per node
 	statusByID := map[string]*etcdpkg.EndpointStatus{}
-	for _, n := range sortedKeys(a.etcd) {
-		for i := range a.etcd[n].Statuses {
-			st := &a.etcd[n].Statuses[i]
+	healthByEP := map[string]etcdpkg.EndpointHealth{}
+	for _, n := range sortedKeys(probes) {
+		for i := range probes[n].Statuses {
+			st := &probes[n].Statuses[i]
 			if st.MemberID != "" {
 				statusByID[st.MemberID] = st
 			}
+		}
+		for _, h := range probes[n].EndpointHealth {
+			healthByEP[h.Endpoint] = h
 		}
 	}
 	add("", styleTitle.Render("Members"))
@@ -83,11 +99,17 @@ func (a *App) etcdContent() content {
 		}
 		add(styleDim.Render("  enter shows the raw probe output; set etcd.ca_cert/client_cert/client_key/endpoint in the config for non-standard layouts"))
 	} else {
-		p := a.etcd[memberProbe]
+		p := probes[memberProbe]
 		var rows [][]string
 		for _, m := range p.Members {
 			st := statusByID[m.ID]
 			ver, db, inuse, leader, term, idx, errs := "-", "-", "-", "", "-", "-", ""
+			health := styleDim.Render("-")
+			for _, u := range m.ClientURLs {
+				if h, ok := healthByEP[u]; ok {
+					health = okText(h.Healthy, "healthy "+h.Took, "UNHEALTHY "+firstLine(h.Error))
+				}
+			}
 			if st != nil {
 				ver = st.Version
 				db = humanBytes(float64(st.DBSize))
@@ -107,12 +129,12 @@ func (a *App) etcdContent() content {
 			if m.IsLearner {
 				learner = styleWarn.Render("learner")
 			}
-			rows = append(rows, []string{m.ID, m.Name, strings.Join(m.PeerURLs, ","), ver, db, inuse, leader, term, idx, learner, errs})
+			rows = append(rows, []string{m.ID, m.Name, strings.Join(m.PeerURLs, ","), health, ver, db, inuse, leader, term, idx, learner, errs})
 		}
-		h, lines := renderTable(a.width, []column{{title: "ID"}, {title: "NAME"}, {title: "PEER URL", max: 40}, {title: "VERSION"}, {title: "DB", right: true}, {title: "IN USE", right: true}, {title: "ROLE"}, {title: "TERM", right: true}, {title: "INDEX", right: true}, {title: ""}, {title: "ERRORS"}}, rows)
+		h, lines := renderTable(a.width, []column{{title: "ID"}, {title: "NAME"}, {title: "PEER URL", max: 40}, {title: "HEALTH"}, {title: "VERSION"}, {title: "DB", right: true}, {title: "IN USE", right: true}, {title: "ROLE"}, {title: "TERM", right: true}, {title: "INDEX", right: true}, {title: ""}, {title: "ERRORS"}}, rows)
 		add(h)
 		add(lines...)
-		add(styleDim.Render(fmt.Sprintf("  via %s on %s", p.EtcdctlVia, memberProbe)))
+		add(styleDim.Render(fmt.Sprintf("  via %s (member list first, then endpoint health/status against every client URL)", p.EtcdctlVia)))
 		alarms := "none"
 		if len(p.Alarms) > 0 {
 			var al []string
@@ -412,6 +434,19 @@ func fmtMs(v float64) string {
 func (a *App) etcdDetail() (string, []string) {
 	var out []string
 	w := a.width - 6
+	if x := a.etcdExec; x != nil {
+		out = append(out, styleTitle.Render("== kubectl exec probe ==")+"  "+kv("via", x.EtcdctlVia)+"  "+kv("collected", age(x.Collected)+" ago"))
+		if x.Err != nil {
+			out = append(out, styleCrit.Render(x.Err.Error()))
+		}
+		if x.Stderr != "" {
+			out = append(out, styleWarn.Render("stderr: "+firstLine(x.Stderr)))
+		}
+		for _, l := range strings.Split(strings.TrimSpace(x.EtcdctlOut), "\n") {
+			out = append(out, trunc(l, w))
+		}
+		out = append(out, "")
+	}
 	for _, n := range sortedKeys(a.etcd) {
 		p := a.etcd[n]
 		out = append(out, styleTitle.Render("== "+n+" ==")+"  "+kv("dist", p.Dist)+"  "+kv("collected", age(p.Collected)+" ago"))

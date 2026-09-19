@@ -34,16 +34,17 @@ type Probe struct {
 	ConfigDump []ConfigFile // masked config file excerpts
 	RKE2Config map[string]string
 
-	Health      *Health
-	Metrics     *Metrics
-	EtcdctlVia  string
-	EtcdctlDiag string
-	Stderr      string
-	Missing     []string // cert/tool paths that were expected but not readable
-	Members     []Member
-	Statuses    []EndpointStatus
-	Alarms      []Alarm
-	EtcdctlOut  string
+	Health         *Health
+	Metrics        *Metrics
+	EtcdctlVia     string
+	EtcdctlDiag    string
+	Stderr         string
+	Missing        []string // cert/tool paths that were expected but not readable
+	Members        []Member
+	Statuses       []EndpointStatus
+	Alarms         []Alarm
+	EndpointHealth []EndpointHealth
+	EtcdctlOut     string
 
 	DataDirUsedKB int64
 	DataDirFS     *FS

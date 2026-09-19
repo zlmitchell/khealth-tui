@@ -70,6 +70,7 @@ sleep 1
 sec STAT2; head -1 /proc/stat
 sec MEM; cat /proc/meminfo
 sec DF; df -PkT -x tmpfs -x devtmpfs -x overlay -x squashfs -x nsfs -x efivarfs -x fuse.lxcfs -x shm 2>/dev/null || df -Pk
+sec PVMOUNTS; df -Pk 2>/dev/null | grep -E 'kubelet/(pods|plugins)/.*/volumes/' | awk '{print $2"|"$3"|"$4"|"$5"|"$6}'
 sec DFI; df -Pki -x tmpfs -x devtmpfs -x overlay -x squashfs -x nsfs -x efivarfs -x fuse.lxcfs -x shm 2>/dev/null
 sec SVC
 for s in kubelet containerd rke2-server rke2-agent k3s k3s-agent etcd docker crio rancher-system-agent chronyd chrony ntpd ntp systemd-timesyncd firewalld ufw nftables iptables apparmor; do

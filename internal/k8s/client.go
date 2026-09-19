@@ -4,8 +4,10 @@ package k8s
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -19,6 +21,9 @@ type Client struct {
 	Config  *rest.Config
 	Context string
 	Host    string
+
+	mapperOnce sync.Once
+	restMapper meta.RESTMapper
 }
 
 // New builds a Client from a kubeconfig path (empty = default loading rules)
