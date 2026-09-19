@@ -42,7 +42,7 @@ sparklines inline. History is kept in memory for the session (90 samples).
 
 **Node hardening** (per node, over SSH): SELinux runtime vs `/etc/selinux/config`, AppArmor, FIPS (`/proc/sys/crypto/fips_enabled` vs `fips=1` in grub / Ubuntu Pro), fapolicyd, auditd (+ rule count), firewalld/ufw (runtime vs unit-file / `ufw.conf`), Secure Boot, kernel lockdown, crypto policy, pending reboot. Runtime/boot mismatches are findings. The node detail (Enter on Nodes) opens with a dashboard of gauges and this table.
 
-Keys: `Tab`/`Shift+Tab` switch tabs, `h`/`l` switch sub-tabs, `j/k` move, `Enter` detail, `n` namespace,
+Keys: `Tab`/`Shift+Tab` (or `[`/`]`, number keys) switch tabs, `←`/`→` or `h`/`l` switch sub-tabs inside a tab, `j/k` move, `Enter` detail, `n` namespace,
 `/` filter, `a` problems-only, `r` refresh, `R` full refresh (logs/images),
 `s` toggle SSH, `?` help, `q` quit.
 

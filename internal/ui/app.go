@@ -749,19 +749,19 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "q":
 		return a, tea.Quit
-	case "tab", "]", "right":
+	case "tab", "]":
 		a.tab = (a.tab + 1) % tabCount
 		if a.tab == tabCRDs {
 			return a, a.crdCountCmd()
 		}
-	case "shift+tab", "[", "left":
+	case "shift+tab", "[":
 		a.tab = (a.tab + tabCount - 1) % tabCount
 		if a.tab == tabCRDs {
 			return a, a.crdCountCmd()
 		}
-	case "l":
+	case "l", "right":
 		a.setSub(1)
-	case "h":
+	case "h", "left":
 		a.setSub(-1)
 	case "n":
 		a.overlay = ovNamespace
@@ -1196,7 +1196,7 @@ func (a *App) renderSubTabs() string {
 			b.WriteString(styleDim.Render("│"))
 		}
 	}
-	b.WriteString(styleDim.Render("   h/l switch"))
+	b.WriteString(styleDim.Render("   ←/→ or h/l switch"))
 	return trunc(b.String(), a.width)
 }
 
@@ -1281,7 +1281,7 @@ func (a *App) renderBody() string {
 }
 
 func (a *App) renderFooter() string {
-	keys := []string{"tab/1-9 switch", "j/k move", "enter inspect", "n namespace", "/ filter", "a problems", "r refresh", "R full", "s ssh", "? help", "q quit"}
+	keys := []string{"tab switch", "←/→ sub-tab", "j/k move", "enter inspect", "n namespace", "/ filter", "a problems", "r refresh", "R full", "s ssh", "? help", "q quit"}
 	var parts []string
 	for _, k := range keys {
 		kk, rest, _ := strings.Cut(k, " ")
@@ -1351,7 +1351,8 @@ func (a *App) renderOverlay() string {
 func helpLines() []string {
 	return []string{
 		styleBold.Render("Navigation"),
-		"  tab / shift+tab / [ ]    next / previous tab        1-9 0 -   jump to tab",
+		"  tab / shift+tab / [ ]    next / previous tab        1-9 0 - = c   jump to tab",
+		"  left / right or h / l    previous / next sub-tab inside the current tab",
 		"  j/k or arrows            move selection / scroll    g / G     top / bottom",
 		"  PgUp / PgDn / space      page                       enter     open detail for the selected row",
 		"  esc                      close overlay / clear filter",
