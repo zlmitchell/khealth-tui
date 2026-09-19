@@ -422,10 +422,10 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		crds, err := c.ListCRDs(ctx)
+		res, err := c.ListResources(ctx)
 		mu.Lock()
 		if err == nil {
-			s.CRDs = crds
+			s.CRDs = res
 		}
 		mu.Unlock()
 	}()

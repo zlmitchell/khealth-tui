@@ -42,8 +42,12 @@ func (a *App) crdsContent() content {
 	groups := map[string]bool{}
 	problems := 0
 	total := 0
+	custom := 0
 	for _, c := range crds {
 		groups[c.Group] = true
+		if c.Custom {
+			custom++
+		}
 		if len(c.Problems) > 0 || !c.Established {
 			problems++
 		}
@@ -58,8 +62,8 @@ func (a *App) crdsContent() content {
 		countNote = "counts pending"
 	}
 	hdr := []string{
-		styleTitle.Render("Custom Resource Definitions") + "  " + kv("CRDs", fmt.Sprint(len(crds))) + "  " + kv("groups", fmt.Sprint(len(groups))) + "  " + kv("problems", colorCount(problems, "CRDs not established / with conditions", styleCrit)) + "  " + styleDim.Render(countNote),
-		styleDim.Render("enter lists the instances (then enter again inspects one: status, conditions, references, YAML). / filters, a shows only CRDs with instances."),
+		styleTitle.Render("API resources") + "  " + kv("types", fmt.Sprintf("%d (%d from CRDs)", len(crds), custom)) + "  " + kv("groups", fmt.Sprint(len(groups))) + "  " + kv("problems", colorCount(problems, "CRDs not established / with conditions", styleCrit)) + "  " + styleDim.Render(countNote),
+		styleDim.Render("built-in and custom types from API discovery. enter lists the instances (enter again inspects one: status, conditions, references, YAML). / filters, a shows only types with instances."),
 	}
 	var rows [][]string
 	var ids []string
@@ -81,12 +85,20 @@ func (a *App) crdsContent() content {
 		case c.Count == 0:
 			count = styleDim.Render("0")
 		}
-		rows = append(rows, []string{c.Kind, c.Group, strings.Join(c.Versions, ","), c.Scope, count, age(c.Created), state})
+		group := c.Group
+		if group == "" {
+			group = styleDim.Render("core")
+		}
+		src := styleDim.Render("built-in")
+		if c.Custom {
+			src = styleInfo.Render("CRD")
+		}
+		rows = append(rows, []string{c.Kind, group, strings.Join(c.Versions, ","), c.Scope, src, count, age(c.Created), state})
 		ids = append(ids, fmt.Sprint(i))
 	}
-	h, lines := renderTable(a.width, []column{{title: "KIND"}, {title: "GROUP", max: 40}, {title: "VERSIONS", max: 24}, {title: "SCOPE"}, {title: "COUNT", right: true}, {title: "AGE", right: true}, {title: "STATE"}}, rows)
+	h, lines := renderTable(a.width, []column{{title: "KIND"}, {title: "GROUP", max: 40}, {title: "VERSIONS", max: 24}, {title: "SCOPE"}, {title: "SOURCE"}, {title: "COUNT", right: true}, {title: "AGE", right: true}, {title: "STATE"}}, rows)
 	hdr = append(hdr, h)
-	c := content{header: hdr, selectable: true, empty: "no CRDs (or no permission to list customresourcedefinitions)"}
+	c := content{header: hdr, selectable: true, empty: "no API resources discovered"}
 	for i, l := range lines {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
@@ -133,6 +145,9 @@ func (a *App) openCRDInstances(id string) tea.Cmd {
 			kv("instances", fmt.Sprintf("%d listed (max 500)", len(items))) + "  " + kv("unhealthy", colorCount(bad, "with failed/false conditions", styleCrit)),
 		}
 		apiVersion := info.Group + "/" + info.Storage
+		if info.Group == "" {
+			apiVersion = info.Storage
+		}
 		for _, it := range items {
 			via := it.Phase
 			if it.Ready != "" {

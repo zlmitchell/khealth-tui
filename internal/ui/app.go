@@ -50,7 +50,7 @@ var tabKeys = [...]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-",
 // subTabs are second-level views of a tab (h/l switch). "Inspect" renders
 // the object inspector in the body instead of an overlay.
 var subTabs = map[tab][]string{
-	tabWorkloads: {"Controllers", "Pods", "CRDs", "Object"},
+	tabWorkloads: {"Controllers", "Pods", "Resources", "Object"},
 	tabEvents:    {"Events", "Object"},
 	tabLogs:      {"Nodes", "Lines"},
 	tabSecurity:  {"Rules", "Node hardening"},
@@ -169,7 +169,7 @@ func (a *App) subName() string {
 }
 
 // onCRDs reports whether the CRDs sub-tab is showing.
-func (a *App) onCRDs() bool { return a.tab == tabWorkloads && a.subName() == "CRDs" }
+func (a *App) onCRDs() bool { return a.tab == tabWorkloads && a.subName() == "Resources" }
 
 // inInspect reports whether the body currently shows the inspector.
 func (a *App) inInspect() bool { return a.subName() == subInspect }
@@ -1376,7 +1376,7 @@ func helpLines() []string {
 		"  Nodes      conditions + live CPU/mem/disk/load from SSH (or metrics-server), certs, services",
 		"  Inspect    controllers (deploy/ds/sts/job/cronjob) then pods not owned by one; p = all pods; t = rollout restart;",
 		"             enter opens the Object sub-tab: owner/child/secret/configmap/PVC/SA references, enter again drills down, esc back",
-		"             CRDs sub-tab: every CustomResourceDefinition with instance counts; enter lists instances, enter again inspects one",
+		"             Resources sub-tab: every API type (built-in + CRDs) with instance counts; enter lists instances, enter again inspects one",
 		"  etcd       members, health, db size/quota/fragmentation, fsync latency, config source, snapshots/backups",
 		"  Storage    StorageClasses, CSI drivers, PVs/PVCs and node filesystems",
 		"  Events     warning events",

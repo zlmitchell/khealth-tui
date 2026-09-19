@@ -132,7 +132,7 @@ func TestRenderAllTabsAndDetails(t *testing.T) {
 	_ = a.View()
 	a.wlPods = false
 	a.tab = tabWorkloads
-	a.sub[tabWorkloads] = 2 // CRDs
+	a.sub[tabWorkloads] = 2 // Resources
 	if !a.onCRDs() {
 		t.Errorf("CRDs sub-tab not active")
 	}

@@ -27,7 +27,7 @@ func (a *App) workloadsContent() content {
 	switch a.subName() {
 	case "Pods":
 		return a.podsContent()
-	case "CRDs":
+	case "Resources":
 		return a.crdsContent()
 	}
 	s := a.snap

@@ -31,19 +31,21 @@ type ObjRef struct {
 // Key returns kind/ns/name for de-duplication.
 func (r ObjRef) Key() string { return r.Kind + "/" + r.Namespace + "/" + r.Name }
 
-// CRDInfo summarises a CustomResourceDefinition.
+// CRDInfo summarises an API resource type: a CustomResourceDefinition or a
+// built-in resource discovered from the API server.
 type CRDInfo struct {
-	Name        string // plural.group
+	Name        string // plural.group (plural for core)
 	Group       string
 	Kind        string
 	Plural      string
 	Scope       string // Namespaced | Cluster
 	Versions    []string
-	Storage     string // storage version
+	Storage     string // storage/preferred version
 	Established bool
-	Problems    []string // non-True conditions
+	Problems    []string // non-True conditions (CRDs)
 	Count       int      // -1 = unknown
 	Created     time.Time
+	Custom      bool // defined by a CRD
 }
 
 // GVR returns the resource for the storage version.
@@ -522,6 +524,77 @@ func (c *Client) ListCRDs(ctx context.Context) ([]CRDInfo, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// ListResources returns every listable API resource type (built-in and
+// custom), with CRD status merged in for the custom ones.
+func (c *Client) ListResources(ctx context.Context) ([]CRDInfo, error) {
+	lists, err := c.CS.Discovery().ServerPreferredResources()
+	if err != nil && len(lists) == 0 {
+		return nil, err
+	}
+	crds, _ := c.ListCRDs(ctx)
+	byName := map[string]CRDInfo{}
+	for _, cr := range crds {
+		byName[cr.Name] = cr
+	}
+	var out []CRDInfo
+	seen := map[string]bool{}
+	for _, l := range lists {
+		gv, err := schema.ParseGroupVersion(l.GroupVersion)
+		if err != nil {
+			continue
+		}
+		for _, r := range l.APIResources {
+			if strings.Contains(r.Name, "/") || !hasVerb(r.Verbs, "list") || !hasVerb(r.Verbs, "get") {
+				continue
+			}
+			name := r.Name
+			if gv.Group != "" {
+				name = r.Name + "." + gv.Group
+			}
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			info := CRDInfo{Name: name, Group: gv.Group, Kind: r.Kind, Plural: r.Name, Storage: gv.Version, Versions: []string{gv.Version}, Scope: "Cluster", Count: -1, Established: true}
+			if r.Namespaced {
+				info.Scope = "Namespaced"
+			}
+			if cr, ok := byName[name]; ok {
+				info.Custom = true
+				info.Versions = cr.Versions
+				info.Storage = cr.Storage
+				info.Established = cr.Established
+				info.Problems = cr.Problems
+				info.Created = cr.Created
+			}
+			out = append(out, info)
+		}
+	}
+	// CRDs that discovery did not list (not established) still deserve a row
+	for _, cr := range crds {
+		if !seen[cr.Name] {
+			cr.Custom = true
+			out = append(out, cr)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Group != out[j].Group {
+			return out[i].Group < out[j].Group
+		}
+		return out[i].Kind < out[j].Kind
+	})
+	return out, nil
+}
+
+func hasVerb(verbs []string, v string) bool {
+	for _, x := range verbs {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // CountCRs fills Count for each CRD using limit=1 list calls (parallel).
