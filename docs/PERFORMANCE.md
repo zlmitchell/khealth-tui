@@ -65,9 +65,11 @@ One-off cycles:
 
 | | before | after |
 |---|---|---|
-| first contact (light + config + OS STIG + heavy) | 4.99 s CPU, 7.3 s wall, 1.3 MB | **2.3 s CPU**, ~7 s wall (the wall is `sleep 1` + `find` scans with `timeout 20`) |
+| first contact (light + config + heavy) | 4.99 s CPU, 7.3 s wall, 1.3 MB | **~1.6 s CPU**, ~2.5 s wall (1 s of it the one-time CPU sample) |
+| OS STIG facts (`S` on the Security tab) | 7.2 s CPU, 7.4 s wall - and the filesystem sweep stopped at 200 container-rootfs hits before reaching the host | **~3.5 s CPU / ~3.5 s wall**, of which the full host sweep (175 K entries) is 2.0 s / 1.4 s |
 | first API snapshot (discovery + every CRD schema + helm payloads) | 18.7 MB | 18.7 MB, then cached (5 min / until a release changes) |
 | `find` scans in the OS STIG probe | 174 | **39** (same output) |
+| local `stig.Evaluate` per node per recompute | 3.5 ms, 1.2 MB allocated | **2.7 ms, 0.7 MB** (compiled patterns cached) |
 
 The independent node sampler (1/s over a second SSH session) on that box:
 baseline 26 % CPU across all cores, 37 % while five probe cycles ran back to
@@ -100,9 +102,18 @@ is spread over 2.5 minutes.
     (`needs-restarting` alone is 0.3 s of python);
   - **heavy** (same cadence): journal, `crictl images/ps`, tarball manifests
     (cached by path/size/mtime), `du` of hostPath PVs;
-  - **OS STIG** (first contact and `R` only): `sysctl -a`, package list, unit
-    files, `find` scans (de-duplicated across the RHEL 8/9/10 and Ubuntu
-    rule sets), config dumps.
+  - **OS STIG** (`S` on the Security tab only): `sysctl -a`, package list,
+    unit files, `find` scans (de-duplicated across the RHEL 8/9/10 and
+    Ubuntu rule sets), config dumps, and one filesystem sweep. The sweep
+    walks host filesystems only - overlay/nsfs mounts are running
+    containers' root filesystems (150+ on a busy node) and containerd /
+    docker image layer stores and kubelet pod volumes are pruned - in a
+    single `find -printf` pass whose uid/gid checks run in awk against the
+    account database: find's own `-nouser`/`-nogroup` call NSS once per
+    file, which with `sss` in nsswitch was 25 s for the host. Unknown ids
+    are confirmed with a few `getent` lookups so domain users still
+    resolve. `timedatectl`, `update-crypto-policies --show` and
+    `dnf repolist` were replaced by reading the files they report.
   Results of the non-live tiers are carried forward (`Info.MergeConfig`,
   `MergeHeavy`, `MergeSTIG`) so nothing disappears from the UI in between.
 - systemd is queried once per script, not once per unit: each `systemctl show`
@@ -154,6 +165,28 @@ is spread over 2.5 minutes.
 - The STIG + checks evaluation over all nodes used to run once per node
   message (O(nodes²) per cycle); node/etcd/helm/S3 messages now mark the state
   dirty and one recompute runs 250 ms later.
+
+## Offline / airgapped environments
+
+Everything the tool does is local to the operator's machine, the API server
+and the nodes, except three things:
+
+- **Helm update check** (operator machine -> chart repos / Artifact Hub): a
+  2 s TCP reachability probe first, then helm's own cached `index.yaml` as
+  the fallback, and unreachable hosts are not retried for 10 minutes.
+  `helm.check_updates: false` / `--helm-updates=false` turns it off.
+- **Preflight registry probe** (node -> each endpoint in `registries.yaml`,
+  `curl`, 6 s cap, config cycles only): explicit mirror endpoints and
+  `configs` keys are what you configured and are probed - on an airgapped
+  node an unreachable internal Harbor is a real finding. A mirror that names
+  a registry without endpoints (`mirrors: docker.io: {}`) would make the
+  node contact the upstream registry itself; when the node has image
+  tarballs in `agent/images` (airgap install) those are **not probed at
+  all** - no egress attempt to trip a firewall alert, no "unreachable"
+  finding - and appear as `skip` in the node's preflight table.
+- **etcd S3 snapshot check** (node -> the S3 endpoint you configured).
+
+No DNS, package repository, vendor site or telemetry is contacted.
 
 ## Reading the numbers when troubleshooting
 

@@ -206,6 +206,14 @@ Then:
 4. Extend the expectations in `stig_test.go` (`TestEvaluate`,
    `TestRancherRules`).
 
+Some rules combine sources: V-274882 (secrets encrypted at rest) reads the
+apiserver flag from the mirror pod, the provider order from the running
+apiserver's config (the etcd probe prints only the provider / resource
+token names, never key material) and a Secret sampled from etcd (first 24
+bytes; `k8s:enc:<provider>:` proves the stored value is encrypted, raw
+protobuf proves it is not). The flag alone is Manual, because secrets
+written before encryption was enabled stay plaintext until rewritten.
+
 Use `Manual` when the rule needs judgement or data we do not collect;
 `NA` when it does not apply to this distribution; `Unknown` when we could
 not read the input (RBAC). Never emit FAIL for missing data.

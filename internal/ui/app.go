@@ -159,6 +159,27 @@ type App struct {
 	fp footprint // the tool's own cost per cycle (P overlay, --perf-log)
 }
 
+// tabName is the label of a tab. The distribution tab is named after what
+// was detected: RKE2, k3s, kubeadm (API endpoint / kubeadm-config) or Config
+// until the distribution is known.
+func (a *App) tabName(t tab) string {
+	if t != tabRKE2 {
+		return tabNames[t]
+	}
+	if a.snap == nil {
+		return "Config"
+	}
+	switch a.snap.Distribution {
+	case "rke2":
+		return "RKE2"
+	case "k3s":
+		return "k3s"
+	case "kubeadm":
+		return "kubeadm"
+	}
+	return "Config"
+}
+
 // subName returns the active sub-tab name ("" when the tab has none).
 func (a *App) subName() string {
 	st := subTabs[a.tab]
@@ -591,11 +612,19 @@ func (a *App) recompute() {
 			a.logSum[name] = logs.ClassifySources(srcs, time.Now())
 		}
 	}
-	a.stigRes = stig.Evaluate(stig.Input{Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd})
+	a.stigRes = stig.Evaluate(stig.Input{Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec})
 	a.findings = checks.Evaluate(checks.Input{
 		Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec, S3: a.s3, S3Reach: a.s3Reach, Logs: a.logSum, Stig: a.stigRes,
-		HelmLatest: a.helmLatest, SSHEnabled: a.sshEnabled, SSHErr: a.sshErr, Cfg: a.cfg, Now: time.Now(),
+		HelmLatest: a.helmLatest, SSHEnabled: a.sshEnabled, SSHErr: a.sshErr, Cfg: a.cfg, Now: time.Now(), APIServer: a.apiServer(),
 	})
+}
+
+// apiServer is the kubeconfig server URL ("" without a client, as in tests).
+func (a *App) apiServer() string {
+	if a.client == nil {
+		return ""
+	}
+	return a.client.Host
 }
 
 // recordSnapshot appends cluster-level series points after an API refresh.
@@ -1525,7 +1554,8 @@ func (a *App) renderHeader() string {
 func (a *App) renderTabs() string {
 	var b strings.Builder
 	b.WriteString(styleTabBar.Render(" "))
-	for i, name := range tabNames {
+	for i := range tabNames {
+		name := a.tabName(tab(i))
 		if tab(i) == a.tab {
 			b.WriteString(styleTabOn.Render(tabKeys[i] + " " + name))
 		} else {
@@ -1539,7 +1569,7 @@ func (a *App) renderTabs() string {
 	}
 	strip = trunc(strip, a.width)
 
-	title := " " + tabNames[a.tab] + " "
+	title := " " + a.tabName(a.tab) + " "
 	rule := styleRule.Render("━━") + styleRuleTitle.Render(title)
 	if w := ansi.StringWidth(rule); w < a.width {
 		rule += styleRule.Render(strings.Repeat("━", a.width-w))
@@ -1795,7 +1825,8 @@ func helpLines() []string {
 		"             OS STIG: every rule of the node's DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG - empty until you press S",
 		"  Logs       rke2/kubelet/containerd/rancher-system-agent logs classified into startup-noise / warnings / errors (Rancher plan events flag config rewrites)",
 		"             enter on a node lists its lines; enter on a line shows the full text + explanation; esc goes back; a shows info lines",
-		"  RKE2       config.yaml(.d), data-dir, server/manifests (HelmChartConfig etc.), static pod manifests, audit/PSS policies, config drift",
+		"  RKE2/k3s   config.yaml(.d), data-dir, server/manifests (HelmChartConfig etc.), static pod manifests, audit/PSS policies, config drift, API endpoint vs tls-san vs cert",
+		"  kubeadm    (same tab on upstream clusters) kubeadm-config ClusterConfiguration, API endpoint vs certSANs vs apiserver.crt",
 		"",
 		styleDim.Render("Config: ~/.config/k8s-health-tui/config.yaml (khealth --init-config writes the annotated example)"),
 	}

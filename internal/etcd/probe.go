@@ -41,6 +41,10 @@ type Probe struct {
 	ConfigDump []ConfigFile // masked config file excerpts
 	RKE2Config map[string]string
 
+	// Encryption at rest: the apiserver's provider configuration (token
+	// names only) and a sampled Secret from etcd proving what is stored.
+	Encryption *Encryption
+
 	Health         *Health
 	Metrics        *Metrics
 	EtcdctlVia     string
@@ -160,6 +164,46 @@ type SnapshotDir struct {
 	Files []SnapshotFile
 }
 
+// Encryption is the evidence behind "secrets encrypted at rest".
+type Encryption struct {
+	ConfigFile   string   // --encryption-provider-config of the running apiserver
+	Tokens       []string // provider / resource tokens in file order (aescbc, identity, secrets, ...)
+	SampleKey    string   // etcd key of the sampled Secret
+	SamplePrefix string   // first 24 printable bytes of its stored value
+}
+
+var providerNames = map[string]bool{"aescbc": true, "aesgcm": true, "secretbox": true, "kms": true, "identity": true}
+
+// Providers lists the providers in configuration order.
+func (e *Encryption) Providers() []string {
+	if e == nil {
+		return nil
+	}
+	var out []string
+	for _, t := range e.Tokens {
+		if providerNames[t] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// Sampled reports whether a Secret was read from etcd and whether it was
+// stored encrypted; Provider is the provider named in the stored prefix.
+func (e *Encryption) Sampled() (sampled, encrypted bool, provider string) {
+	if e == nil || e.SamplePrefix == "" {
+		return false, false, ""
+	}
+	if !strings.HasPrefix(e.SamplePrefix, "k8s:enc:") {
+		return true, false, ""
+	}
+	f := strings.Split(e.SamplePrefix, ":")
+	if len(f) >= 3 {
+		provider = f[2]
+	}
+	return true, true, provider
+}
+
 // SnapshotFile is one snapshot on disk.
 type SnapshotFile struct {
 	Name    string
@@ -246,6 +290,21 @@ func Parse(node, out string) *Probe {
 	}
 	if m := strings.TrimSpace(secs["METRICS"]); m != "" {
 		p.Metrics = parseMetrics(m)
+	}
+	for _, l := range lines(secs["ENCCONFIG"]) {
+		k, v, ok := strings.Cut(strings.TrimSpace(l), "=")
+		if !ok {
+			continue
+		}
+		if p.Encryption == nil {
+			p.Encryption = &Encryption{}
+		}
+		switch k {
+		case "file":
+			p.Encryption.ConfigFile = v
+		case "tokens":
+			p.Encryption.Tokens = strings.Fields(v)
+		}
 	}
 	parseEtcdctl(p, secs["ETCDCTL"])
 	parseLeaderLog(p, secs["LEADERLOG"])
@@ -396,6 +455,12 @@ func (p *Probe) Merge(prev *Probe) {
 		p.EtcdctlVia, p.EtcdctlDiag, p.EtcdctlOut = prev.EtcdctlVia, prev.EtcdctlDiag, prev.EtcdctlOut
 		p.Members, p.Statuses, p.Alarms, p.EndpointHealth = prev.Members, prev.Statuses, prev.Alarms, prev.EndpointHealth
 		p.EtcdctlSkipped = false
+		if prev.Encryption != nil && (p.Encryption == nil || p.Encryption.SamplePrefix == "") {
+			if p.Encryption == nil {
+				p.Encryption = &Encryption{}
+			}
+			p.Encryption.SampleKey, p.Encryption.SamplePrefix = prev.Encryption.SampleKey, prev.Encryption.SamplePrefix
+		}
 	}
 }
 
@@ -657,6 +722,21 @@ func parseEtcdctl(p *Probe, raw string) {
 				continue
 			}
 			p.Alarms = append(p.Alarms, Alarm{MemberID: hexID(numStr(m["memberID"])), Type: t})
+		}
+	}
+	if enc := strings.TrimSpace(parts["ENCSAMPLE"]); enc != "" {
+		if p.Encryption == nil {
+			p.Encryption = &Encryption{}
+		}
+		for _, l := range strings.Split(enc, "\n") {
+			if k, v, ok := strings.Cut(strings.TrimSpace(l), "="); ok {
+				switch k {
+				case "key":
+					p.Encryption.SampleKey = v
+				case "prefix":
+					p.Encryption.SamplePrefix = v
+				}
+			}
 		}
 	}
 }

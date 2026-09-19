@@ -2,6 +2,7 @@ package stig
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -10,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
+	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
 )
@@ -275,5 +277,45 @@ func TestScores(t *testing.T) {
 	}
 	if ShortBenchmark("DISA RHEL 9 STIG V2R9 (01 Jul 2026)") != "RHEL 9 STIG V2R9" {
 		t.Errorf("ShortBenchmark")
+	}
+}
+
+func TestEncryptionAtRest(t *testing.T) {
+	apiserver := func(args ...string) *k8s.Snapshot {
+		return &k8s.Snapshot{Distribution: "kubeadm", Pods: []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "kube-apiserver-cp-1", Namespace: "kube-system", Labels: map[string]string{"component": "kube-apiserver"}},
+			Spec: corev1.PodSpec{NodeName: "cp-1", Containers: []corev1.Container{{Name: "kube-apiserver", Args: append([]string{"kube-apiserver"}, args...)}}}}}}
+	}
+	enc := func(tokens []string, prefix string) *etcd.Probe {
+		return &etcd.Probe{Node: "cp-1", Encryption: &etcd.Encryption{ConfigFile: "/etc/kubernetes/enc/enc.yaml", Tokens: tokens, SampleKey: "/registry/secrets/default/db", SamplePrefix: prefix}}
+	}
+	cases := []struct {
+		name string
+		snap *k8s.Snapshot
+		exec *etcd.Probe
+		want Status
+		has  string
+	}{
+		{"flag missing", apiserver("--profiling=false"), nil, Fail, "not set"},
+		{"flag only, no evidence", apiserver("--encryption-provider-config=/etc/kubernetes/enc/enc.yaml"), nil, Manual, "not sampled"},
+		{"encrypted", apiserver("--encryption-provider-config=/x"), enc([]string{"secrets", "aescbc", "identity"}, "k8s:enc:aescbc:v1:key1:.."), Pass, "encrypted with aescbc"},
+		{"identity first", apiserver("--encryption-provider-config=/x"), enc([]string{"secrets", "identity", "aescbc"}, "k8s:enc:aescbc:v1:key1:.."), Fail, "identity is the first provider"},
+		{"plaintext in etcd", apiserver("--encryption-provider-config=/x"), enc([]string{"secrets", "aescbc", "identity"}, "k8s..v1..Secret.."), Fail, "stored in plaintext"},
+		{"secrets not covered", apiserver("--encryption-provider-config=/x"), enc([]string{"configmaps", "aescbc"}, "k8s:enc:aescbc:v1:key1:.."), Fail, "not listed"},
+		{"config known, no sample", apiserver("--encryption-provider-config=/x"), enc([]string{"secrets", "kms"}, ""), Manual, "no etcd sample"},
+	}
+	for _, c := range cases {
+		rs := Evaluate(Input{Snap: c.snap, EtcdExec: c.exec})
+		r := find(rs, "V-274882")
+		if r == nil {
+			t.Fatalf("%s: rule missing", c.name)
+		}
+		if r.Status != c.want || !strings.Contains(r.Detail, c.has) {
+			t.Errorf("%s: got %s (%s) want %s containing %q", c.name, r.Status, r.Detail, c.want, c.has)
+		}
+	}
+	// evidence from the SSH etcd probe works the same way
+	rs := Evaluate(Input{Snap: apiserver("--encryption-provider-config=/x"), Etcd: map[string]*etcd.Probe{"cp-1": enc([]string{"secrets", "aescbc"}, "k8s:enc:aescbc:v1:key1:..")}})
+	if r := find(rs, "V-274882"); r.Status != Pass {
+		t.Errorf("ssh evidence: %s %s", r.Status, r.Detail)
 	}
 }

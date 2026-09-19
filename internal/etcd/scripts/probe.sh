@@ -132,6 +132,15 @@ if command -v curl >/dev/null 2>&1; then
   [ -n "$METRICS_OUT" ] || METRICS_OUT=$($CURL "$EP/metrics" 2>/dev/null)
 fi
 [ -n "$METRICS_OUT" ] && echo "$METRICS_OUT" | grep -E '^(etcd_server_has_leader|etcd_server_is_leader|etcd_server_leader_changes_seen_total|etcd_mvcc_db_total_size_in_bytes|etcd_mvcc_db_total_size_in_use_in_bytes|etcd_server_quota_backend_bytes|etcd_disk_wal_fsync_duration_seconds_(sum|count)|etcd_disk_backend_commit_duration_seconds_(sum|count)|etcd_server_proposals_failed_total|etcd_server_proposals_pending|etcd_server_slow_apply_total|etcd_server_slow_read_indexes_total|etcd_server_version|etcd_cluster_version|etcd_debugging_mvcc_keys_total|etcd_server_snapshot_apply_in_progress_total|etcd_network_peer_round_trip_time_seconds_(sum|count)|etcd_server_health_failures|etcd_server_read_indexes_failed_total)'
+sec ENCCONFIG
+# Encryption at rest: which providers the running apiserver uses, in order,
+# and for which resources. Only the fixed token names are printed - never
+# the key material in the file.
+f=$(ps -eo args 2>/dev/null | grep -o -- '--encryption-provider-config=[^ ]*' | head -1 | cut -d= -f2)
+if [ -n "$f" ]; then
+  echo "file=$f"
+  [ -r "$f" ] && echo "tokens=$(grep -oE '(aescbc|aesgcm|secretbox|kms|identity)|secrets|configmaps' "$f" 2>/dev/null | tr '\n' ' ')"
+fi
 sec ETCDCTL
 CID=; DIAG=
 if [ "__CTL__" = 0 ]; then
@@ -161,6 +170,14 @@ if [ -z "$GW" ]; then
   echo "---MEMBERS"; run_ctl member list -w json
   echo; echo "---STATUS"; run_ctl endpoint status --cluster -w json
   echo; echo "---ALARMS"; run_ctl alarm list -w json
+  echo; echo "---ENCSAMPLE"
+  # one stored Secret, first 24 bytes only: "k8s:enc:<provider>:v1:<key>:" when
+  # encrypted at rest, raw protobuf ("k8s..v1..Secret") when not
+  k=$(run_ctl get /registry/secrets/ --prefix --keys-only --limit=1 2>/dev/null | grep '^/registry/' | head -1)
+  if [ -n "$k" ]; then
+    echo "key=$k"
+    echo "prefix=$(run_ctl get "$k" --print-value-only 2>/dev/null | head -c 24 | tr -c '[:print:]' '.')"
+  fi
   echo
 fi
 if [ -n "$GW" ] && command -v curl >/dev/null 2>&1; then

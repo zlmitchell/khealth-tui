@@ -97,6 +97,17 @@ func ExecProbe(ctx context.Context, ex Execer, node, pod, dist string) *Probe {
 	}
 	out = "---MEMBERS\n(see above)\n---STATUS\n" + statusRaw + "\n---ALARMS\n" + alarmRaw + "\n"
 	parseEtcdctl(p, "---STATUS\n"+statusRaw+"\n---ALARMS\n"+alarmRaw+"\n")
+	// encryption at rest: sample one stored Secret (first 24 bytes only)
+	if keys, kerr := run("get", "/registry/secrets/", "--prefix", "--keys-only", "--limit=1"); kerr == nil {
+		for _, l := range strings.Split(keys, "\n") {
+			if l = strings.TrimSpace(l); strings.HasPrefix(l, "/registry/") {
+				if val, verr := run("get", l, "--print-value-only"); verr == nil {
+					p.Encryption = &Encryption{SampleKey: l, SamplePrefix: printablePrefix(val, 24)}
+				}
+				break
+			}
+		}
+	}
 	p.EndpointHealth = parseEndpointHealth(healthRaw)
 	allOK := len(p.EndpointHealth) > 0
 	var bad []string
@@ -109,6 +120,21 @@ func ExecProbe(ctx context.Context, ex Execer, node, pod, dist string) *Probe {
 	p.Health = &Health{Healthy: allOK, Reason: strings.Join(bad, "; "), Raw: strings.TrimSpace(healthRaw)}
 	p.EtcdctlOut = "member list:\n" + strings.TrimSpace(p.EtcdctlOut) + "\nendpoint health:\n" + strings.TrimSpace(healthRaw) + "\n" + out
 	return p
+}
+
+// printablePrefix returns the first n bytes with non-printables replaced,
+// like the probe script's `head -c n | tr -c '[:print:]' '.'`.
+func printablePrefix(s string, n int) string {
+	if len(s) > n {
+		s = s[:n]
+	}
+	b := []byte(s)
+	for i, c := range b {
+		if c < 0x20 || c > 0x7e {
+			b[i] = '.'
+		}
+	}
+	return string(b)
 }
 
 func parseEndpointHealth(raw string) []EndpointHealth {

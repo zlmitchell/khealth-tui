@@ -7,8 +7,10 @@ package stig
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
+	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
 )
@@ -49,7 +51,12 @@ func (e *evaluator) apiserverRules() {
 		return Fail, "no admission config file (namespaces must carry pod-security.kubernetes.io/enforce labels instead)"
 	})
 	e.perNode("V-242438", "API server request-timeout set", "II", g, "kube-apiserver-arg: request-timeout=300s", nodes, func(n string) (Status, string) { return flagSet(rk(n), "request-timeout") })
-	e.perNode("V-274882", "Secrets encrypted at rest (encryption-provider-config)", "I", g, "rke2: secrets-encryption: true; kubeadm: --encryption-provider-config", nodes, func(n string) (Status, string) { return flagSet(rk(n), "encryption-provider-config") })
+	e.perNode("V-274882", "Secrets encrypted at rest (encryption-provider-config, verified in etcd)", "I", g, "rke2: secrets-encryption: true; kubeadm: --encryption-provider-config with aescbc/kms first and identity last, then rewrite existing secrets: kubectl get secrets -A -o json | kubectl replace -f -", nodes, func(n string) (Status, string) {
+		if st, d := flagSet(rk(n), "encryption-provider-config"); st != Pass {
+			return st, d
+		}
+		return e.encryptionAtRest()
+	})
 	e.perNode("V-245543", "API server static token file not used", "I", g, "remove --token-auth-file", nodes, func(n string) (Status, string) { return flagAbsent(rk(n), "token-auth-file") })
 	e.perNode("V-242389", "API server secure port enabled", "II", g, "--secure-port must not be 0", nodes, func(n string) (Status, string) {
 		if rk(n)["secure-port"] == "0" {
@@ -151,6 +158,77 @@ func (e *evaluator) etcdRules() {
 	e.perNode("V-242426", "etcd requires peer certificate authentication", "II", g, "etcd --peer-client-cert-auth=true (rke2 default)", list, func(n string) (Status, string) { return check(n, "peer-client-cert-auth", "client-cert-auth", "true") })
 	e.perNode("V-242379", "etcd auto-tls disabled", "II", g, "etcd --auto-tls=false", list, func(n string) (Status, string) { return check(n, "auto-tls", "auto-tls", "false") })
 	e.perNode("V-242380", "etcd peer-auto-tls disabled", "II", g, "etcd --peer-auto-tls=false", list, func(n string) (Status, string) { return check(n, "peer-auto-tls", "auto-tls", "false") })
+}
+
+// encryptionAtRest judges V-274882 from the etcd probes: the provider order
+// of the running apiserver's config (identity first means new writes are
+// plaintext) and a Secret sampled from etcd (stored values start with
+// "k8s:enc:<provider>:" only when actually encrypted). The flag alone proves
+// nothing: secrets written before it was enabled stay plaintext until they
+// are rewritten.
+func (e *evaluator) encryptionAtRest() (Status, string) {
+	var probes []*etcd.Probe
+	if e.in.EtcdExec != nil {
+		probes = append(probes, e.in.EtcdExec)
+	}
+	for _, n := range sortedProbeNodes(e.in.Etcd) {
+		probes = append(probes, e.in.Etcd[n])
+	}
+	var cfg, sample *etcd.Encryption
+	for _, p := range probes {
+		if p == nil || p.Encryption == nil {
+			continue
+		}
+		if cfg == nil && len(p.Encryption.Tokens) > 0 {
+			cfg = p.Encryption
+		}
+		if sample == nil && p.Encryption.SamplePrefix != "" {
+			sample = p.Encryption
+		}
+	}
+	var probs []string
+	if cfg != nil {
+		if prov := cfg.Providers(); len(prov) > 0 && prov[0] == "identity" {
+			probs = append(probs, "identity is the first provider in "+cfg.ConfigFile+" (new writes are plaintext)")
+		}
+		hasSecrets := false
+		for _, t := range cfg.Tokens {
+			if t == "secrets" {
+				hasSecrets = true
+			}
+		}
+		if !hasSecrets {
+			probs = append(probs, "secrets are not listed as an encrypted resource in "+cfg.ConfigFile)
+		}
+	}
+	sampled, encrypted, provider := sample.Sampled()
+	switch {
+	case sampled && !encrypted:
+		probs = append(probs, "etcd sample "+sample.SampleKey+" is stored in plaintext (rewrite existing secrets)")
+	}
+	if len(probs) > 0 {
+		return Fail, strings.Join(probs, "; ")
+	}
+	switch {
+	case sampled:
+		d := "etcd sample encrypted with " + provider
+		if cfg != nil {
+			d += "; providers " + strings.Join(cfg.Providers(), ",")
+		}
+		return Pass, d
+	case cfg != nil:
+		return Manual, "config providers " + strings.Join(cfg.Providers(), ",") + "; no etcd sample (etcdctl unavailable) - confirm existing secrets were rewritten"
+	}
+	return Manual, "encryption-provider-config set; etcd content not sampled (needs the etcd probe) - confirm existing secrets were rewritten"
+}
+
+func sortedProbeNodes(m map[string]*etcd.Probe) []string {
+	var out []string
+	for n := range m {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // kubeletNodes lists nodes whose kubelet config was read via configz.

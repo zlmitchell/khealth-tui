@@ -99,9 +99,10 @@ type Result struct {
 
 // Input is everything the rules look at.
 type Input struct {
-	Snap  *k8s.Snapshot
-	Nodes map[string]*nodeinfo.Info
-	Etcd  map[string]*etcd.Probe
+	Snap     *k8s.Snapshot
+	Nodes    map[string]*nodeinfo.Info
+	Etcd     map[string]*etcd.Probe
+	EtcdExec *etcd.Probe // cluster-wide etcd view via kubectl exec (optional)
 }
 
 // Evaluate runs all rules.
@@ -179,12 +180,18 @@ func (e *evaluator) perNode(id, title, cat, group, fix string, nodes []string, c
 	sort.Strings(nodes)
 	var fails, manual, nas []string
 	passes := 0
+	passDetail := "" // kept when every passing node reports the same evidence
 	per := make(map[string]Status, len(nodes))
 	for _, n := range nodes {
 		st, detail := check(n)
 		per[n] = st
 		switch st {
 		case Pass:
+			if passes == 0 {
+				passDetail = detail
+			} else if detail != passDetail {
+				passDetail = ""
+			}
 			passes++
 		case Fail:
 			fails = append(fails, n+": "+detail)
@@ -205,6 +212,9 @@ func (e *evaluator) perNode(id, title, cat, group, fix string, nodes []string, c
 	case passes > 0:
 		r.Status = Pass
 		r.Detail = fmt.Sprintf("%d/%d nodes", passes, len(nodes))
+		if passDetail != "" {
+			r.Detail += ": " + passDetail
+		}
 	default:
 		r.Status = NA
 		r.Detail = "not applicable"
