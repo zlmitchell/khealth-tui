@@ -1533,7 +1533,9 @@ func (a *App) renderBody() string {
 	for i := start; i < end; i++ {
 		t := trunc(rows[i].text, a.width)
 		if c.selectable && i == a.cursor[a.tab] {
-			t = styleSel.Render(pad(t, a.width))
+			// inner colour resets would cancel the reverse-video bar part way
+			// through the row, so highlight the plain text end to end
+			t = styleSel.Render(pad(ansi.Strip(t), a.width))
 		}
 		lines = append(lines, t)
 	}

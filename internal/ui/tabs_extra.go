@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"math"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -1065,7 +1066,7 @@ func (a *App) helmContent() content {
 				latest = styleOK.Render("up to date")
 			}
 		} else if a.helm == nil {
-			latest = styleDim.Render("off: --helm-updates")
+			latest = styleDim.Render("off (helm.check_updates)")
 		}
 		name := r.Name
 		if r.Bundled {
@@ -1104,15 +1105,12 @@ func (a *App) helmContent() content {
 		if len(names) == 0 {
 			src = "no repos (helm repo add, or helm.repos in the config)"
 		}
-		if a.cfg.Helm.ArtifactHub {
-			src += "; then Artifact Hub"
-		}
 		hdr[0] += styleDim.Render("  " + src)
 		if e := a.helm.LoadErr(); e != "" {
 			hdr = append(hdr, styleWarn.Render("helm repositories.yaml: "+e))
 		}
 	} else {
-		hdr[0] += styleWarn.Render("off") + styleDim.Render(" - run with --helm-updates; uses your helm repos (helm repo add), helm.repos in the config, then Artifact Hub; needs outbound HTTP")
+		hdr[0] += styleWarn.Render("off") + styleDim.Render(" - helm.check_updates is false (or --helm-updates=false); it uses your helm repos (helm repo add) and helm.repos in the config")
 	}
 	hdr = append(hdr, h)
 	c := content{header: hdr, selectable: true, empty: "no Helm releases found (helm.sh/release.v1 secrets)"}
@@ -1332,10 +1330,19 @@ func (a *App) imagesDetail(node string) (string, []string) {
 // ---------- Security ----------
 
 func (a *App) securityContent() content {
-	if a.subName() == "Node hardening" {
+	switch a.subName() {
+	case "Node hardening":
 		return a.hardeningContent()
+	case "OS STIG":
+		return a.osStigContent()
 	}
-	counts := stig.Counts(a.stigRes)
+	var clusterRes []stig.Result
+	for _, r := range a.stigRes {
+		if r.Group != "os" {
+			clusterRes = append(clusterRes, r)
+		}
+	}
+	counts := stig.Counts(clusterRes)
 	ssegs := []seg{{float64(counts[stig.Pass]), styleOK, "pass"}, {float64(counts[stig.Fail]), styleCrit, "fail"}, {float64(counts[stig.Manual]), styleWarn, "manual"}, {float64(counts[stig.NA] + counts[stig.Unknown]), styleDim, "n/a"}}
 	score := nan()
 	if d := counts[stig.Pass] + counts[stig.Fail]; d > 0 {
@@ -1344,12 +1351,12 @@ func (a *App) securityContent() content {
 	hdr := []string{
 		styleTitle.Render("STIG / CIS checks") + "  " + stacked(40, ssegs) + "  " + legend(ssegs) + "  " + kv("automated pass rate", gauge(score, 10, 200, 200)),
 		benchmarkLine(),
-		styleDim.Render("IDs are a best-effort mapping to those releases; confirm against the STIG version you are audited on. 'a' hides passing rules; enter shows detail + fix."),
+		styleDim.Render("IDs are a best-effort mapping to those releases; confirm against the STIG version you are audited on. 'a' hides passing rules, 'm' hides manual ones; enter shows detail + fix. OS STIG rules are under Node hardening."),
 	}
 	var rows [][]string
 	var ids []string
 	for i, r := range a.stigRes {
-		if a.problemOnly && (r.Status == stig.Pass || r.Status == stig.NA) {
+		if r.Group == "os" || (a.problemOnly && (r.Status == stig.Pass || r.Status == stig.NA)) || (a.hideManual && r.Status == stig.Manual) {
 			continue
 		}
 		rows = append(rows, []string{stigStyle(r.Status).Render(fmt.Sprintf("%-7s", r.Status.String())), r.Cat, r.ID, r.Group, r.Title, r.Detail})
@@ -1366,7 +1373,7 @@ func (a *App) securityContent() content {
 
 // hardeningContent shows per-node OS security facts (runtime vs boot config).
 func (a *App) hardeningContent() content {
-	hdr := []string{styleTitle.Render("Node OS hardening") + styleDim.Render("  each cell = runtime state / boot configuration; ") + styleWarn.Render("≠") + styleDim.Render(" marks a mismatch (a reboot changes the effective state). enter = node dashboard, or rule detail on the STIG rows below.")}
+	hdr := []string{styleTitle.Render("Node OS hardening") + styleDim.Render("  each cell = runtime state / boot configuration; ") + styleWarn.Render("≠") + styleDim.Render(" marks a mismatch (a reboot changes the effective state). enter = node dashboard; the OS STIG sub-tab lists the rules.")}
 	if !a.sshEnabled {
 		hdr = append(hdr, styleWarn.Render("SSH collection is off - these facts come from the nodes."))
 	}
@@ -1440,28 +1447,63 @@ func (a *App) hardeningContent() content {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
 
-	// DISA OS STIG rules (RHEL / Ubuntu) evaluated from the same facts.
-	var srows [][]string
-	var sids []string
+	return c
+}
+
+// osStigContent lists every rule of each node's DISA OS STIG (RHEL / Ubuntu):
+// automated where ComplianceAsCode has a template or a hand-written check
+// exists, MANUAL otherwise (the STIG check text is in the row's detail).
+func (a *App) osStigContent() content {
+	var osRes []stig.Result
+	for _, r := range a.stigRes {
+		if r.Group == "os" {
+			osRes = append(osRes, r)
+		}
+	}
+	counts := stig.Counts(osRes)
+	ssegs := []seg{{float64(counts[stig.Pass]), styleOK, "pass"}, {float64(counts[stig.Fail]), styleCrit, "fail"}, {float64(counts[stig.Manual]), styleWarn, "manual"}, {float64(counts[stig.NA] + counts[stig.Unknown]), styleDim, "n/a"}}
+	score := nan()
+	if d := counts[stig.Pass] + counts[stig.Fail]; d > 0 {
+		score = float64(counts[stig.Pass]) * 100 / float64(d)
+	}
+	hdr := []string{
+		styleTitle.Render("DISA OS STIG rules") + "  " + stacked(40, ssegs) + "  " + legend(ssegs) + "  " + kv("automated pass rate", gauge(score, 10, 200, 200)),
+		a.osBenchmarkLine(),
+		styleDim.Render("automated = ComplianceAsCode template or hand-written check; MANUAL rows carry the STIG check text in their detail (enter). 'a' hides passing, 'm' hides manual, '/' filters."),
+	}
+	if !a.sshEnabled {
+		hdr = append(hdr, styleWarn.Render("SSH collection is off - these facts come from the nodes."))
+	}
+	var rows [][]string
+	var ids []string
 	for i, r := range a.stigRes {
-		if r.Group != "os" || (a.problemOnly && (r.Status == stig.Pass || r.Status == stig.NA)) {
+		if r.Group != "os" || (a.problemOnly && (r.Status == stig.Pass || r.Status == stig.NA)) || (a.hideManual && r.Status == stig.Manual) {
 			continue
 		}
 		ref := r.Ref
 		if ref == "" {
 			ref = "generic"
 		}
-		srows = append(srows, []string{stigStyle(r.Status).Render(fmt.Sprintf("%-7s", r.Status.String())), r.Cat, r.ID, ref, r.Title, r.Detail})
-		sids = append(sids, "stig:"+fmt.Sprint(i))
-	}
-	if len(srows) > 0 {
-		sh, slines := renderTable(a.width, []column{{title: "STATUS"}, {title: "CAT"}, {title: "ID"}, {title: "STIG", max: 28}, {title: "RULE", max: 52}, {title: "DETAIL"}}, srows)
-		c.rows = append(c.rows, row{id: "", text: ""}, row{id: "", text: styleTitle.Render("DISA OS STIG rules") + styleDim.Render("  per-node results; 'a' hides passing rules")}, row{id: "", text: sh})
-		for i, l := range slines {
-			c.rows = append(c.rows, row{id: sids[i], text: l})
+		if i := strings.Index(ref, " STIG"); i > 0 {
+			ref = ref[:i]
 		}
+		rows = append(rows, []string{stigStyle(r.Status).Render(fmt.Sprintf("%-7s", r.Status.String())), r.Cat, r.ID, orDash(r.RuleID), ref, r.Title, r.Detail})
+		ids = append(ids, fmt.Sprint(i))
+	}
+	h, lines := renderTable(a.width, []column{{title: "STATUS"}, {title: "CAT"}, {title: "ID"}, {title: "STIG ID"}, {title: "STIG", max: 22}, {title: "RULE", max: 56}, {title: "DETAIL"}}, rows)
+	hdr = append(hdr, h)
+	c := content{header: hdr, selectable: true, empty: "no OS STIG results (no SSH node facts yet)"}
+	for i, l := range lines {
+		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
 	return c
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // osBenchmarkLine names the OS STIG release each reachable node is matched to.
@@ -1477,7 +1519,8 @@ func (a *App) osBenchmarkLine() string {
 		if b := stig.OSBenchmarkFor(ni.OS); b != nil {
 			if !seen[b.Name] {
 				seen[b.Name] = true
-				parts = append(parts, styleBold.Render(b.Name)+" "+b.Version)
+				total, auto := b.Coverage()
+				parts = append(parts, styleBold.Render(b.Name)+" "+b.Version+styleDim.Render(fmt.Sprintf(" (%d/%d rules automated)", auto, total)))
 			}
 		} else {
 			generic++
@@ -1489,7 +1532,28 @@ func (a *App) osBenchmarkLine() string {
 	if len(parts) == 0 {
 		return kv("OS STIGs", styleDim.Render("no node facts yet"))
 	}
-	return kv("OS STIGs", strings.Join(parts, "  ·  "))
+	var oldest time.Time
+	unprobed := 0
+	for _, n := range sortedKeys(a.nodes) {
+		ni := a.nodes[n]
+		if ni == nil || ni.Err != nil {
+			continue
+		}
+		switch {
+		case !ni.STIGProbed:
+			unprobed++
+		case oldest.IsZero() || ni.STIGCollected.Before(oldest):
+			oldest = ni.STIGCollected
+		}
+	}
+	when := styleDim.Render("facts pending first collection")
+	if !oldest.IsZero() {
+		when = styleDim.Render("facts collected " + age(oldest) + " ago (once per node; R re-collects)")
+		if unprobed > 0 {
+			when += styleWarn.Render(fmt.Sprintf(", %d node(s) pending", unprobed))
+		}
+	}
+	return kv("OS STIGs", strings.Join(parts, "  ·  ")) + "  " + when
 }
 
 // hardeningCell renders "runtime/boot" coloured by desirability and mismatch.
@@ -1524,10 +1588,7 @@ func benchmarkLine() string {
 
 func (a *App) securityDetail(id string) (string, []string) {
 	if a.subName() == "Node hardening" {
-		if !strings.HasPrefix(id, "stig:") {
-			return a.nodeDetail(id)
-		}
-		id = strings.TrimPrefix(id, "stig:")
+		return a.nodeDetail(id)
 	}
 	var idx int
 	if _, err := fmt.Sscan(id, &idx); err != nil || idx < 0 || idx >= len(a.stigRes) {
@@ -1544,10 +1605,18 @@ func (a *App) securityDetail(id string) (string, []string) {
 			}
 		}
 	}
-	out := []string{stigStyle(r.Status).Render(r.Status.String()) + "  " + kv("category", r.Cat) + "  " + kv("group", r.Group) + "  " + kv("reference", ref), "", styleBold.Render(r.Title), ""}
+	head := stigStyle(r.Status).Render(r.Status.String()) + "  " + kv("category", r.Cat) + "  " + kv("group", r.Group) + "  " + kv("reference", ref)
+	if r.RuleID != "" {
+		head += "  " + kv("rule", r.RuleID)
+	}
+	out := []string{head, "", styleBold.Render(r.Title), ""}
 	out = append(out, wrap("detail: "+r.Detail, w)...)
 	out = append(out, "")
 	out = append(out, wrap("fix: "+r.Fix, w)...)
+	if r.Check != "" {
+		out = append(out, "", styleBold.Render("STIG check procedure"), "")
+		out = append(out, wrap(r.Check, w)...)
+	}
 	return r.ID, out
 }
 
@@ -1557,7 +1626,7 @@ func (a *App) logsContent() content {
 	if a.logsNode != "" {
 		return a.logLinesContent(a.logsNode)
 	}
-	hdr := []string{styleTitle.Render("Node logs") + styleDim.Render("  journal of rke2-server/agent, kubelet, containerd, rancher-system-agent classified with the pattern knowledge base. R refreshes; enter opens a node's lines.")}
+	hdr := []string{styleTitle.Render("Node logs") + styleDim.Render("  journal of rke2-server/agent, kubelet, containerd, rancher-system-agent plus rke2's kubelet.log and containerd.log, classified with the pattern knowledge base. R refreshes; enter opens a node's lines.")}
 	var rows [][]string
 	var ids []string
 	for _, n := range sortedKeys(a.nodes) {
@@ -1568,22 +1637,40 @@ func (a *App) logsContent() content {
 			continue
 		}
 		unit := "-"
+		unitText := func(u nodeinfo.Unit) string {
+			txt := fmt.Sprintf("%s %s/%s", u.Name, u.Active, u.Sub)
+			if u.NRestarts > 0 {
+				txt += styleWarn.Render(fmt.Sprintf(" restarts=%d", u.NRestarts))
+			}
+			return okText(u.Active == "active", txt, txt)
+		}
 		for _, u := range ni.Units {
 			if u.Name == "rke2-server" || u.Name == "rke2-agent" || u.Name == "k3s" || u.Name == "k3s-agent" || u.Name == "kubelet" {
-				txt := fmt.Sprintf("%s %s/%s", u.Name, u.Active, u.Sub)
-				if u.NRestarts > 0 {
-					txt += styleWarn.Render(fmt.Sprintf(" restarts=%d", u.NRestarts))
-				}
-				unit = okText(u.Active == "active", txt, txt)
+				unit = unitText(u)
 				break
+			}
+		}
+		// Rancher-managed nodes: the agent that rewrites the config
+		rancher := ""
+		for _, u := range ni.Units {
+			if u.Name == "rancher-system-agent" {
+				rancher = unitText(u)
 			}
 		}
 		ls := a.logSum[n]
 		if ls == nil {
-			rows = append(rows, []string{n, unit, styleDim.Render("pending full collection")})
+			rows = append(rows, []string{n, unit, rancher, styleDim.Render("pending full collection")})
 			ids = append(ids, n)
 			continue
 		}
+		// last plan event: Rancher rewriting the node's config is what makes
+		// it differ from what was set locally
+		if m := ls.Last("rancher-plan-failed"); !m.Time.IsZero() {
+			rancher += " " + styleCrit.Render("plan FAILED "+age(m.Time)+" ago")
+		} else if m := ls.Last("rancher-plan-applied"); !m.Time.IsZero() {
+			rancher += " " + styleWarn.Render("plan applied "+age(m.Time)+" ago")
+		}
+		rancher = strings.TrimSpace(rancher)
 		up := styleDim.Render("not seen in window")
 		if !ls.Startup.IsZero() {
 			up = "up and running " + age(ls.Startup) + " ago"
@@ -1593,10 +1680,10 @@ func (a *App) logsContent() content {
 		mix := stacked(12, []seg{{float64(ls.Counts[logs.ClassError]), styleCrit, ""}, {float64(ls.Counts[logs.ClassWarn]), styleWarn, ""}, {float64(ls.Counts[logs.ClassStartup]), styleInfo, ""}, {float64(ls.Counts[logs.ClassInfo]), styleDim, ""}})
 		hist := styleCrit.Render(sparkline(errorsPerHour(ls, 24), 24, 0))
 		top := strings.Join(append(ls.TopPatterns(logs.ClassError, 2), ls.TopPatterns(logs.ClassWarn, 2)...), ", ")
-		rows = append(rows, []string{n, unit, fmt.Sprint(ls.Total), mix, errs, warns, hist, up, top})
+		rows = append(rows, []string{n, unit, rancher, fmt.Sprint(ls.Total), mix, errs, warns, hist, up, top})
 		ids = append(ids, n)
 	}
-	h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "UNIT"}, {title: "LINES", right: true}, {title: "MIX"}, {title: "ERRORS"}, {title: "WARNINGS"}, {title: "ERR/HOUR (24h)"}, {title: "STARTUP MARKER"}, {title: "TOP PATTERNS"}}, rows)
+	h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "UNIT"}, {title: "RANCHER-SYSTEM-AGENT"}, {title: "LINES", right: true}, {title: "MIX"}, {title: "ERRORS"}, {title: "WARNINGS"}, {title: "ERR/HOUR (24h)"}, {title: "STARTUP MARKER"}, {title: "TOP PATTERNS"}}, rows)
 	hdr = append(hdr, h)
 	c := content{header: hdr, selectable: true, empty: "no SSH data"}
 	for i, l := range lines {
@@ -1651,19 +1738,8 @@ func (a *App) logLinesContent(node string) content {
 		if !m.Time.IsZero() {
 			ts = m.Time.Local().Format("01-02 15:04:05")
 		}
-		rows = append(rows, []string{classStyle(m.Class).Render(fmt.Sprintf("%-7s", m.Class.String())), ts, m.Unit, styleDim.Render(name), logMessage(m.Line)})
+		rows = append(rows, []string{classStyle(m.Class).Render(fmt.Sprintf("%-7s", m.Class.String())), ts, m.Unit, styleDim.Render(name), highlightLog(logMessage(m.Line))})
 		ids = append(ids, fmt.Sprint(i))
-	}
-	// journal-file tails have no classification; list them too
-	base := len(ls.Matches)
-	for fi, lf := range ni.LogFiles {
-		for li, l := range strings.Split(lf.Content, "\n") {
-			if strings.TrimSpace(l) == "" {
-				continue
-			}
-			rows = append(rows, []string{styleDim.Render("file   "), "", shortPath(lf.Path), "", l})
-			ids = append(ids, fmt.Sprintf("f%d:%d:%d", base, fi, li))
-		}
 	}
 	h, lines := renderTable(a.width, []column{{title: "CLASS"}, {title: "TIME"}, {title: "UNIT", max: 22}, {title: "PATTERN", max: 20}, {title: "MESSAGE"}}, rows)
 	hdr = append(hdr, h)
@@ -1676,8 +1752,10 @@ func (a *App) logLinesContent(node string) content {
 
 // logMessage strips the journal timestamp/host/unit prefix for the table.
 func logMessage(line string) string {
-	if g := journalPrefix.FindStringSubmatch(line); g != nil {
-		return line[len(g[0]):]
+	for _, re := range []*regexp.Regexp{journalPrefix, klogPrefix, logfmtPrefix} {
+		if g := re.FindStringSubmatch(line); g != nil {
+			return line[len(g[0]):]
+		}
 	}
 	return line
 }
@@ -1730,20 +1808,30 @@ func (a *App) logsDetail(node string) (string, []string) {
 		add(styleOK.Render("  nothing noteworthy in the collected window"))
 	}
 	if len(ni.LogFiles) > 0 {
-		add("", styleTitle.Render("Log files (filtered tail)"))
+		add("", styleTitle.Render("Log files (tailed and classified above)"))
 		for _, f := range ni.LogFiles {
-			add(styleBold.Render("--- " + f.Path))
+			n := 0
 			for _, l := range strings.Split(f.Content, "\n") {
 				if strings.TrimSpace(l) != "" {
-					add(trunc(l, w))
+					n++
 				}
 			}
+			add(kv(logFileUnit(f.Path), fmt.Sprintf("%d lines from %s", n, f.Path)))
 		}
 	}
 	return "Logs on " + node, out
 }
 
 var journalPrefix = regexp.MustCompile(`^\S+\s+\S+\s+[^:\s]+(\[\d+\])?:\s*`)
+
+// klogPrefix: "I0918 10:22:00.123456    1234 " (the TIME column already shows the stamp)
+var klogPrefix = regexp.MustCompile(`^[IWEF]\d{4} \d{2}:\d{2}:\d{2}(\.\d+)?\s+\d+\s+`)
+
+// logfmtPrefix: containerd's leading time="..." field
+var logfmtPrefix = regexp.MustCompile(`^time="[^"]*"\s*`)
+
+// logFileUnit names the unit a tailed log file belongs to (kubelet.log -> kubelet).
+func logFileUnit(p string) string { return strings.TrimSuffix(path.Base(p), ".log") }
 
 // logLineDetail shows one full log line with the matching pattern's explanation.
 func (a *App) logLineDetail(node, id string) (string, []string) {
@@ -1753,25 +1841,13 @@ func (a *App) logLineDetail(node, id string) (string, []string) {
 		return "", nil
 	}
 	w := a.width - 6
-	if strings.HasPrefix(id, "f") {
-		var base, fi, li int
-		if _, err := fmt.Sscanf(id, "f%d:%d:%d", &base, &fi, &li); err == nil && fi < len(ni.LogFiles) {
-			lines := strings.Split(ni.LogFiles[fi].Content, "\n")
-			if li < len(lines) {
-				out := []string{kv("file", ni.LogFiles[fi].Path), ""}
-				out = append(out, wrap(lines[li], w)...)
-				return "Log line on " + node, out
-			}
-		}
-		return "", nil
-	}
 	var idx int
 	if _, err := fmt.Sscan(id, &idx); err != nil || idx < 0 || idx >= len(ls.Matches) {
 		return "", nil
 	}
 	m := ls.Matches[idx]
 	out := []string{classStyle(m.Class).Render(m.Class.String()) + "  " + kv("unit", m.Unit) + "  " + kv("time", m.Time.Format(time.RFC3339)), ""}
-	out = append(out, wrap(m.Line, w)...)
+	out = append(out, wrapStyled(highlightLog(m.Line), w)...)
 	if m.Pattern != nil {
 		out = append(out, "", styleTitle.Render("Pattern: "+m.Pattern.Name)+"  "+styleDim.Render("(seen "+fmt.Sprint(ls.ByName[m.Pattern.Name])+"x in this window)"))
 		out = append(out, wrap(m.Pattern.Explain, w)...)
