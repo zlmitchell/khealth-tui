@@ -30,7 +30,7 @@ It uses two sources:
 | 7 | Addons | CNI (daemonsets + `/etc/cni/net.d` + rke2 `cni:`), CSI, CoreDNS/ingress/metrics-server/…, **Rancher management** (server URL, cluster-agent, fleet-agent, provisioned vs imported, `rancher-system-agent` per node, join topology via `server:`), **registries.yaml** vs containerd `certs.d`, registries actually used by pods, rke2 bundled HelmCharts + HelmChartConfig overrides |
 | 8 | Helm | releases decoded from `sh.helm.release.v1` secrets (chart, version, status, revision, history); Enter: **values applied** + history; update check against the `index.yaml` of your `helm repo` list (credentials included) and `helm.repos`; `u` upgrades to the newest known version, `b` rolls back to a chosen revision (runs the `helm` CLI after a confirmation, `--read-only` disables) |
 | 9 | Images | per node: image count/size, running containers, **unused images**, airgap tarballs (`/var/lib/rancher/rke2/agent/images/*.tar[.zst\|.gz]`, `.txt`) and which tarball images are running / which running images are not in any tarball |
-| 0 | Security | sub-tabs `Rules` / `Node hardening` / `OS STIG`; reference releases shown in the header; **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap); `OS STIG` lists every rule of the DISA RHEL 8/9/10 or Ubuntu 20.04/22.04/24.04 STIG matched per node (~60% automated via ComplianceAsCode templates, the rest MANUAL with check text) |
+| 0 | Security | sub-tabs `Rules` / `Node hardening` / `OS STIG`; reference releases shown in the header; **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap); `OS STIG` lists every rule of the DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG matched per node, evaluated from node facts (ComplianceAsCode templates + native checks; decision-only rules MANUAL with evidence) |
 | = | RKE2 | **control-plane isolation** (taints, user pods on servers, requests vs allocatable, whether apiserver/etcd static pods carry `control-plane-resource-requests`);  `config.yaml`(.d) per node, data-dir, `server/manifests` (user vs bundled, HelmChartConfig contents), static pod manifests, audit/PSS policies, config drift between nodes |
 | - | Logs | journal of rke2-server/agent, kubelet, containerd, rancher-system-agent **classified** into normal-startup noise / warnings / errors with explanations (token mismatch, CA mismatch, cluster-id mismatch, NOSPACE, PLEG, pull failures, protect-kernel-defaults, …); persistent startup noise is escalated |
 
@@ -97,7 +97,7 @@ optional; flags override the file. The source of the example is
   `ssh.become_password` / `KHT_BECOME_PASSWORD` is set, for `sudo -S` /
   `dzdo -S` when NOPASSWD is not granted. Encrypted keys: `KHT_SSH_PASSPHRASE`.
 
-Light collection runs every refresh (default 30s, ~1s wall / 0.2s CPU per
+Light collection runs every refresh (default 30s, ~0.2s wall / 0.2s CPU per
 node, parallel); the config tier (certificates, sysctls, file modes, rke2/k3s
 config, manifests, registries, slow hardening commands) and the heavy
 collection (journal, `crictl images`, tarball manifests) run every
@@ -196,18 +196,20 @@ benchmark numbering:
 | DISA Rancher Government MCM STIG | V2R2 (05 Jan 2026) | `V-2528xx`, `V-257292`; only on the cluster that runs Rancher (auth provider, `AUDIT_LEVEL`, new-user default role, single local admin, ingress 443 + NetworkPolicies to 444, `privateCA`/`ingress.tls.source=secret` from helm values) |
 | CIS Kubernetes Benchmark | v2.0.1 (Jun 2026) / rke2 self-assessment v1.12 | `CIS-x.y.z` |
 | DISA RHEL STIG | 8 V2R8, 9 V2R9, 10 V1R2 (01 Jul 2026) | per node, matched from `/etc/os-release` |
-| DISA Ubuntu LTS STIG | 20.04 V2R4, 22.04 V2R9, 24.04 V1R6 | per node, matched from `/etc/os-release` |
+| DISA Ubuntu LTS STIG | 22.04 V2R9, 24.04 V1R6 | per node, matched from `/etc/os-release` (20.04 is out of standard support and not covered) |
 
 The OS STIGs are evaluated in full: every rule of the matched release is
 listed on the `OS STIG` sub-tab. Checks come from [ComplianceAsCode](https://github.com/ComplianceAsCode/content)
 templates (sysctl, packages, services, mounts, `sshd -T`, file modes and
 owners, audit rules, kernel modules, grub arguments, pwquality/faillock,
 config-file values) joined to the DISA XCCDF by STIG ID and embedded as
-generated tables (`internal/stigdata/data`), plus hand-written checks for
-facts the probe reads directly (FIPS, SELinux/AppArmor, fapolicyd, auditd,
-firewall, USBGuard, chrony). About 60% of RHEL 8/9/10 and Ubuntu 22.04/24.04
-rules are automated; the rest are listed as MANUAL with the STIG's own check
-text in the detail view. RHEL rebuilds (Rocky, Alma, CentOS Stream, Oracle)
+generated tables (`internal/stigdata/data`), plus native evaluators for the
+rules ComplianceAsCode checks with hand-written OVAL (account database,
+PAM/sudo/login.defs, audit and rsyslog configuration, crypto policy, boot
+loader, a filesystem sweep, ...). Every rule of RHEL 8/9/10 and Ubuntu
+22.04/24.04 that ComplianceAsCode maps is evaluated (98-100%); results that
+need an organisational decision are MANUAL with the evidence and the STIG's
+own check text in the detail view. RHEL rebuilds (Rocky, Alma, CentOS Stream, Oracle)
 use the RHEL STIG of the same major; other distributions fall back to generic
 `OS-*` IDs. `Node hardening` keeps the per-node runtime/boot facts and a
 pass/fail summary column. See [docs/STIG.md](docs/STIG.md) for sources,

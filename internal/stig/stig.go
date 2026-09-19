@@ -12,7 +12,7 @@
 //	cis.go         CIS Kubernetes Benchmark v2.0 numbering (CIS-x.y.z)
 //	os.go          per-node OS checks shared by the OS STIGs
 //	rhel.go        DISA RHEL 8 / 9 / 10 STIG rule tables
-//	ubuntu.go      DISA Ubuntu 20.04 / 22.04 / 24.04 LTS STIG rule tables
+//	ubuntu.go      DISA Ubuntu 22.04 / 24.04 LTS STIG rule tables
 //
 // Verify the mapping against the release you are audited against.
 package stig
@@ -54,7 +54,7 @@ var Benchmarks = []Benchmark{
 	{Name: "DISA Rancher Government RKE2 STIG", Version: "V2R7 (01 Jul 2026)", Prefixes: []string{"V-2545", "V-268", "RKE2-"}, Note: "V-2545xx/V-268321; RKE2-* are rke2 hardening-guide prerequisites (etcd user, SELinux) not carried as STIG IDs"},
 	{Name: "DISA Rancher Government MCM STIG", Version: "V2R2 (05 Jan 2026)", Prefixes: []string{"V-2528", "V-257292"}, Note: "Rancher Multi-Cluster Manager; evaluated only on the cluster that runs Rancher"},
 	{Name: "CIS Kubernetes Benchmark", Version: "v2.0.1 (Jun 2026) / rke2 CIS self-assessment v1.12", Prefixes: []string{"CIS-"}, Note: "section numbers follow v2.0 (renumbered from v1.9)"},
-	{Name: "DISA OS STIGs", Version: "RHEL 8 V2R8 / 9 V2R9 / 10 V1R2, Ubuntu 20.04 V2R4 / 22.04 V2R9 / 24.04 V1R6", Prefixes: []string{"OS-"}, Note: "matched per node from /etc/os-release (see OSBenchmarks); OS-* IDs are the generic fallback for other distributions"},
+	{Name: "DISA OS STIGs", Version: "RHEL 8 V2R8 / 9 V2R9 / 10 V1R2, Ubuntu 22.04 V2R9 / 24.04 V1R6", Prefixes: []string{"OS-"}, Note: "matched per node from /etc/os-release (see OSBenchmarks); OS-* IDs are the generic fallback for other distributions"},
 }
 
 // Status of one rule.

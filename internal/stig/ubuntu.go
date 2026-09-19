@@ -1,22 +1,15 @@
 package stig
 
 // DISA Canonical Ubuntu LTS STIG rule tables. Source XCCDF:
-//   dl.dod.cyber.mil/wp-content/uploads/stigs/zip/U_CAN_Ubuntu_20-04_LTS_V2R4_STIG.zip (Release 4, 01 Oct 2025)
 //   dl.dod.cyber.mil/wp-content/uploads/stigs/zip/U_CAN_Ubuntu_22-04_LTS_V2R9_STIG.zip (Release 9, 01 Jul 2026)
 //   dl.dod.cyber.mil/wp-content/uploads/stigs/zip/U_CAN_Ubuntu_24-04_LTS_V1R6_STIG.zip (Release 6, 01 Jul 2026)
 // The Ubuntu STIGs carry no fapolicyd/USBGuard/ptrace/core-dump/redirect
-// sysctl rules, so those checks are skipped for Ubuntu nodes.
+// sysctl rules, so those checks are skipped for Ubuntu nodes. Ubuntu 20.04
+// is not supported: its standard support ended in May 2025 and
+// ComplianceAsCode no longer carries it, so nodes on it fall back to the
+// generic OS-* checks.
 
 var ubuntuBenchmarks = []OSBenchmark{
-	{Name: "DISA Ubuntu 20.04 LTS STIG", Version: "V2R4 (01 Oct 2025)", product: "ubuntu2004", family: "ubuntu", release: "20.04", rules: map[string]osRef{
-		"fips":     {"V-238363", "I"},   // NIST FIPS-validated cryptography (fips_enabled)
-		"mac":      {"V-238360", "II"},  // AppArmor active and enabled
-		"auditd":   {"V-238298", "II"},  // auditd installed, enabled, active
-		"firewall": {"V-238355", "II"},  // ufw enabled and running
-		"timesync": {"V-238357", "III"}, // chrony against authoritative source
-		"aslr":     {"V-238369", "II"},
-		"dmesg":    {"V-255913", "III"},
-	}},
 	{Name: "DISA Ubuntu 22.04 LTS STIG", Version: "V2R9 (01 Jul 2026)", product: "ubuntu2204", family: "ubuntu", release: "22.04", rules: map[string]osRef{
 		"fips":     {"V-260650", "I"},
 		"mac":      {"V-260557", "II"},

@@ -379,3 +379,54 @@ func TestConfigTierScriptAndMerge(t *testing.T) {
 		t.Fatal("merge overwrote a fresh config tier")
 	}
 }
+
+func TestCPUFromPrevAndSampleFlag(t *testing.T) {
+	if s := Script(Options{}); strings.Contains(s, "__CPUSAMPLE__") || !strings.Contains(s, `[ "0" = 1 ]; then sleep 1`) {
+		t.Fatal("light script must not sleep")
+	}
+	if s := Script(Options{CPUSample: true}); !strings.Contains(s, `[ "1" = 1 ]; then sleep 1`) {
+		t.Fatal("first-contact script must sample twice")
+	}
+	// one sample per probe: user nice system idle iowait irq softirq steal
+	prev := Parse("n1", "h", "===STAT1\ncpu 1000 0 500 8000 500 0 0 0\n===END\n", time.Now())
+	cur := Parse("n1", "h", "===STAT1\ncpu 1300 0 700 8400 600 0 0 0\n===END\n", time.Now())
+	if prev.CPUPct != -1 || cur.CPUPct != -1 {
+		t.Fatalf("single sample must leave CPUPct unknown: %v %v", prev.CPUPct, cur.CPUPct)
+	}
+	cur.CPUFromPrev(prev)
+	// busy 500 of 1000 jiffies
+	if cur.CPUPct < 49.9 || cur.CPUPct > 50.1 {
+		t.Fatalf("CPUPct %.2f", cur.CPUPct)
+	}
+	// counter reset (reboot) or a failed previous probe: stays unknown
+	reset := Parse("n1", "h", "===STAT1\ncpu 10 0 5 80 5 0 0 0\n===END\n", time.Now())
+	reset.CPUFromPrev(prev)
+	if reset.CPUPct != -1 {
+		t.Fatal("counter reset must not produce a value")
+	}
+	two := Parse("n1", "h", "===STAT1\ncpu 100 0 0 900 0 0 0 0\n===STAT2\ncpu 110 0 0 990 0 0 0 0\n===END\n", time.Now())
+	two.CPUFromPrev(prev)
+	if two.CPUPct < 9.9 || two.CPUPct > 10.1 {
+		t.Fatalf("own two-sample value must win: %.2f", two.CPUPct)
+	}
+	// NTP from chrony in the light tier, carried forward on light cycles when only timedatectl knows
+	full := Parse("n1", "h", "===NTP\nNTPSynchronized=yes\nNTP=yes\n===HARDENING\nconfig_probed=yes\n===END\n", time.Now())
+	light := Parse("n1", "h", "===NTP\n===END\n", time.Now())
+	light.MergeConfig(full)
+	if light.NTPSynced == nil || !*light.NTPSynced {
+		t.Fatal("NTP state not carried forward")
+	}
+}
+
+func TestKubeletPIDReuse(t *testing.T) {
+	if s := Script(Options{}); !strings.Contains(s, "p=0\n") {
+		t.Fatal("no pid should render as 0")
+	}
+	if s := Script(Options{KubeletPID: 4242}); !strings.Contains(s, "p=4242\n") {
+		t.Fatal("kubelet pid not substituted")
+	}
+	info := Parse("n1", "h", "===KUBELETCMD\npid=4242\n/usr/bin/kubelet\n--anonymous-auth=false\n===END\n", time.Now())
+	if info.KubeletPID != 4242 || info.KubeletFlags["anonymous-auth"] != "false" {
+		t.Fatalf("pid/flags: %d %v", info.KubeletPID, info.KubeletFlags)
+	}
+}

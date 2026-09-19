@@ -228,6 +228,9 @@ func (a *App) perfLines() []string {
 		last.API.Requests, fmtBytes(last.API.BytesIn), fmtBytes(last.API.BytesOut), time.Duration(last.API.FetchMS)*time.Millisecond,
 		len(recs), apiReq/n, fmtBytes(int64(apiIn/n)), apiMS/n/1000))
 	out = append(out, fmt.Sprintf("             %d pods, %d nodes, %d events per snapshot; %d list errors", last.API.Pods, last.API.Nodes, last.API.Events, last.API.Errors))
+	if d := a.client.DeniedList(); len(d) > 0 {
+		out = append(out, fmt.Sprintf("             not requested (token refused or not installed, retried every %s or on R): %s", a.cfg.Perf.DeniedTTL, strings.Join(d, ", ")))
+	}
 	out = append(out, fmt.Sprintf("This host    CPU %s per cycle (%.1f%% of one core at %.0fs refresh), heap %s, rss-ish %s, %d goroutines, recompute %dx %dms",
 		fmtSecs(last.LocalCPUS), cpu/n/refresh*100, refresh, fmtBytes(int64(last.LocalHeap)), fmtBytes(int64(last.LocalSys)), last.Goroutines, last.Recomputes, last.RecomputeMS))
 	out = append(out, "")

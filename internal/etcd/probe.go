@@ -60,6 +60,8 @@ type Probe struct {
 	LocalMemberID    string        // this node's member id from its own etcd log
 	LeaderEvents     []LeaderEvent // leader elections seen in the local etcd log, oldest first
 	LeaderLogSkipped bool          // the log scan was skipped this cycle (healthy member, not a full cycle)
+	FullSkipped      bool          // config sources/dumps, snapshots, backup hints not collected (light cycle)
+	EtcdctlSkipped   bool          // etcdctl queries skipped (API exec probe covers them)
 	Raft             *RaftOnDisk
 
 	SnapshotDirs []SnapshotDir
@@ -170,9 +172,12 @@ var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9_./:@%=+,-]`)
 func clean(s string) string { return unsafeChars.ReplaceAllString(s, "") }
 
 // Script renders the probe script with config overrides. full=true also
-// scans the etcd container log for leader elections on healthy members
-// (done every cycle on unhealthy ones); see LEADERLOG in scripts/probe.sh.
-func Script(cfg config.Etcd, full bool) string {
+// runs the rarely-changing sections (config sources/dumps, snapshot
+// listings, backup hints) and scans the etcd container log for leader
+// elections on healthy members (done every cycle on unhealthy ones).
+// etcdctl=false skips the etcdctl / crictl exec queries because the API-side
+// exec probe already answered; Probe.Merge carries the previous values.
+func Script(cfg config.Etcd, full, etcdctl bool) string {
 	dirs := make([]string, 0, len(cfg.BackupDirs))
 	for _, d := range cfg.BackupDirs {
 		if c := clean(d); c != "" {
@@ -186,6 +191,7 @@ func Script(cfg config.Etcd, full bool) string {
 	s = strings.ReplaceAll(s, "__CERT__", clean(cfg.ClientCert))
 	s = strings.ReplaceAll(s, "__KEY__", clean(cfg.ClientKey))
 	s = strings.ReplaceAll(s, "__FULL__", map[bool]string{true: "1", false: "0"}[full])
+	s = strings.ReplaceAll(s, "__CTL__", map[bool]string{true: "1", false: "0"}[etcdctl])
 	// PERF footer goes before the END marker the parsers look for
 	s = strings.Replace(s, "\nsec END\n", perf.Footer+"sec END\n", 1)
 	return s
@@ -219,6 +225,8 @@ func Parse(node, out string) *Probe {
 			p.Missing = append(p.Missing, v)
 		}
 	}
+	_, hasSource := secs["SOURCE"]
+	p.FullSkipped = !hasSource
 	p.Sources = lines(secs["SOURCE"])
 	for _, l := range lines(secs["RKE2CONFIG"]) {
 		// "<file>: key: value"
@@ -361,17 +369,33 @@ func parseRaft(raw string) *RaftOnDisk {
 	return r
 }
 
-// MergeLeaderLog carries the previous probe's leader-log facts forward when
-// this probe skipped the scan (healthy member on a light cycle).
-func (p *Probe) MergeLeaderLog(prev *Probe) {
-	if prev == nil || !p.LeaderLogSkipped {
+// Merge carries forward what this probe deliberately skipped: the
+// leader-log scan (healthy member on a light cycle), the full-cycle sections
+// (config sources/dumps, snapshots, backup hints) and the etcdctl queries
+// (API exec probe covered them).
+func (p *Probe) Merge(prev *Probe) {
+	if prev == nil {
 		return
 	}
-	if p.LocalMemberID == "" {
-		p.LocalMemberID = prev.LocalMemberID
+	if p.LeaderLogSkipped {
+		if p.LocalMemberID == "" {
+			p.LocalMemberID = prev.LocalMemberID
+		}
+		if len(p.LeaderEvents) == 0 {
+			p.LeaderEvents = prev.LeaderEvents
+		}
 	}
-	if len(p.LeaderEvents) == 0 {
-		p.LeaderEvents = prev.LeaderEvents
+	if p.FullSkipped && !prev.FullSkipped {
+		p.Sources, p.ConfigDump, p.SnapshotDirs, p.BackupHints = prev.Sources, prev.ConfigDump, prev.SnapshotDirs, prev.BackupHints
+		if len(p.RKE2Config) == 0 {
+			p.RKE2Config = prev.RKE2Config
+		}
+		p.FullSkipped = false
+	}
+	if p.EtcdctlSkipped && !prev.EtcdctlSkipped {
+		p.EtcdctlVia, p.EtcdctlDiag, p.EtcdctlOut = prev.EtcdctlVia, prev.EtcdctlDiag, prev.EtcdctlOut
+		p.Members, p.Statuses, p.Alarms, p.EndpointHealth = prev.Members, prev.Statuses, prev.Alarms, prev.EndpointHealth
+		p.EtcdctlSkipped = false
 	}
 }
 
@@ -554,6 +578,10 @@ func labelValue(labels, key string) string {
 
 func parseEtcdctl(p *Probe, raw string) {
 	p.EtcdctlOut = strings.TrimSpace(raw)
+	if p.EtcdctlOut == "skipped=api" {
+		p.EtcdctlSkipped = true
+		return
+	}
 	parts := map[string]string{}
 	cur := ""
 	for _, l := range strings.Split(raw, "\n") {

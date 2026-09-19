@@ -34,7 +34,8 @@ type Info struct {
 	Uptime                 time.Duration
 	Load1, Load5, Load15   float64
 	CPUs                   int
-	CPUPct                 float64
+	CPUPct                 float64 // -1 until CPUFromPrev has a previous sample (or the probe sampled twice)
+	CPUStat                CPUStat // raw /proc/stat counters of this probe, for the next one to diff against
 	MemTotal, MemAvail     uint64
 	SwapTotal, SwapFree    uint64
 	MemPct                 float64
@@ -50,6 +51,7 @@ type Info struct {
 	ControlPlane           bool
 	Certs                  []Cert
 	KubeletFlags           map[string]string
+	KubeletPID             int
 	Sysctl                 map[string]string
 	Perms                  []Perm
 	EtcdUser               bool
@@ -68,6 +70,7 @@ type Info struct {
 	RegistryMirrors        []string // registry hosts with mirrors in registries.yaml
 	ContainerdHosts        []string // registries containerd has certs.d/hosts.toml for
 	ContainerdConfig       []ConfigFile
+	Preflight              Preflight // what stops rke2 from (re)starting or the node from re-provisioning (preflight.go)
 
 	// OS STIG facts (internal/stigdata templates)
 	SysctlAll      map[string]string
@@ -85,8 +88,17 @@ type Info struct {
 	STIGStat       map[string]Perm
 	STIGViol       map[string][]string // check id -> violating paths (find scans)
 	STIGFiles      []ConfigFile        // config files the templates read (masked)
-	STIGProbed     bool                // OS STIG facts present (collected by this or a previous probe)
-	STIGCollected  time.Time           // when the OS STIG facts were collected
+	STIGCmd        map[string]string   // one-line facts for the named evaluators (STIGCMD section)
+	STIGSweep      map[string][]string // filesystem sweep findings by kind (WWNOSTICKY, NOUSER, HOME, INITPERM, ...)
+	Passwd         []PasswdEntry
+	Groups         []GroupEntry
+	ShadowMeta     map[string]ShadowMeta // user -> hash type and ages (never the hash)
+	SSSDConf       map[string]string     // selected sssd.conf keys
+	UFWStatus      string                // ufw status verbose
+	SELinuxLogins  []string              // semanage login -l
+	Lsblk          []string              // NAME TYPE MOUNTPOINT
+	STIGProbed     bool                  // OS STIG facts present (collected by this or a previous probe)
+	STIGCollected  time.Time             // when the OS STIG facts were collected
 
 	// heavy
 	Images     []Image
@@ -95,6 +107,27 @@ type Info struct {
 	Journal    []string
 	LogFiles   []ConfigFile
 	CrictlInfo string
+}
+
+// CPUStat is the first line of /proc/stat, summed: total jiffies and idle
+// (idle + iowait) jiffies.
+type CPUStat struct {
+	Total, Idle float64
+	At          time.Time
+}
+
+// CPUFromPrev computes CPUPct from the previous probe's counters when this
+// probe did not sample twice itself. The window is the refresh interval,
+// which is a better average than a one-second spot sample.
+func (i *Info) CPUFromPrev(prev *Info) {
+	if i.CPUPct >= 0 || prev == nil || prev.Err != nil || prev.CPUStat.Total == 0 || i.CPUStat.Total == 0 {
+		return
+	}
+	dt := i.CPUStat.Total - prev.CPUStat.Total
+	if dt <= 0 { // reboot or counter reset
+		return
+	}
+	i.CPUPct = 100 * (1 - (i.CPUStat.Idle-prev.CPUStat.Idle)/dt)
 }
 
 // Mount is one filesystem from df.
@@ -135,6 +168,27 @@ type Cert struct {
 type Perm struct {
 	Path, Mode, User, Group, Type string
 	UID, GID                      string // numeric ids (STIG stat lines only)
+}
+
+// PasswdEntry is one /etc/passwd line.
+type PasswdEntry struct {
+	Name, Home, Shell string
+	UID, GID          int
+}
+
+// GroupEntry is one /etc/group line.
+type GroupEntry struct {
+	Name    string
+	GID     int
+	Members []string
+}
+
+// ShadowMeta is the non-secret part of an /etc/shadow entry: the hash prefix
+// ("$6$"), "locked" or "empty", and the password ageing fields.
+type ShadowMeta struct {
+	Hash                       string
+	MinDays, MaxDays, Inactive string
+	Expire                     string
 }
 
 // MountEntry is one findmnt line.
@@ -256,6 +310,9 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 		info.CPUs, _ = strconv.Atoi(f[0])
 	}
 	info.CPUPct = cpuPct(secs["STAT1"], secs["STAT2"])
+	if t, idle, ok := cpuCounters(secs["STAT1"]); ok {
+		info.CPUStat = CPUStat{Total: t, Idle: idle, At: info.Collected}
+	}
 	parseMem(info, secs["MEM"])
 	info.Mounts = parseDF(secs["DF"])
 	applyInodes(info.Mounts, secs["DFI"])
@@ -321,6 +378,10 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 		}
 	}
 	for _, a := range nonEmpty(secs["KUBELETCMD"]) {
+		if v, ok := strings.CutPrefix(a, "pid="); ok {
+			info.KubeletPID, _ = strconv.Atoi(strings.TrimSpace(v))
+			continue
+		}
 		if strings.HasPrefix(a, "--") {
 			k, v, found := strings.Cut(strings.TrimPrefix(a, "--"), "=")
 			if !found {
@@ -378,6 +439,7 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 		}
 	}
 	parseOSStig(info, secs)
+	parsePreflight(info, secs)
 	info.ConfigFiles = parseDumps(secs["RKE2CFG"])
 	info.ExtraFiles = parseDumps(secs["RKE2EXTRA"])
 	info.Manifests = parseManifests(secs["MANIFESTS"])
@@ -485,26 +547,29 @@ func nonEmpty(s string) []string {
 func fields(s string) []string { return strings.Fields(s) }
 
 func cpuPct(a, b string) float64 {
-	pa, pb := fields(a), fields(b)
-	if len(pa) < 5 || len(pb) < 5 || pa[0] != "cpu" || pb[0] != "cpu" {
-		return -1
-	}
-	sum := func(f []string) (total, idle float64) {
-		for i := 1; i < len(f); i++ {
-			v, _ := strconv.ParseFloat(f[i], 64)
-			total += v
-			if i == 4 || i == 5 { // idle + iowait
-				idle += v
-			}
-		}
-		return
-	}
-	t1, i1 := sum(pa)
-	t2, i2 := sum(pb)
-	if t2-t1 <= 0 {
+	t1, i1, ok1 := cpuCounters(a)
+	t2, i2, ok2 := cpuCounters(b)
+	if !ok1 || !ok2 || t2-t1 <= 0 {
 		return -1
 	}
 	return 100 * (1 - (i2-i1)/(t2-t1))
+}
+
+// cpuCounters sums the "cpu ..." line of /proc/stat into total and idle
+// (idle + iowait) jiffies.
+func cpuCounters(line string) (total, idle float64, ok bool) {
+	f := fields(line)
+	if len(f) < 5 || f[0] != "cpu" {
+		return 0, 0, false
+	}
+	for i := 1; i < len(f); i++ {
+		v, _ := strconv.ParseFloat(f[i], 64)
+		total += v
+		if i == 4 || i == 5 {
+			idle += v
+		}
+	}
+	return total, idle, true
 }
 
 func parseMem(info *Info, s string) {
@@ -762,6 +827,55 @@ func parseOSStig(info *Info, secs map[string]string) {
 		}
 	}
 	info.STIGFiles = parseDumps(secs["STIGFILES"])
+
+	// facts for the named evaluators (os_stig_facts.sh)
+	info.STIGCmd = map[string]string{}
+	for _, l := range nonEmpty(secs["STIGCMD"]) {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			info.STIGCmd[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	info.STIGSweep = map[string][]string{}
+	for _, l := range nonEmpty(secs["STIGSWEEP"]) {
+		if k, v, ok := strings.Cut(l, "|"); ok {
+			info.STIGSweep[k] = append(info.STIGSweep[k], v)
+		}
+	}
+	for _, l := range nonEmpty(secs["PASSWD"]) {
+		f := strings.Split(strings.TrimSpace(l), ":")
+		if len(f) >= 7 {
+			uid, _ := strconv.Atoi(f[2])
+			gid, _ := strconv.Atoi(f[3])
+			info.Passwd = append(info.Passwd, PasswdEntry{Name: f[0], UID: uid, GID: gid, Home: f[5], Shell: f[6]})
+		}
+	}
+	for _, l := range nonEmpty(secs["GROUP"]) {
+		f := strings.Split(strings.TrimSpace(l), ":")
+		if len(f) >= 3 {
+			gid, _ := strconv.Atoi(f[2])
+			g := GroupEntry{Name: f[0], GID: gid}
+			if len(f) >= 4 && f[3] != "" {
+				g.Members = strings.Split(f[3], ",")
+			}
+			info.Groups = append(info.Groups, g)
+		}
+	}
+	info.ShadowMeta = map[string]ShadowMeta{}
+	for _, l := range nonEmpty(secs["SHADOWMETA"]) {
+		f := strings.Split(strings.TrimSpace(l), ":")
+		if len(f) >= 6 {
+			info.ShadowMeta[f[0]] = ShadowMeta{Hash: f[1], MinDays: f[2], MaxDays: f[3], Inactive: f[4], Expire: f[5]}
+		}
+	}
+	info.SSSDConf = map[string]string{}
+	for _, l := range nonEmpty(secs["SSSD"]) {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			info.SSSDConf[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
+		}
+	}
+	info.UFWStatus = strings.TrimSpace(secs["UFWSTATUS"])
+	info.SELinuxLogins = nonEmpty(secs["SEMANAGE"])
+	info.Lsblk = nonEmpty(secs["LSBLK"])
 }
 
 // STIGFile returns a dumped config file's content and whether it was present.
@@ -1194,6 +1308,8 @@ func (i *Info) MergeSTIG(prev *Info) {
 	i.Findmnt, i.Fstab, i.SSHD = prev.Findmnt, prev.Fstab, prev.SSHD
 	i.AuditRules, i.AuditRuleFiles, i.Modprobe, i.LoadedModules, i.GrubArgs = prev.AuditRules, prev.AuditRuleFiles, prev.Modprobe, prev.LoadedModules, prev.GrubArgs
 	i.STIGStat, i.STIGViol, i.STIGFiles = prev.STIGStat, prev.STIGViol, prev.STIGFiles
+	i.STIGCmd, i.STIGSweep, i.Passwd, i.Groups, i.ShadowMeta = prev.STIGCmd, prev.STIGSweep, prev.Passwd, prev.Groups, prev.ShadowMeta
+	i.SSSDConf, i.UFWStatus, i.SELinuxLogins, i.Lsblk = prev.SSSDConf, prev.UFWStatus, prev.SELinuxLogins, prev.Lsblk
 }
 
 // MergeConfig carries the config tier forward from the previous probe when
@@ -1206,8 +1322,12 @@ func (i *Info) MergeConfig(prev *Info) {
 	}
 	i.ConfigProbed, i.ConfigCollected = true, prev.ConfigCollected
 	i.Certs, i.Sysctl, i.Perms = prev.Certs, prev.Sysctl, prev.Perms
+	if i.NTPSynced == nil { // timedatectl only runs on config cycles when chrony/timesyncd are not there
+		i.NTPSynced, i.NTPEnabled = prev.NTPSynced, prev.NTPEnabled
+	}
 	i.ConfigFiles, i.ExtraFiles, i.Manifests, i.StaticPods, i.Settings = prev.ConfigFiles, prev.ExtraFiles, prev.Manifests, prev.StaticPods, prev.Settings
 	i.CNI, i.Registries, i.RegistryMirrors, i.ContainerdHosts, i.ContainerdConfig = prev.CNI, prev.Registries, prev.RegistryMirrors, prev.ContainerdHosts, prev.ContainerdConfig
+	i.Preflight.mergeConfig(&prev.Preflight)
 	if i.Hardening == nil {
 		i.Hardening = map[string]string{}
 	}
@@ -1244,4 +1364,5 @@ func (i *Info) MergeHeavy(prev *Info) {
 	i.Journal = prev.Journal
 	i.LogFiles = prev.LogFiles
 	i.CrictlInfo = prev.CrictlInfo
+	i.Preflight.mergeHeavy(&prev.Preflight)
 }

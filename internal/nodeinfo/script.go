@@ -16,6 +16,8 @@ import (
 // Options controls what the node script collects.
 type Options struct {
 	Heavy         bool     // include images, tarball manifests and journal
+	KubeletPID    int      // kubelet pid seen by the previous probe (skips the /proc scan while it is still the kubelet)
+	CPUSample     bool     // sample /proc/stat twice with a 1 s sleep (first contact only; later probes diff against the previous one)
 	Config        bool     // include the config tier of the base script: certs, sysctls, file modes, slow hardening commands, rke2/k3s config, manifests, registries (heavy cycles / first contact / R; carried forward otherwise by Info.MergeConfig)
 	OSStig        bool     // include the OS STIG facts (sysctl -a, packages, units, mounts, sshd -T, audit rules, stat/find scans, config dumps)
 	LogLines      int      // journalctl -n
@@ -47,10 +49,15 @@ func Script(o Options) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(strings.ReplaceAll(baseScript, "__CONFIG__", map[bool]string{true: "1", false: "0"}[o.Config]))
+	base := strings.ReplaceAll(baseScript, "__CONFIG__", map[bool]string{true: "1", false: "0"}[o.Config])
+	base = strings.ReplaceAll(base, "__CPUSAMPLE__", map[bool]string{true: "1", false: "0"}[o.CPUSample])
+	b.WriteString(strings.ReplaceAll(base, "__KPID__", fmt.Sprint(max(o.KubeletPID, 0))))
+	pf := strings.ReplaceAll(preflightScript, "__CONFIG__", map[bool]string{true: "1", false: "0"}[o.Config])
+	b.WriteString(strings.ReplaceAll(pf, "__HEAVY__", map[bool]string{true: "1", false: "0"}[o.Heavy]))
 	if o.OSStig {
 		b.WriteString(osStigScript)
 		b.WriteString(stigdata.ProbeScript())
+		b.WriteString(osStigFactsScript)
 	}
 	if o.Heavy {
 		h := strings.ReplaceAll(heavyScript, "__LINES__", fmt.Sprint(lines))
@@ -74,5 +81,16 @@ var baseScript string
 //go:embed scripts/os_stig.sh
 var osStigScript string
 
+//go:embed scripts/os_stig_facts.sh
+var osStigFactsScript string
+
 //go:embed scripts/heavy.sh
 var heavyScript string
+
+// preflightScript collects the facts behind the "will rke2 keep running /
+// can this node be re-provisioned" findings (swap, fapolicyd, auditd disk
+// actions, account expiry, proxies, vSphere cloud-init ISO, registry
+// credentials); see preflight.go.
+//
+//go:embed scripts/preflight.sh
+var preflightScript string

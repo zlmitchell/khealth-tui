@@ -139,7 +139,7 @@ func TestTemplateEvaluators(t *testing.T) {
 }
 
 func TestEmbeddedTables(t *testing.T) {
-	want := map[string]int{"rhel8": 369, "rhel9": 445, "rhel10": 434, "ubuntu2004": 173, "ubuntu2204": 188, "ubuntu2404": 194}
+	want := map[string]int{"rhel8": 369, "rhel9": 445, "rhel10": 434, "ubuntu2204": 188, "ubuntu2404": 194}
 	for prod, n := range want {
 		tb, err := stigdata.Load(prod)
 		if err != nil {
@@ -160,7 +160,7 @@ func TestEmbeddedTables(t *testing.T) {
 	}
 	for _, b := range OSBenchmarks {
 		total, auto := b.Coverage()
-		if total == 0 || (b.product != "ubuntu2004" && auto*100/total < 40) {
+		if total == 0 || auto*100/total < 98 {
 			t.Errorf("%s: %d/%d automated", b.Name, auto, total)
 		}
 		t.Logf("%s: %d/%d automated", b.Name, auto, total)

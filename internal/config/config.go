@@ -50,6 +50,9 @@ type Perf struct {
 	// per-node kubelet configz between refreshes (0 = fetch every cycle).
 	DiscoveryTTL time.Duration `yaml:"discovery_ttl"`
 	ConfigzTTL   time.Duration `yaml:"configz_ttl"`
+	// DeniedTTL: API calls the token is refused (403) or whose resource type
+	// does not exist are not retried for this long (R retries them).
+	DeniedTTL time.Duration `yaml:"denied_ttl"`
 }
 
 // Actions configures the (opt-out) mutating operations run through CLIs.
@@ -154,7 +157,7 @@ func Default() Config {
 			Nice:          true,
 			Backoff:       true,
 		},
-		Perf:    Perf{WatchCache: true, Protobuf: true, DiscoveryTTL: 5 * time.Minute, ConfigzTTL: 10 * time.Minute},
+		Perf:    Perf{WatchCache: true, Protobuf: true, DiscoveryTTL: 5 * time.Minute, ConfigzTTL: 10 * time.Minute, DeniedTTL: 10 * time.Minute},
 		Etcd:    Etcd{MaxBackupAge: 24 * time.Hour},
 		Helm:    Helm{CheckUpdates: true, UseHelmRepos: true, Timeout: 15 * time.Second},
 		Logs:    Logs{Lines: 400, Since: "-24h"},

@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"k8s-health-tui/internal/checks"
 	"k8s-health-tui/internal/k8s"
 )
 
@@ -187,6 +188,23 @@ func (a *App) nodeDetail(name string) (string, []string) {
 			rows = append(rows, []string{it.Name, it.Runtime, it.Boot, state, it.Detail})
 		}
 		table([]column{{title: "ITEM"}, {title: "RUNTIME"}, {title: "BOOT CONFIG"}, {title: "ASSESSMENT"}, {title: "DETAIL"}}, rows)
+	}
+
+	// ---- preflight: what stops rke2 from restarting / the node from re-provisioning ----
+	if rows := checks.PreflightRows(ni, a.cfg, time.Now()); len(rows) > 0 {
+		add("", styleTitle.Render("Preflight")+styleDim.Render("  swap, fapolicyd, CSI, auditd, mounts, accounts, platform, registries"))
+		var tr [][]string
+		for _, r := range rows {
+			state := styleOK.Render("ok")
+			switch r[2] {
+			case "warn":
+				state = styleWarn.Render("WARN")
+			case "crit":
+				state = styleCrit.Render("CRIT")
+			}
+			tr = append(tr, []string{r[0], trunc(r[1], w-36), state})
+		}
+		table([]column{{title: "ITEM"}, {title: "STATE"}, {title: "ASSESSMENT"}}, tr)
 	}
 
 	// ---- services ----

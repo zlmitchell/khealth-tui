@@ -224,9 +224,7 @@ func Evaluate(in Input) []Finding {
 		if ni.CPUs > 0 && ni.Load1/float64(ni.CPUs) >= thr.LoadPerCPUWarn {
 			add(SevWarn, "node", name, fmt.Sprintf("load %.1f on %d CPUs", ni.Load1, ni.CPUs), "")
 		}
-		if ni.SwapTotal > 0 && ni.SwapTotal-ni.SwapFree > 0 {
-			add(SevInfo, "node", name, "swap in use", "kubelet expects swap off unless NodeSwap is configured")
-		}
+		evalPreflight(name, ni, in, add) // swap, fapolicyd, auditd, mounts, accounts, proxies, vSphere ISO, registries (preflight.go)
 		for _, svc := range ni.Services {
 			critical := svc.Name == "kubelet" || svc.Name == "containerd" || svc.Name == "rke2-server" || svc.Name == "rke2-agent" || svc.Name == "k3s" || svc.Name == "k3s-agent" || svc.Name == "etcd"
 			if critical && svc.Active != "active" {

@@ -201,12 +201,34 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		s.Errors = append(s.Errors, what+": "+err.Error())
 		mu.Unlock()
 	}
+	// run skips calls the token was refused (403) last time within DeniedTTL
+	// - the cached error is still reported so the RBAC findings persist -
+	// and remembers new refusals.
 	run := func(what string, f func() error) {
+		if err, ok := c.Denied(what); ok {
+			fail(what, err)
+			return
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if err := f(); err != nil {
+				c.NoteDenied(what, err, false)
 				fail(what, err)
+			}
+		}()
+	}
+	// optional is run for calls whose absence is not an error (metrics-server,
+	// rke2 CRs, Rancher): skipped while denied or not installed, never reported
+	optional := func(what string, f func() error) {
+		if _, ok := c.Denied(what); ok {
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := f(); err != nil {
+				c.NoteDenied(what, err, true)
 			}
 		}()
 	}
@@ -390,13 +412,11 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		dest *map[string]bool
 	}{{"secrets", &s.SecretNames}, {"configmaps", &s.ConfigMapNames}, {"serviceaccounts", &s.SANames}} {
 		spec := spec
-		wg.Add(1)
-		go func() { // metadata-only, so cheap even with large secrets; optional
-			defer wg.Done()
+		optional(spec.res+"-metadata", func() error { // metadata-only, so cheap even with large secrets
 			gvr := schema.GroupVersionResource{Version: "v1", Resource: spec.res}
 			l, err := c.Meta.Resource(gvr).List(ctx, all)
 			if err != nil {
-				return
+				return err
 			}
 			names := make(map[string]bool, len(l.Items))
 			var helm []string
@@ -415,7 +435,8 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 				helmFPs = append(helmFPs, spec.res+":"+strings.Join(helm, ","))
 			}
 			mu.Unlock()
-		}()
+			return nil
+		})
 	}
 	run("networkpolicies", func() error {
 		l, err := cs.NetworkingV1().NetworkPolicies("").List(ctx, all)
@@ -447,18 +468,17 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		mu.Unlock()
 		return nil
 	})
-	wg.Add(1)
-	go func() { // metrics-server is optional: absence is not an error
-		defer wg.Done()
+	optional("metrics.k8s.io", func() error { // metrics-server is optional: absence is not an error
 		m, err := c.nodeMetrics(ctx)
 		if err != nil {
-			return
+			return err
 		}
 		mu.Lock()
 		s.NodeMetrics = m
 		s.MetricsAvailable = true
 		mu.Unlock()
-	}()
+		return nil
+	})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -475,14 +495,16 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		s.HelmCharts = charts
 		mu.Unlock()
 	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r := c.rancherInfo(ctx)
-		mu.Lock()
-		s.Rancher = r
-		mu.Unlock()
-	}()
+	if _, denied := c.Denied("rancher"); !denied {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := c.rancherInfo(ctx)
+			mu.Lock()
+			s.Rancher = r
+			mu.Unlock()
+		}()
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -505,7 +527,10 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 	c.cacheMu.Unlock()
 	if fpOK {
 		s.HelmReleases = cached
+	} else if err, denied := c.Denied("helm-releases"); denied {
+		fail("helm-releases", err)
 	} else if rels, err := c.helmReleases(ctx); err != nil {
+		c.NoteDenied("helm-releases", err, false)
 		fail("helm-releases", err)
 	} else {
 		s.HelmReleases = rels
@@ -514,17 +539,41 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		c.cacheMu.Unlock()
 	}
 
-	// kubelet configz needs the node list first
+	// kubelet configz needs the node list first. nodes/proxy is one RBAC
+	// rule for every node: once refused, no node is asked again until the
+	// DeniedTTL passes (the cached error is still shown).
 	var kwg sync.WaitGroup
 	sem := make(chan struct{}, 6)
+	cfgDenied, cfgOK := c.Denied("nodes/proxy configz")
+	statsDenied, statsOK := c.Denied("nodes/proxy stats")
+	if cfgOK {
+		s.KubeletCfgErr = cfgDenied.Error()
+	}
+	if statsOK {
+		s.PVCUsageErr = statsDenied.Error()
+	}
 	for _, n := range s.Nodes {
+		if cfgOK && statsOK {
+			break
+		}
 		kwg.Add(1)
 		go func(name string) {
 			defer kwg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			cfg, err := c.cachedConfigz(ctx, name)
-			usage, uerr := c.kubeletVolumeStats(ctx, name)
+			var cfg map[string]any
+			var usage map[string]VolumeUsage
+			err, uerr := cfgDenied, statsDenied
+			if !cfgOK {
+				if cfg, err = c.cachedConfigz(ctx, name); err != nil {
+					c.NoteDenied("nodes/proxy configz", err, false)
+				}
+			}
+			if !statsOK {
+				if usage, uerr = c.kubeletVolumeStats(ctx, name); uerr != nil {
+					c.NoteDenied("nodes/proxy stats", uerr, false)
+				}
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			for k, v := range usage {
@@ -721,7 +770,7 @@ func (c *Client) rke2Snapshots(ctx context.Context) []EtcdSnapshotRecord {
 	seen := map[string]bool{}
 	var out []EtcdSnapshotRecord
 
-	if l, err := c.Dyn.Resource(etcdSnapshotGVR).List(ctx, c.listOpts()); err == nil {
+	if l, err := c.dynList(ctx, "etcdsnapshotfiles.k3s.cattle.io", etcdSnapshotGVR); err == nil {
 		for _, it := range l.Items {
 			r := EtcdSnapshotRecord{Source: "crd"}
 			r.Name, _, _ = unstructured.NestedString(it.Object, "spec", "snapshotName")
@@ -814,12 +863,12 @@ func (c *Client) S3Secret(ctx context.Context, name string) *S3SecretInfo {
 }
 
 func (c *Client) helmCharts(ctx context.Context) []HelmChartCR {
-	l, err := c.Dyn.Resource(helmChartGVR).List(ctx, c.listOpts())
+	l, err := c.dynList(ctx, "helmcharts.helm.cattle.io", helmChartGVR)
 	if err != nil {
 		return nil
 	}
 	configs := map[string]string{}
-	if cl, err := c.Dyn.Resource(helmChartConfigGVR).List(ctx, c.listOpts()); err == nil {
+	if cl, err := c.dynList(ctx, "helmchartconfigs.helm.cattle.io", helmChartConfigGVR); err == nil {
 		for _, it := range cl.Items {
 			v, _, _ := unstructured.NestedString(it.Object, "spec", "valuesContent")
 			configs[it.GetNamespace()+"/"+it.GetName()] = v
@@ -856,7 +905,10 @@ func (c *Client) rancherInfo(ctx context.Context) *RancherInfo {
 	info := &RancherInfo{Env: map[string]string{}}
 	dep, err := c.CS.AppsV1().Deployments("cattle-system").Get(ctx, "cattle-cluster-agent", metav1.GetOptions{})
 	if err != nil {
-		if !apierrors.IsNotFound(err) && !apierrors.IsForbidden(err) {
+		if c.NoteDenied("rancher", err, false) {
+			return nil
+		}
+		if !apierrors.IsNotFound(err) {
 			return nil
 		}
 		// not managed by Rancher (or no access) - check for rancher itself (this could be the management cluster)

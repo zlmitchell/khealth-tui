@@ -250,7 +250,7 @@ type tickMsg struct{ seq int }
 // New creates the application model.
 func New(cfg config.Config) (*App, error) {
 	client, err := k8s.NewWithOptions(cfg.Kubeconfig, cfg.Context, k8s.Options{
-		WatchCache: cfg.Perf.WatchCache, Protobuf: cfg.Perf.Protobuf, DiscoveryTTL: cfg.Perf.DiscoveryTTL, ConfigzTTL: cfg.Perf.ConfigzTTL,
+		WatchCache: cfg.Perf.WatchCache, Protobuf: cfg.Perf.Protobuf, DiscoveryTTL: cfg.Perf.DiscoveryTTL, ConfigzTTL: cfg.Perf.ConfigzTTL, DeniedTTL: cfg.Perf.DeniedTTL,
 	})
 	if err != nil {
 		return nil, err
@@ -361,7 +361,9 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 	if a.fp.cur != nil {
 		a.fp.cur.Heavy = heavy
 	}
-	etcdScript := etcd.Script(a.cfg.Etcd, heavy)
+	// etcdctl over SSH is the fallback for the kubectl-exec probe: skip the
+	// three crictl execs per cycle while that probe answers and the API is up
+	etcdScript := etcd.Script(a.cfg.Etcd, heavy, offline || a.etcdExec == nil || a.etcdExec.Err != nil)
 	for i := range nodes {
 		n := &nodes[i]
 		if len(only) > 0 && !only[n.Name] {
@@ -381,6 +383,10 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 		prev := a.nodes[name]
 		opts.OSStig = a.stigNext || prev == nil || !prev.STIGProbed
 		opts.Config = heavy || prev == nil || !prev.ConfigProbed
+		opts.CPUSample = prev == nil || prev.Err != nil || prev.CPUStat.Total == 0
+		if prev != nil && prev.Err == nil {
+			opts.KubeletPID = prev.KubeletPID
+		}
 		if prev != nil {
 			opts.KnownTarballs = prev.TarballKeys()
 		}
@@ -464,10 +470,17 @@ func (a *App) etcdExecCmd(snap *k8s.Snapshot) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		var last *etcd.Probe
+		if err, denied := client.Denied("pods/exec"); denied {
+			// pods/exec refused earlier: do not exec into every etcd pod again
+			return etcdExecMsg{seq: seq, probe: &etcd.Probe{Node: names[0], Collected: time.Now(), Dist: dist, Err: err, EtcdctlDiag: err.Error()}}
+		}
 		for _, n := range names {
 			p := etcd.ExecProbe(ctx, client, n, podNames[n], dist)
 			last = p
 			if p.Err == nil && len(p.Members) > 0 {
+				break
+			}
+			if client.NoteDenied("pods/exec", p.Err, false) {
 				break
 			}
 		}
@@ -737,6 +750,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.seq != a.seq {
 			return a, nil
 		}
+		m.info.CPUFromPrev(a.nodes[m.info.Node])
 		m.info.MergeHeavy(a.nodes[m.info.Node])
 		m.info.MergeSTIG(a.nodes[m.info.Node])
 		m.info.MergeConfig(a.nodes[m.info.Node])
@@ -750,7 +764,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.seq != a.seq {
 			return a, nil
 		}
-		m.probe.MergeLeaderLog(a.etcd[m.probe.Node])
+		m.probe.Merge(a.etcd[m.probe.Node])
 		a.etcd[m.probe.Node] = m.probe
 		delete(a.etcdPend, m.probe.Node)
 		a.recordEtcdProbe(m.probe)
@@ -961,6 +975,7 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "R":
 		a.heavyNext = true
 		a.stigNext = true
+		a.client.ResetDenied() // retry the API calls that were refused
 		if !a.refreshing {
 			a.setStatus("full refresh (logs, images, tarballs, OS STIG facts)")
 			return a, a.refreshCmd()

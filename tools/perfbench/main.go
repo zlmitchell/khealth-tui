@@ -127,7 +127,7 @@ func main() {
 	klog.SetOutput(io.Discard)
 	klog.LogToStderr(false)
 
-	opts := k8s.Options{WatchCache: cfg.Perf.WatchCache, Protobuf: cfg.Perf.Protobuf, DiscoveryTTL: cfg.Perf.DiscoveryTTL, ConfigzTTL: cfg.Perf.ConfigzTTL}
+	opts := k8s.Options{WatchCache: cfg.Perf.WatchCache, Protobuf: cfg.Perf.Protobuf, DiscoveryTTL: cfg.Perf.DiscoveryTTL, ConfigzTTL: cfg.Perf.ConfigzTTL, DeniedTTL: cfg.Perf.DeniedTTL}
 	client, err := k8s.NewWithOptions(cfg.Kubeconfig, cfg.Context, opts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -245,7 +245,7 @@ func main() {
 		if cyc > 1 && *interval > 0 {
 			time.Sleep(*interval)
 		}
-		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, PVPaths: pvPaths, Heavy: cyc == 1 && *heavy, OSStig: cyc == 1 && *stig, Config: cyc == 1}
+		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, PVPaths: pvPaths, Heavy: cyc == 1 && *heavy, OSStig: cyc == 1 && *stig, Config: cyc == 1, CPUSample: cyc == 1}
 		kind := "node"
 		if o.Heavy {
 			kind += "+heavy"
@@ -289,7 +289,7 @@ func main() {
 					defer wg.Done()
 					c, cancel := context.WithTimeout(ctx, timeout)
 					defer cancel()
-					res := runner.Run(c, t.host, etcd.Script(cfg.Etcd, o.Heavy))
+					res := runner.Run(c, t.host, etcd.Script(cfg.Etcd, o.Heavy, o.Heavy))
 					p := etcd.Parse(t.name, res.Stdout)
 					pr := probeResult{Node: t.name, Kind: "etcd", Cycle: cyc, Wall: res.Finished.Sub(res.Started), Cost: p.Cost, Out: len(res.Stdout), Script: res.ScriptSize}
 					if res.Err != nil && !strings.Contains(res.Stdout, "===END") {

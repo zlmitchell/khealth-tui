@@ -476,7 +476,7 @@ var crdGVR = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version:
 
 // ListCRDs returns all CustomResourceDefinitions (without instance counts).
 func (c *Client) ListCRDs(ctx context.Context) ([]CRDInfo, error) {
-	l, err := c.Dyn.Resource(crdGVR).List(ctx, c.listOpts())
+	l, err := c.dynList(ctx, "customresourcedefinitions", crdGVR)
 	if err != nil {
 		return nil, err
 	}

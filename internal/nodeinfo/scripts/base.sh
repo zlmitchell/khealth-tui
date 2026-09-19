@@ -34,8 +34,10 @@ sec UPTIME; cat /proc/uptime
 sec LOAD; cat /proc/loadavg
 sec NPROC; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo
 sec STAT1; head -1 /proc/stat
-sleep 1
-sec STAT2; head -1 /proc/stat
+# CPU utilisation is the delta between this and the previous probe's
+# counters (Info.CPUFromPrev): no sleep on the node. Only the first contact
+# has nothing to diff against and samples over one second here.
+if [ "__CPUSAMPLE__" = 1 ]; then sleep 1; sec STAT2; head -1 /proc/stat; fi
 sec MEM; cat /proc/meminfo
 sec DF; df -PkT -x tmpfs -x devtmpfs -x overlay -x squashfs -x nsfs -x efivarfs -x fuse.lxcfs -x shm 2>/dev/null || df -Pk
 sec PVMOUNTS; df -Pk 2>/dev/null | grep -E 'kubelet/(pods|plugins)/.*/volumes/' | awk '{print $2"|"$3"|"$4"|"$5"|"$6}'
@@ -54,7 +56,18 @@ echo "$UNITS_OUT" | awk -F'|' '$1=="kubelet"||$1=="containerd"||$1=="rke2-server
 sec UNITS
 echo "$UNITS_OUT" | awk -F'|' '$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="kubelet"||$1=="containerd"||$1=="rancher-system-agent"||$1=="etcd"{print $1"|"$3"|"$4"|"$5"|"$6"|"$7"|"}'
 sec NTP
-timedatectl show -p NTPSynchronized -p NTP 2>/dev/null
+# timedatectl activates systemd-timedated over D-Bus (~0.8 s wall); read the
+# time daemon directly when it is chrony (6 ms) or timesyncd (a file) and
+# only fall back to timedatectl on config cycles
+if command -v chronyc >/dev/null 2>&1 && CT=$(chronyc -n tracking 2>/dev/null); then
+  case "$CT" in *"Leap status"*Normal*) echo NTPSynchronized=yes;; *) echo NTPSynchronized=no;; esac
+  echo NTP=yes
+elif [ -d /run/systemd/timesync ]; then
+  [ -f /run/systemd/timesync/synchronized ] && echo NTPSynchronized=yes || echo NTPSynchronized=no
+  echo NTP=yes
+elif [ "__CONFIG__" = 1 ]; then
+  timedatectl show -p NTPSynchronized -p NTP 2>/dev/null
+fi
 sec DIST
 for d in /etc/rancher/rke2 /var/lib/rancher/rke2/server /var/lib/rancher/rke2/agent /etc/rancher/k3s /var/lib/rancher/k3s/server /etc/kubernetes/manifests /etc/kubernetes/pki /var/lib/etcd /var/lib/rancher/rke2/server/db/etcd; do
   [ -d "$d" ] && echo "$d"
@@ -71,8 +84,11 @@ if command -v openssl >/dev/null 2>&1; then
 fi
 fi
 sec KUBELETCMD
-p=$(pidof kubelet 2>/dev/null | cut -d' ' -f1)
-[ -n "$p" ] && tr '\0' '\n' < /proc/$p/cmdline
+# pidof walks all of /proc (~40 ms); reuse the pid from the previous probe
+# while it is still the kubelet
+p=__KPID__
+{ [ "$p" -gt 0 ] && [ "$(cat /proc/$p/comm 2>/dev/null)" = kubelet ]; } 2>/dev/null || p=$(pidof kubelet 2>/dev/null | cut -d' ' -f1)
+[ -n "$p" ] && { echo "pid=$p"; tr '\0' '\n' < /proc/$p/cmdline; }
 if [ "__CONFIG__" = 1 ]; then
 sec SYSCTL
 for k in vm.overcommit_memory vm.panic_on_oom kernel.panic kernel.panic_on_oops kernel.keys.root_maxbytes kernel.keys.root_maxkeys net.ipv4.ip_forward net.bridge.bridge-nf-call-iptables fs.inotify.max_user_instances fs.inotify.max_user_watches kernel.randomize_va_space kernel.dmesg_restrict kernel.kptr_restrict kernel.yama.ptrace_scope kernel.core_pattern fs.protected_symlinks fs.protected_hardlinks net.ipv4.conf.all.accept_redirects net.ipv4.conf.default.accept_redirects net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.icmp_echo_ignore_broadcasts; do

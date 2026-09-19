@@ -171,7 +171,7 @@ func TestParseNoEtcd(t *testing.T) {
 }
 
 func TestScriptSanitises(t *testing.T) {
-	s := Script(config.Etcd{BackupDirs: []string{"/backup/etcd", "/bad'; rm -rf /"}, Endpoint: "https://10.0.0.5:2379"}, false)
+	s := Script(config.Etcd{BackupDirs: []string{"/backup/etcd", "/bad'; rm -rf /"}, Endpoint: "https://10.0.0.5:2379"}, false, true)
 	if !strings.Contains(s, "EXTRA_DIRS='/backup/etcd /badrm-rf/'") {
 		t.Errorf("dirs not sanitised: %s", s[:200])
 	}
@@ -238,10 +238,13 @@ wal=1789789863 /var/lib/rancher/rke2/server/db/etcd/member/wal/0000000000000007-
 }
 
 func TestScriptFullFlagAndPerfFooter(t *testing.T) {
-	light := Script(config.Etcd{}, false)
-	full := Script(config.Etcd{}, true)
+	light := Script(config.Etcd{}, false, false)
+	full := Script(config.Etcd{}, true, true)
 	if !strings.Contains(light, `[ "0" = 1 ]`) || !strings.Contains(full, `[ "1" = 1 ]`) {
 		t.Errorf("__FULL__ not substituted")
+	}
+	if !strings.Contains(light, `[ "0" = 0 ]`) || !strings.Contains(full, `[ "1" = 0 ]`) || strings.Contains(full, "__CTL__") {
+		t.Errorf("__CTL__ not substituted")
 	}
 	for _, s := range []string{light, full} {
 		i, j := strings.Index(s, "sec PERF"), strings.Index(s, "sec END")
@@ -267,14 +270,35 @@ func TestParsePerfAndLeaderLogSkip(t *testing.T) {
 		t.Fatalf("out bytes %d", p.OutBytes)
 	}
 	prev := &Probe{LocalMemberID: "abcdef0123456789", LeaderEvents: []LeaderEvent{{Term: 7, Leader: "abcdef0123456789"}}}
-	p.MergeLeaderLog(prev)
+	p.Merge(prev)
 	if p.LocalMemberID != prev.LocalMemberID || len(p.LeaderEvents) != 1 {
 		t.Fatalf("merge did not carry leader log forward: %+v", p)
 	}
 	// a probe that did scan the log keeps its own (possibly empty) result
 	q := Parse("cp-1", "===LEADERLOG\nsource=/var/log/pods\n===END\n")
-	q.MergeLeaderLog(prev)
+	q.Merge(prev)
 	if q.LocalMemberID != "" {
 		t.Fatal("merge applied to a probe that scanned the log")
+	}
+}
+
+func TestLightProbeMergesFullAndEtcdctl(t *testing.T) {
+	full := Parse("cp-1", "===SOURCE\nstatic-pod /x/etcd.yaml\n===RKE2CONFIG\n/etc/rancher/rke2/config.yaml: etcd-s3-config-secret: s3\n===ETCDCTL\nvia=crictl abc\n---MEMBERS\n{\"members\":[{\"ID\":1,\"name\":\"cp-1\"}]}\n===SNAPSHOTS\n--- /snap\n100|1700000000|etcd-snapshot-1\n===END\n")
+	if full.FullSkipped || full.EtcdctlSkipped || len(full.Members) != 1 || len(full.SnapshotDirs) != 1 {
+		t.Fatalf("full parse: %+v", full)
+	}
+	light := Parse("cp-1", "===DIST\nrke2\n===ETCDCTL\nskipped=api\n===END\n")
+	if !light.FullSkipped || !light.EtcdctlSkipped {
+		t.Fatalf("light flags: full=%v ctl=%v", light.FullSkipped, light.EtcdctlSkipped)
+	}
+	light.Merge(full)
+	if light.FullSkipped || light.EtcdctlSkipped || len(light.Members) != 1 || len(light.Sources) != 1 || light.RKE2Config["etcd-s3-config-secret"] != "s3" || len(light.SnapshotDirs) != 1 || light.EtcdctlVia != "crictl abc" {
+		t.Fatalf("merge: %+v", light)
+	}
+	// a fresh full probe keeps its own results
+	again := Parse("cp-1", "===SOURCE\n===ETCDCTL\nvia=host /usr/bin/etcdctl\n---MEMBERS\n{\"members\":[]}\n===END\n")
+	again.Merge(full)
+	if len(again.Members) != 0 || again.EtcdctlVia != "host /usr/bin/etcdctl" {
+		t.Fatal("merge overwrote fresh results")
 	}
 }

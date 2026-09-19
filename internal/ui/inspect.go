@@ -274,7 +274,15 @@ func (a *App) renderInspect() (string, []string) {
 		}
 	}
 	if len(top.dump) > 0 {
-		lines = append(lines, "", styleTitle.Render("YAML")+styleDim.Render(fmt.Sprintf("  (line %d of %d)", top.scroll+1, len(top.dump))))
+		hint := "  j/k scroll · J/K page · g top · esc back"
+		if top.scroll > 0 {
+			// scrolled into the YAML: the page scrolls, i.e. the metadata and
+			// reference list go off the top and the YAML gets the whole body
+			// instead of the few lines left under the list
+			lines = lines[:0]
+			hint = "  k back to line 1 shows the references again · J/K page · esc back"
+		}
+		lines = append(lines, "", styleTitle.Render("YAML")+styleDim.Render(fmt.Sprintf("  (line %d of %d)%s", top.scroll+1, len(top.dump), hint)))
 		for i := top.scroll; i < len(top.dump); i++ {
 			lines = append(lines, trunc(top.dump[i], w))
 		}

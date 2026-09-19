@@ -67,7 +67,7 @@ func TestOSBenchmarkFor(t *testing.T) {
 		{nodeinfo.OSRelease{ID: "almalinux", IDLike: "rhel centos fedora", VersionID: "10.0"}, "DISA RHEL 10 STIG"},
 		{nodeinfo.OSRelease{ID: "ubuntu", IDLike: "debian", VersionID: "22.04"}, "DISA Ubuntu 22.04 LTS STIG"},
 		{nodeinfo.OSRelease{ID: "ubuntu", IDLike: "debian", VersionID: "24.04"}, "DISA Ubuntu 24.04 LTS STIG"},
-		{nodeinfo.OSRelease{ID: "ubuntu", IDLike: "debian", VersionID: "18.04"}, ""},
+		{nodeinfo.OSRelease{ID: "ubuntu", IDLike: "debian", VersionID: "20.04"}, ""},
 		{nodeinfo.OSRelease{ID: "sles", IDLike: "suse", VersionID: "15.5"}, ""},
 		{nodeinfo.OSRelease{ID: "debian", VersionID: "12"}, ""},
 		{nodeinfo.OSRelease{}, ""},

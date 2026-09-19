@@ -75,6 +75,9 @@ sec PATHS
 echo "ca=$CA"; echo "cert=$CERT"; echo "key=$KEY"; echo "endpoint=$EP"; echo "datadir=$DATADIR"
 for f in "$CA" "$CERT" "$KEY"; do [ -n "$f" ] && [ ! -r "$f" ] && echo "missing=$f"; done
 [ -n "$CRICTL" ] && [ ! -x "$CRICTL" ] && echo "missing=$CRICTL"
+# Config sources, dumps, snapshot listings and backup hints change rarely:
+# full cycles only (__FULL__=1); khealth carries them forward (Probe.Merge).
+if [ "__FULL__" = 1 ]; then
 sec SOURCE
 [ -f "$RKE2_DD/agent/pod-manifests/etcd.yaml" ] && echo "static-pod $RKE2_DD/agent/pod-manifests/etcd.yaml"
 [ -f /etc/kubernetes/manifests/etcd.yaml ] && echo "static-pod /etc/kubernetes/manifests/etcd.yaml"
@@ -102,6 +105,7 @@ if [ -f /etc/kubernetes/manifests/etcd.yaml ]; then echo "--- /etc/kubernetes/ma
 if [ -f "$RKE2_DD/agent/pod-manifests/etcd.yaml" ]; then echo "--- $RKE2_DD/agent/pod-manifests/etcd.yaml (args)"; grep -E '^[[:space:]]*- --|image:' "$RKE2_DD/agent/pod-manifests/etcd.yaml"; fi
 for f in /etc/etcd/etcd.conf /etc/etcd/etcd.conf.yml /etc/etcd/etcd.conf.yaml /etc/etcd.env /etc/default/etcd /etc/sysconfig/etcd; do dump "$f"; done
 if [ "$(systemctl show -p LoadState --value etcd 2>/dev/null)" = loaded ]; then echo "--- systemctl cat etcd"; systemctl cat etcd 2>/dev/null | grep -E '^(ExecStart|Environment|EnvironmentFile|User|WorkingDirectory)'; fi
+fi
 CURL="curl -sS -m 8"
 [ -n "$CA" ] && CURL="$CURL --cacert $CA"
 [ -n "$CERT" ] && CURL="$CURL --cert $CERT --key $KEY"
@@ -130,6 +134,11 @@ fi
 [ -n "$METRICS_OUT" ] && echo "$METRICS_OUT" | grep -E '^(etcd_server_has_leader|etcd_server_is_leader|etcd_server_leader_changes_seen_total|etcd_mvcc_db_total_size_in_bytes|etcd_mvcc_db_total_size_in_use_in_bytes|etcd_server_quota_backend_bytes|etcd_disk_wal_fsync_duration_seconds_(sum|count)|etcd_disk_backend_commit_duration_seconds_(sum|count)|etcd_server_proposals_failed_total|etcd_server_proposals_pending|etcd_server_slow_apply_total|etcd_server_slow_read_indexes_total|etcd_server_version|etcd_cluster_version|etcd_debugging_mvcc_keys_total|etcd_server_snapshot_apply_in_progress_total|etcd_network_peer_round_trip_time_seconds_(sum|count)|etcd_server_health_failures|etcd_server_read_indexes_failed_total)'
 sec ETCDCTL
 CID=; DIAG=
+if [ "__CTL__" = 0 ]; then
+  # the API-side kubectl-exec probe answered last cycle: member list /
+  # endpoint status / alarms come from there, skip the three crictl execs
+  echo "skipped=api"
+else
 if [ -z "$ETCDCTL" ] && [ -n "$CRICTL" ] && [ -x "$CRICTL" ] && [ -n "$CRI_EP" ]; then
   CID=$("$CRICTL" -r "$CRI_EP" ps -q --name '^etcd$' 2>/dev/null | head -1)
   if [ -z "$CID" ]; then
@@ -160,6 +169,7 @@ if [ -n "$GW" ] && command -v curl >/dev/null 2>&1; then
   echo; echo "---GWSTATUS"; $CURL -X POST "$EP/v3/maintenance/status" -H 'Content-Type: application/json' -d '{}' 2>&1
   echo; echo "---GWALARMS"; $CURL -X POST "$EP/v3/maintenance/alarm" -H 'Content-Type: application/json' -d '{"action":"GET"}' 2>&1
   echo
+fi
 fi
 sec LEADERLOG
 # Reading the whole etcd container log (tens of MB on a busy member) is the
@@ -192,6 +202,7 @@ sec DATADIR
 echo "$DATADIR"
 [ -d "$DATADIR" ] && du -sk "$DATADIR" 2>/dev/null | cut -f1
 [ -d "$DATADIR" ] && df -Pk "$DATADIR" 2>/dev/null | tail -1
+if [ "__FULL__" = 1 ]; then
 sec SNAPSHOTS
 for d in $SNAPDIR $EXTRA_DIRS /var/lib/etcd-backup /var/lib/etcd/backup /var/backups/etcd /opt/etcd-backup /opt/etcd/backup /backup/etcd /var/lib/rancher/rke2/server/db/snapshots /var/lib/rancher/k3s/server/db/snapshots; do
   [ -d "$d" ] || continue
@@ -201,4 +212,5 @@ done
 sec BACKUPHINTS
 systemctl list-timers --all --no-pager --no-legend 2>/dev/null | grep -i etcd | sed 's/^/timer: /'
 grep -rlisE 'etcd' /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/crontab /var/spool/cron 2>/dev/null | sed 's/^/cron: /'
+fi
 sec END

@@ -1484,7 +1484,7 @@ func (a *App) osStigContent() content {
 	hdr := []string{
 		styleTitle.Render("DISA OS STIG rules") + "  " + stacked(40, ssegs) + "  " + legend(ssegs) + "  " + kv("automated pass rate", gauge(score, 10, 200, 200)),
 		a.osBenchmarkLine(),
-		styleDim.Render("automated = ComplianceAsCode template or hand-written check; MANUAL rows carry the STIG check text in their detail (enter). 'a' hides passing, 'm' hides manual, '/' filters."),
+		styleDim.Render("evaluated from node facts: ComplianceAsCode templates plus native checks for the rest; MANUAL rows need a decision (authorised lists, documented exceptions) and carry the STIG check text in their detail (enter). 'a' hides passing, 'm' hides manual, '/' filters."),
 	}
 	if !a.sshEnabled {
 		hdr = append(hdr, styleWarn.Render("SSH collection is off - these facts come from the nodes."))
@@ -1535,7 +1535,7 @@ func (a *App) osBenchmarkLine() string {
 			if !seen[b.Name] {
 				seen[b.Name] = true
 				total, auto := b.Coverage()
-				parts = append(parts, styleBold.Render(b.Name)+" "+b.Version+styleDim.Render(fmt.Sprintf(" (%d/%d rules automated)", auto, total)))
+				parts = append(parts, styleBold.Render(b.Name)+" "+b.Version+styleDim.Render(fmt.Sprintf(" (%d/%d rules evaluated)", auto, total)))
 			}
 		} else {
 			generic++

@@ -56,10 +56,10 @@ Per refresh cycle, steady state:
 | API: fetch wall time | 1.1 s | **0.32 s** |
 | API: requests | 41 | 37 |
 | local CPU for the fetch | 1.0 s | **0.2 s** |
-| node: light probe remote CPU | 1.32 s (4.4 % of a core) | **0.20 s (0.7 %)** |
-| node: light probe wall / output | 2.3 s / 39 KB | **1.2 s / 15 KB** |
-| etcd probe remote CPU | 0.43 s | **0.34 s** (no log scan while healthy) |
-| **total remote CPU per node per cycle** | **1.75 s (5.8 % of a core)** | **0.54 s (1.8 %)** |
+| node: light probe remote CPU | 1.32 s (4.4 % of a core) | **0.19 s (0.65 %)** |
+| node: light probe wall / output | 2.3 s / 39 KB | **0.21 s / 14 KB** |
+| etcd probe remote CPU / wall | 0.43 s / 0.5 s | **0.10 s / 0.09 s** (no log scan while healthy, no etcdctl while the API exec probe answers) |
+| **total remote CPU per node per cycle** | **1.75 s (5.8 % of a core)** | **0.29 s (1.0 %)** |
 
 One-off cycles:
 
@@ -82,10 +82,18 @@ is spread over 2.5 minutes.
   default on). It yields to kubelet, etcd and the workloads; on an idle node
   nothing changes. The idle I/O class is not used because on a saturated disk
   it can starve the probe past its timeout and lose the data that matters.
+- Nothing in the live tier waits. CPU utilisation is the delta between this
+  probe's `/proc/stat` counters and the previous probe's (`Info.CPUFromPrev`,
+  a 30 s window) instead of a `sleep 1` on the node; only first contact
+  samples twice. NTP state comes from `chronyc tracking` (6 ms) or
+  timesyncd's `/run/systemd/timesync/synchronized`; `timedatectl` (which
+  wakes `systemd-timedated` over D-Bus, ~0.8 s wall) only runs on config
+  cycles when neither is there. The kubelet pid from the previous probe is
+  reused instead of `pidof` walking `/proc` (40 ms).
 - Three tiers instead of one script every cycle:
-  - **live** (every refresh, ~0.2 s CPU): `/proc` reads, `df`, one
-    `systemctl show` for every unit of interest, one `timedatectl`, kubelet
-    cmdline, cheap hardening facts;
+  - **live** (every refresh, ~0.2 s wall / 0.2 s CPU): `/proc` reads, `df`,
+    one `systemctl show` for every unit of interest, kubelet cmdline, cheap
+    hardening facts;
   - **config** (`heavy_every` cycles, first contact, `R`; ~1 s): certificates
     (`openssl` per file), sysctls, file modes, rke2/k3s config and manifests,
     registries, and the hardening commands that spawn real tools
@@ -106,8 +114,11 @@ is spread over 2.5 minutes.
   TLS handshake for etcd per refresh, and on etcd 3.6 the client port hands
   curl's HTTP/2 request to gRPC and answers 415, so it is also the one that
   works. The etcd container log (tens of MB) is only scanned for leader
-  elections when the member is unhealthy or on a full cycle; a healthy
-  member's previous result is carried forward.
+  elections when the member is unhealthy or on a full cycle; the config
+  sources/dumps, snapshot listings and backup hints run on full cycles; and
+  the three `crictl exec etcdctl` calls are skipped while the API-side
+  `kubectl exec` probe answered last cycle (they are the fallback for when
+  the API is down). `Probe.Merge` carries every skipped section forward.
 - A node whose previous probe is still running is **skipped**, never given a
   second session. A node whose probe took longer than half the refresh
   interval skips the next cycle (`ssh.backoff`), so a struggling host gets
@@ -128,6 +139,13 @@ is spread over 2.5 minutes.
   `configz` per node for `perf.configz_ttl` (10 min). Helm release payloads
   (every revision, gzipped+base64 in secrets) are re-read only when the
   metadata-only secret/configmap list shows an `owner=helm` object changed.
+- Calls the token is refused (403) - and list calls for API types that are
+  not installed (404: rke2 snapshot CRs on kubeadm, metrics-server absent,
+  Rancher objects) - are remembered and not sent again for
+  `perf.denied_ttl` (10 min) or until `R`. The cached error is still
+  reported every cycle, so the RBAC findings stay visible; `P` lists what is
+  being skipped. `nodes/proxy` and `pods/exec` are one rule for every node
+  and every etcd pod, so one refusal stops all of them.
 - Client-side rate limit stays at QPS 50 / burst 100 so a big cluster's
   first snapshot cannot flood the apiserver.
 
@@ -145,7 +163,10 @@ is spread over 2.5 minutes.
   large but rare; `node` should be well under a second.
 - `wall` much larger than `remote CPU` means the node is waiting, not
   computing: D-Bus (`systemctl`/`timedatectl`), a slow disk under `du`, or the
-  SSH path. That is the case where backoff kicks in.
+  SSH path. That is the case where backoff kicks in. A healthy node answers
+  the light probe in ~200 ms, of which ~70 ms is the SSH channel + sudo and
+  the rest ~40 small processes (`df`, `stat`, `grep`); going lower would mean
+  rewriting the script as one awk program for a few tens of ms.
 - API `bytes in` grows with pods and events. If a cluster has tens of
   thousands of events, `events` is the list to watch; the tool lists all
   types because normal events are needed for context.
@@ -168,6 +189,7 @@ perf:
   protobuf: true    # --no-protobuf
   discovery_ttl: 5m
   configz_ttl: 10m
+  denied_ttl: 10m   # refused / non-existent API calls are not retried for this long (R retries)
   log: ""           # --perf-log
   pprof: ""         # --pprof
 ```

@@ -1,0 +1,462 @@
+package nodeinfo
+
+import (
+	"encoding/json"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Preflight holds the facts scripts/preflight.sh collects: what stops rke2
+// or k3s from (re)starting or the node from being re-provisioned although
+// the OS itself is healthy. Swaps and Units are refreshed every probe; the
+// rest comes with the config tier (Probed) and Denies with the heavy tier.
+type Preflight struct {
+	Swaps        []SwapDev
+	Units        map[string]PFUnit // NetworkManager, nm-cloud-setup, vmtoolsd, cloud-init, multipathd, fapolicyd, auditd, firewalld
+	Probed       bool
+	FstabSwap    []string
+	MountOpts    []MountOpt
+	Modprobe     []ModprobeLine  // install/blacklist lines from modprobe.d for the modules that matter
+	Modules      map[string]bool // loaded kernel modules among the ones that matter
+	Virt         VirtInfo
+	CloudInit    CloudInit
+	Fapolicyd    Fapolicyd
+	Auditd       map[string]string // auditd.conf keys
+	Accounts     []Account
+	SudoUser     string // the ssh user (SUDO_USER on the node)
+	Today        int    // days since the epoch on the node
+	LoginDefs    map[string]string
+	Faillock     map[string]int // user -> valid failed attempts
+	FaillockDeny int
+	Proxy        []ProxyLine
+	Iptables     string
+	SEPkgs       []string // rpm -q rke2-selinux k3s-selinux container-selinux
+	NMUnmanaged  []string
+	RegProbes    []RegProbe
+	RegFiles     []RegFile
+	CurlMissing  bool
+	Denies       []FapDeny // fapolicyd denials from the audit log (heavy)
+	DeniesProbed bool
+	CSI          CSIInfo
+}
+
+// CSIInfo is what storage drivers left on the host: the CSI node plugins
+// registered with the kubelet and the directories drivers execute from
+// (Longhorn engine binaries, Portworx, FlexVolume plugins).
+type CSIInfo struct {
+	Drivers            []string // e.g. driver.longhorn.io, csi.vsphere.vmware.com
+	HostDirs           []string
+	ISCSID             bool
+	MultipathBlacklist int // blacklist stanzas in /etc/multipath.conf (-1 when no file)
+}
+
+// Has reports whether a CSI driver whose name contains s is registered.
+func (c CSIInfo) Has(s string) bool {
+	for _, d := range c.Drivers {
+		if strings.Contains(d, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// SwapDev is one /proc/swaps line.
+type SwapDev struct {
+	Name, Type     string
+	SizeKB, UsedKB int64
+}
+
+// PFUnit is a unit's state read from /run/systemd without D-Bus.
+type PFUnit struct {
+	Active, Enabled bool
+}
+
+// MountOpt is a /proc/mounts entry.
+type MountOpt struct {
+	Mountpoint, Type string
+	Options          []string
+}
+
+// Has reports whether the mount carries the option.
+func (m MountOpt) Has(opt string) bool {
+	for _, o := range m.Options {
+		if o == opt {
+			return true
+		}
+	}
+	return false
+}
+
+// ModprobeLine is an install/blacklist directive.
+type ModprobeLine struct {
+	File, Directive, Module, Line string
+}
+
+// VirtInfo is the DMI vendor/product and the VMware tooling on the node.
+type VirtInfo struct {
+	Vendor, Product string
+	VMTools         bool // vmtoolsd binary present
+	SRDevs          []string
+	CIData          string // block device labelled cidata (the NoCloud ISO)
+}
+
+// VMware reports whether the node is a vSphere VM.
+func (v VirtInfo) VMware() bool {
+	return strings.Contains(strings.ToLower(v.Vendor), "vmware") || strings.Contains(strings.ToLower(v.Product), "vmware")
+}
+
+// CloudInit is the cloud-init state on the node.
+type CloudInit struct {
+	Installed      bool
+	Disabled       bool
+	DatasourceList string
+	Datasource     string   // /var/lib/cloud/instance/datasource, e.g. "DataSourceNoCloud [seed=/dev/sr0][dsmode=net]"
+	Errors         []string // from /run/cloud-init/status.json
+	Stage          string
+}
+
+// Seed returns the device the NoCloud datasource read its data from.
+func (c CloudInit) Seed() string {
+	if i := strings.Index(c.Datasource, "seed="); i >= 0 {
+		s := c.Datasource[i+5:]
+		if j := strings.IndexAny(s, "]"); j >= 0 {
+			s = s[:j]
+		}
+		return s
+	}
+	return ""
+}
+
+// Fapolicyd is the application allow-listing state.
+type Fapolicyd struct {
+	Present       bool
+	Permissive    string
+	RulesFiles    []string
+	CompiledMtime int64
+	RulesdMtime   int64
+	DenyFile      string   // first rules.d file with a catch-all deny
+	CompiledK8s   int      // rules mentioning rancher/k3s/kubelet/cni/containerd in compiled.rules
+	AllowRules    []string // "file:rule" allow lines from rules.d with a dir= or path= object
+	K8sRules      []string // the subset that names rke2/k3s/kubelet/cni/containerd paths
+}
+
+// Covers reports whether an allow rule's dir=/path= object contains path,
+// and which rule.
+func (f Fapolicyd) Covers(path string) (string, bool) {
+	for _, r := range f.AllowRules {
+		_, rule, _ := strings.Cut(r, ":")
+		for _, key := range []string{"dir=", "path="} {
+			i := strings.Index(rule, key)
+			if i < 0 {
+				continue
+			}
+			obj := rule[i+len(key):]
+			if j := strings.IndexAny(obj, " 	"); j >= 0 {
+				obj = obj[:j]
+			}
+			for _, o := range strings.Split(obj, ",") {
+				o = strings.TrimSuffix(o, "/")
+				if o != "" && (path == o || strings.HasPrefix(path, o+"/")) {
+					return r, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// Account is a login-capable (or otherwise relevant) user with its shadow
+// ages; -1 means the field was empty. Never the hash.
+type Account struct {
+	Name, Shell, PW                              string // PW: set, locked, none
+	UID                                          int
+	LastChange, Min, Max, Warn, Inactive, Expire int
+}
+
+// PasswordExpiry returns the day (since the epoch) the password expires, or
+// 0 when it does not.
+func (a Account) PasswordExpiry() int {
+	if a.PW != "set" || a.Max < 0 || a.Max >= 99999 || a.LastChange <= 0 {
+		return 0
+	}
+	return a.LastChange + a.Max
+}
+
+// ProxyLine is a proxy variable from the rke2/k3s/containerd environment files.
+type ProxyLine struct {
+	File, Key, Value string
+}
+
+// RegProbe is one registry endpoint probed with curl.
+type RegProbe struct {
+	Host, URL string
+	Code      int // HTTP status of GET /v2/ (0 when curl failed)
+	Exit      int // curl exit code
+	TokenCode int // HTTP status of the bearer token endpoint (0 when none)
+	Auth, CA  bool
+	Insecure  bool
+}
+
+// RegFile is a TLS file registries.yaml names.
+type RegFile struct {
+	Key, Kind, Path string
+	Missing         bool
+}
+
+// FapDeny is an aggregated fapolicyd denial.
+type FapDeny struct {
+	Count     int
+	Last      time.Time
+	Exe, Path string
+}
+
+func atoiDef(s string, def int) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func kvLines(s string) map[string]string {
+	m := map[string]string{}
+	for _, l := range nonEmpty(s) {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			m[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return m
+}
+
+// parsePreflight fills info.Preflight from the PREFLIGHT sections.
+func parsePreflight(info *Info, secs map[string]string) {
+	p := &info.Preflight
+	p.Units = map[string]PFUnit{}
+	for _, l := range nonEmpty(secs["SWAPS"]) {
+		f := strings.Fields(l)
+		if len(f) >= 4 {
+			sz, _ := strconv.ParseInt(f[2], 10, 64)
+			used, _ := strconv.ParseInt(f[3], 10, 64)
+			p.Swaps = append(p.Swaps, SwapDev{Name: f[0], Type: f[1], SizeKB: sz, UsedKB: used})
+		}
+	}
+	for _, l := range nonEmpty(secs["PFUNITS"]) {
+		f := strings.Split(l, "|")
+		if len(f) == 3 {
+			p.Units[f[0]] = PFUnit{Active: f[1] == "active", Enabled: f[2] == "enabled"}
+		}
+	}
+	if _, ok := secs["MOUNTOPTS"]; !ok {
+		if _, ok := secs["FAPDENY"]; ok {
+			parseFapDeny(p, secs["FAPDENY"])
+		}
+		return
+	}
+	p.Probed = true
+	p.FstabSwap = nonEmpty(secs["FSTABSWAP"])
+	for _, l := range nonEmpty(secs["MOUNTOPTS"]) {
+		f := strings.Split(l, "|")
+		if len(f) == 3 {
+			p.MountOpts = append(p.MountOpts, MountOpt{Mountpoint: f[0], Type: f[1], Options: strings.Split(f[2], ",")})
+		}
+	}
+	for _, l := range nonEmpty(secs["MODPROBE"]) {
+		file, rest, ok := strings.Cut(l, ":")
+		if !ok {
+			continue
+		}
+		f := strings.Fields(rest)
+		if len(f) >= 2 {
+			p.Modprobe = append(p.Modprobe, ModprobeLine{File: file, Directive: f[0], Module: strings.ReplaceAll(f[1], "-", "_"), Line: strings.TrimSpace(rest)})
+		}
+	}
+	p.Modules = map[string]bool{}
+	for _, l := range nonEmpty(secs["MODULES"]) {
+		p.Modules[strings.TrimSpace(l)] = true
+	}
+	v := kvLines(secs["VIRT"])
+	p.Virt = VirtInfo{Vendor: v["vendor"], Product: v["product"], VMTools: v["vmtoolsd"] == "yes", SRDevs: strings.Fields(v["srdev"]), CIData: strings.TrimSpace(v["cidata"])}
+	p.CloudInit = CloudInit{Installed: v["cloud_init"] == "yes", Disabled: v["cloud_init_disabled"] == "yes", DatasourceList: v["datasource_list"], Datasource: strings.TrimSpace(v["datasource"])}
+	if st := v["status"]; st != "" {
+		var doc struct {
+			V1 map[string]json.RawMessage `json:"v1"`
+		}
+		if json.Unmarshal([]byte(st), &doc) == nil {
+			if s, ok := doc.V1["stage"]; ok {
+				var stage string
+				_ = json.Unmarshal(s, &stage)
+				p.CloudInit.Stage = stage
+			}
+			if p.CloudInit.Datasource == "" {
+				var ds string
+				_ = json.Unmarshal(doc.V1["datasource"], &ds)
+				p.CloudInit.Datasource = ds
+			}
+			for _, k := range []string{"init-local", "init", "modules-config", "modules-final"} {
+				var stg struct {
+					Errors []string `json:"errors"`
+				}
+				if raw, ok := doc.V1[k]; ok && json.Unmarshal(raw, &stg) == nil {
+					for _, e := range stg.Errors {
+						p.CloudInit.Errors = append(p.CloudInit.Errors, k+": "+e)
+					}
+				}
+			}
+		}
+	}
+	fa := kvLines(secs["FAPOLICYD"])
+	p.Fapolicyd = Fapolicyd{Present: fa["present"] == "yes", Permissive: fa["permissive"], RulesFiles: strings.Fields(fa["rules_files"]), DenyFile: fa["deny_file"], CompiledK8s: atoiDef(fa["compiled_k8s"], 0)}
+	p.Fapolicyd.CompiledMtime = int64(atoiDef(fa["compiled_mtime"], 0))
+	p.Fapolicyd.RulesdMtime = int64(atoiDef(fa["rulesd_mtime"], 0))
+	for _, l := range nonEmpty(secs["FAPOLICYD"]) {
+		if r, ok := strings.CutPrefix(l, "rule="); ok {
+			p.Fapolicyd.AllowRules = append(p.Fapolicyd.AllowRules, r)
+			for _, k := range []string{"rancher", "k3s", "kubelet", "/opt/cni", "containerd"} {
+				if strings.Contains(r, k) {
+					p.Fapolicyd.K8sRules = append(p.Fapolicyd.K8sRules, r)
+					break
+				}
+			}
+		}
+	}
+	p.CSI.MultipathBlacklist = -1
+	for _, l := range nonEmpty(secs["CSI"]) {
+		k, v, _ := strings.Cut(l, "=")
+		switch k {
+		case "driver":
+			p.CSI.Drivers = append(p.CSI.Drivers, strings.TrimSuffix(strings.TrimSpace(v), "|"))
+		case "dir":
+			p.CSI.HostDirs = append(p.CSI.HostDirs, strings.TrimSpace(v))
+		case "iscsid":
+			p.CSI.ISCSID = v == "active"
+		case "multipath_blacklist":
+			p.CSI.MultipathBlacklist = atoiDef(v, 0)
+		}
+	}
+	p.Auditd = kvLines(secs["AUDITD"])
+	acc := kvLines(secs["ACCOUNTS"])
+	p.SudoUser = acc["sudo_user"]
+	p.Today = atoiDef(acc["today"], 0)
+	p.LoginDefs = map[string]string{}
+	for k, v := range acc {
+		if d, ok := strings.CutPrefix(k, "login_defs_"); ok {
+			p.LoginDefs[d] = v
+		}
+	}
+	if v := acc["default_inactive"]; v != "" {
+		p.LoginDefs["INACTIVE"] = v
+	}
+	p.FaillockDeny = atoiDef(acc["faillock_deny"], 0)
+	p.Faillock = map[string]int{}
+	for _, l := range nonEmpty(secs["ACCOUNTS"]) {
+		f := strings.Split(l, "|")
+		switch {
+		case f[0] == "user" && len(f) == 11:
+			a := Account{Name: f[1], UID: atoiDef(f[2], -1), Shell: f[3], PW: f[4], LastChange: atoiDef(f[5], -1), Min: atoiDef(f[6], -1), Max: atoiDef(f[7], -1), Warn: atoiDef(f[8], -1), Inactive: atoiDef(f[9], -1), Expire: atoiDef(f[10], -1)}
+			p.Accounts = append(p.Accounts, a)
+		case f[0] == "faillock" && len(f) == 3:
+			p.Faillock[f[1]] = atoiDef(f[2], 0)
+		}
+	}
+	for _, l := range nonEmpty(secs["PROXY"]) {
+		file, rest, ok := strings.Cut(l, "|")
+		if !ok {
+			continue
+		}
+		rest = strings.TrimSpace(rest)
+		rest = strings.TrimPrefix(rest, "export ")
+		rest = strings.TrimPrefix(rest, "Environment=")
+		rest = strings.Trim(rest, `"`)
+		k, v, ok := strings.Cut(rest, "=")
+		if !ok {
+			continue
+		}
+		p.Proxy = append(p.Proxy, ProxyLine{File: file, Key: strings.ToUpper(strings.TrimSpace(k)), Value: strings.Trim(strings.TrimSpace(v), `"'`)})
+	}
+	p.Iptables = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(secs["IPTABLES"]), "iptables="))
+	p.SEPkgs = nonEmpty(secs["SEPKG"])
+	p.NMUnmanaged = nonEmpty(secs["NMCONF"])
+	for _, l := range nonEmpty(secs["REGPROBE"]) {
+		if l == "curl=missing" {
+			p.CurlMissing = true
+			continue
+		}
+		f := strings.Split(l, "|")
+		switch {
+		case f[0] == "F" && len(f) == 5:
+			p.RegFiles = append(p.RegFiles, RegFile{Key: f[1], Kind: f[2], Path: f[3], Missing: f[4] == "missing"})
+		case len(f) == 8:
+			p.RegProbes = append(p.RegProbes, RegProbe{Host: f[0], URL: f[1], Code: atoiDef(f[2], 0), Exit: atoiDef(f[3], 0), TokenCode: atoiDef(f[4], 0), Auth: f[5] == "yes", CA: f[6] == "yes", Insecure: f[7] == "true"})
+		}
+	}
+	sort.Slice(p.RegProbes, func(i, j int) bool { return p.RegProbes[i].URL < p.RegProbes[j].URL })
+	if _, ok := secs["FAPDENY"]; ok {
+		parseFapDeny(p, secs["FAPDENY"])
+	}
+}
+
+func parseFapDeny(p *Preflight, s string) {
+	p.DeniesProbed = true
+	for _, l := range nonEmpty(s) {
+		f := strings.SplitN(l, "|", 4)
+		if len(f) != 4 {
+			continue
+		}
+		d := FapDeny{Count: atoiDef(f[0], 0), Exe: f[2], Path: f[3]}
+		if ts := atoiDef(f[1], 0); ts > 0 {
+			d.Last = time.Unix(int64(ts), 0)
+		}
+		p.Denies = append(p.Denies, d)
+	}
+}
+
+// mergePreflight carries the config tier of the preflight facts forward from
+// the previous probe (MergeConfig) and the heavy denials (MergeHeavy).
+func (p *Preflight) mergeConfig(prev *Preflight) {
+	if p.Probed || prev == nil || !prev.Probed {
+		return
+	}
+	swaps, units := p.Swaps, p.Units
+	denies, dp := p.Denies, p.DeniesProbed
+	*p = *prev
+	p.Swaps, p.Units = swaps, units
+	p.Denies, p.DeniesProbed = denies, dp
+}
+
+func (p *Preflight) mergeHeavy(prev *Preflight) {
+	if p.DeniesProbed || prev == nil {
+		return
+	}
+	p.Denies, p.DeniesProbed = prev.Denies, prev.DeniesProbed
+}
+
+// Account returns the account entry for name.
+func (p *Preflight) Account(name string) *Account {
+	for i := range p.Accounts {
+		if p.Accounts[i].Name == name {
+			return &p.Accounts[i]
+		}
+	}
+	return nil
+}
+
+// MountOpt returns the mount that holds path (longest matching mountpoint).
+func (p *Preflight) MountOpt(path string) *MountOpt {
+	var best *MountOpt
+	for i := range p.MountOpts {
+		m := &p.MountOpts[i]
+		mp := m.Mountpoint
+		if path == mp || strings.HasPrefix(path, strings.TrimSuffix(mp, "/")+"/") {
+			if best == nil || len(mp) > len(best.Mountpoint) {
+				best = m
+			}
+		}
+	}
+	return best
+}

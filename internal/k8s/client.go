@@ -3,15 +3,21 @@
 package k8s
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/metadata"
@@ -34,11 +40,15 @@ type Options struct {
 	// and ConfigzTTL the per-node kubelet configz; 0 fetches every cycle.
 	DiscoveryTTL time.Duration
 	ConfigzTTL   time.Duration
+	// DeniedTTL: a call the token is not allowed to make (403), or whose
+	// API type does not exist (404 on a list), is not retried for this long
+	// (R resets it); the cached error is still reported every cycle.
+	DeniedTTL time.Duration
 }
 
 // DefaultOptions are what khealth uses unless configured otherwise.
 func DefaultOptions() Options {
-	return Options{WatchCache: true, Protobuf: true, DiscoveryTTL: 5 * time.Minute, ConfigzTTL: 10 * time.Minute}
+	return Options{WatchCache: true, Protobuf: true, DiscoveryTTL: 5 * time.Minute, ConfigzTTL: 10 * time.Minute, DeniedTTL: 10 * time.Minute}
 }
 
 // Client bundles the typed and dynamic clients for one kubeconfig context.
@@ -62,6 +72,89 @@ type Client struct {
 	configz     map[string]configzEntry
 	helmFP      string
 	helmCache   []HelmRelease
+	denied      map[string]deniedEntry
+}
+
+type deniedEntry struct {
+	err error
+	at  time.Time
+}
+
+// Denied reports the remembered error for a call that the token may not
+// make (or whose resource type does not exist), while the DeniedTTL holds.
+func (c *Client) Denied(what string) (error, bool) {
+	if c == nil || c.Opts.DeniedTTL <= 0 {
+		return nil, false
+	}
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	e, ok := c.denied[what]
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.at) > c.Opts.DeniedTTL {
+		delete(c.denied, what)
+		return nil, false
+	}
+	return e.err, true
+}
+
+// NoteDenied remembers err for what when it is a permission (403) or, with
+// notFound, a missing-resource (404) error. Returns true when remembered.
+func (c *Client) NoteDenied(what string, err error, notFound bool) bool {
+	if c == nil || err == nil || c.Opts.DeniedTTL <= 0 {
+		return false
+	}
+	if !(apierrors.IsForbidden(err) || (notFound && apierrors.IsNotFound(err)) || strings.Contains(err.Error(), "is forbidden:")) {
+		return false
+	}
+	c.cacheMu.Lock()
+	if c.denied == nil {
+		c.denied = map[string]deniedEntry{}
+	}
+	c.denied[what] = deniedEntry{err: err, at: time.Now()}
+	c.cacheMu.Unlock()
+	return true
+}
+
+// DeniedList names the calls currently being skipped, sorted.
+func (c *Client) DeniedList() []string {
+	if c == nil {
+		return nil
+	}
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	var out []string
+	for k, e := range c.denied {
+		if time.Since(e.at) <= c.Opts.DeniedTTL {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ResetDenied forgets every skipped call (R / full refresh).
+func (c *Client) ResetDenied() {
+	if c == nil {
+		return
+	}
+	c.cacheMu.Lock()
+	c.denied = nil
+	c.cacheMu.Unlock()
+}
+
+// dynList lists a dynamic resource with the snapshot list options, skipping
+// types the token cannot list or that are not installed (DeniedTTL).
+func (c *Client) dynList(ctx context.Context, what string, gvr schema.GroupVersionResource) (*unstructured.UnstructuredList, error) {
+	if err, ok := c.Denied(what); ok {
+		return nil, err
+	}
+	l, err := c.Dyn.Resource(gvr).List(ctx, c.listOpts())
+	if err != nil {
+		c.NoteDenied(what, err, true)
+	}
+	return l, err
 }
 
 type configzEntry struct {

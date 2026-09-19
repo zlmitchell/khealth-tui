@@ -13,6 +13,7 @@ func main() {
 	heavy := flag.Bool("heavy", false, "include the heavy (images, journal) sections")
 	cfgTier := flag.Bool("config", true, "include the config tier (certs, sysctls, config files, slow hardening commands)")
 	stig := flag.Bool("stig", false, "include the OS STIG sections")
+	cpuSample := flag.Bool("cpu-sample", false, "sample /proc/stat twice with a 1 s sleep (first contact)")
 	flag.Parse()
-	fmt.Print(nodeinfo.Script(nodeinfo.Options{Heavy: *heavy, Config: *cfgTier, OSStig: *stig}))
+	fmt.Print(nodeinfo.Script(nodeinfo.Options{Heavy: *heavy, Config: *cfgTier, OSStig: *stig, CPUSample: *cpuSample}))
 }

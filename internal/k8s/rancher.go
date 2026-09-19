@@ -64,7 +64,7 @@ func (c *Client) rancherManagement(ctx context.Context, info *RancherInfo) {
 		fail("ingress cattle-system/rancher", err)
 	}
 
-	if l, err := c.Dyn.Resource(authConfigGVR).List(ctx, c.listOpts()); err == nil {
+	if l, err := c.dynList(ctx, "authconfigs.management.cattle.io", authConfigGVR); err == nil {
 		for i := range l.Items {
 			u := &l.Items[i]
 			enabled, _, _ := unstructured.NestedBool(u.Object, "enabled")
@@ -78,7 +78,7 @@ func (c *Client) rancherManagement(ctx context.Context, info *RancherInfo) {
 		fail("authconfigs", err)
 	}
 
-	if l, err := c.Dyn.Resource(globalRoleGVR).List(ctx, c.listOpts()); err == nil {
+	if l, err := c.dynList(ctx, "globalroles.management.cattle.io", globalRoleGVR); err == nil {
 		info.GlobalRoles = map[string]bool{}
 		for i := range l.Items {
 			u := &l.Items[i]
@@ -90,7 +90,7 @@ func (c *Client) rancherManagement(ctx context.Context, info *RancherInfo) {
 	}
 
 	admins := map[string]bool{}
-	if l, err := c.Dyn.Resource(globalRoleBindingGVR).List(ctx, c.listOpts()); err == nil {
+	if l, err := c.dynList(ctx, "globalrolebindings.management.cattle.io", globalRoleBindingGVR); err == nil {
 		for i := range l.Items {
 			u := &l.Items[i]
 			role, _, _ := unstructured.NestedString(u.Object, "globalRoleName")
@@ -103,7 +103,7 @@ func (c *Client) rancherManagement(ctx context.Context, info *RancherInfo) {
 		fail("globalrolebindings", err)
 	}
 
-	if l, err := c.Dyn.Resource(rancherUserGVR).List(ctx, c.listOpts()); err == nil {
+	if l, err := c.dynList(ctx, "users.management.cattle.io", rancherUserGVR); err == nil {
 		for i := range l.Items {
 			u := &l.Items[i]
 			principals, _, _ := unstructured.NestedStringSlice(u.Object, "principalIds")

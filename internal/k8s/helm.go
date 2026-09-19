@@ -125,7 +125,7 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 	}
 	// releases installed by the rke2/k3s HelmChart controller carry the CR name
 	bundled := map[string]string{}
-	if l, err := c.Dyn.Resource(helmChartGVR).List(ctx, c.listOpts()); err == nil {
+	if l, err := c.dynList(ctx, "helmcharts.helm.cattle.io", helmChartGVR); err == nil {
 		for _, it := range l.Items {
 			ns, _, _ := unstructured.NestedString(it.Object, "spec", "targetNamespace")
 			if ns == "" {

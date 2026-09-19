@@ -18,7 +18,7 @@ titles, severities and check/fix text are taken from the XCCDF inside the zip
 | DISA Rancher Government MCM STIG | V2R2, 05 Jan 2026 | `U_RGS_MCM_V2R2_STIG.zip` | [internal/stig/rancher.go](../internal/stig/rancher.go) |
 | CIS Kubernetes Benchmark | v2.0.1 (Jun 2026); numbering cross-checked with kube-bench `cfg/cis-2.0` | cisecurity.org | [internal/stig/cis.go](../internal/stig/cis.go) |
 | DISA RHEL 8 / 9 / 10 STIG | V2R8 / V2R9 / V1R2, 01 Jul 2026 | `U_RHEL_<n>_V…_STIG.zip` | generated: [internal/stigdata/data/rhel*.json.gz](../internal/stigdata/data) |
-| DISA Ubuntu 20.04 / 22.04 / 24.04 LTS STIG | V2R4 (01 Oct 2025) / V2R9 / V1R6 (01 Jul 2026) | `U_CAN_Ubuntu_<ver>_LTS_V…_STIG.zip` | generated: [internal/stigdata/data/ubuntu*.json.gz](../internal/stigdata/data) |
+| DISA Ubuntu 22.04 / 24.04 LTS STIG | V2R9 / V1R6 (01 Jul 2026) | `U_CAN_Ubuntu_<ver>_LTS_V…_STIG.zip` | generated: [internal/stigdata/data/ubuntu*.json.gz](../internal/stigdata/data) |
 
 Finding the newest release: file names follow `U_<product>_V<major>R<release>_STIG.zip`.
 Probe upward from the version you have until you get a 404, e.g.
@@ -96,22 +96,42 @@ for the same rules exist in [ComplianceAsCode/content](https://github.com/Compli
 Python loader (so Jinja macros, product properties, `PARAM@PRODUCT`
 overrides and template preprocessing resolve exactly as in the upstream
 build) and writes one gzip JSON per product containing every STIG rule with
-its check/fix text plus the resolved template parameters. Coverage at the
-time of writing (`go test -v -run TestEmbeddedTables ./internal/stig/`):
+its check/fix text plus the resolved template parameters.
 
-| Product | Rules | Automated | Notes |
+CAC checks come in two kinds, and the engine handles both:
+
+- **templated** (`sysctl`, `package_installed`, `mount_option`, ...): the
+  parameters are in the table; `ostemplates.go` implements each template
+  kind once.
+- **custom OVAL** (hand-written in CAC): the table carries only the CAC
+  rule name; `osnamed.go` / `osnamed_system.go` implement an evaluator
+  per rule name, fed by `scripts/os_stig_facts.sh` (account database,
+  one filesystem sweep, short commands) and the config-file dumps in
+  `stigdata.FileDumps`. Because the key is the CAC rule name, one
+  evaluator serves every product that maps a STIG rule to it.
+
+Coverage at the time of writing (`go test -v -run TestEmbeddedTables
+./internal/stig/`):
+
+| Product | Rules | Evaluated | Notes |
 |---|---|---|---|
-| rhel8 | 369 | 217 | |
-| rhel9 | 445 | 275 | |
-| rhel10 | 434 | 271 | |
-| ubuntu2204 | 188 | 124 | CAC controls file tracks V2R8; IDs are stable |
-| ubuntu2404 | 194 | 124 | |
-| ubuntu2004 | 173 | 7 | CAC dropped 20.04; only the hand-written overrides |
+| rhel8 | 369 | 366 | the 3 remaining have no CAC mapping |
+| rhel9 | 445 | 441 | the 4 remaining have no CAC mapping |
+| rhel10 | 434 | 434 | |
+| ubuntu2204 | 188 | 188 | CAC controls file tracks V2R8; IDs are stable |
+| ubuntu2404 | 194 | 194 | |
 
-"Automated" = a hand-written override exists or at least one CAC check is
-templated. A rule whose templated part passes but that also carries a custom
-OVAL check reports MANUAL ("automated part passes; verify ... manually")
-rather than PASS, because only part of it was verified.
+"Evaluated" means an evaluator exists; the result may still be MANUAL where
+the STIG's own check needs an organisational decision (authorised user
+list, PPSM CLSA, documented exceptions, temporary accounts) - those return
+MANUAL with the evidence an assessor would ask for. Rules with a
+templated part and an untemplated part that has no evaluator report MANUAL
+("automated part passes; verify ... manually") rather than PASS.
+
+The opt-in harness `TestOSLive` (`KHT_PROBE_OUT=<probe output> go test -v
+-run TestOSLive ./internal/stig/`) evaluates a real probe capture and
+prints every FAIL/MANUAL, which is how the evaluators were checked against
+stock Rocky 9 and Ubuntu 24.04 images.
 
 ### Regenerating (new DISA release or CAC update)
 
@@ -190,7 +210,26 @@ mode, SELinux state, service runtime-vs-boot), add it as an override:
 
 Overrides win over CAC templates for that vulnerability ID.
 
-### 4.3 A new ComplianceAsCode template kind
+### 4.3 A ComplianceAsCode custom-OVAL rule (named evaluator)
+
+When `TestEmbeddedTables` or the OS STIG sub-tab shows a rule as "custom
+OVAL only (<rule name>)":
+
+1. Read the STIG check text (the rule's detail view, or the `check` field in
+   the table) - that is what an assessor runs, so match it, not the OVAL.
+2. Add `"<cac rule name>": func(i *nodeinfo.Info) (Status, string)` to the
+   relevant `register(...)` block in `osnamed.go` / `osnamed_system.go`.
+   Helpers: `keyValue`, `grep`, `lines`, `cmd` (STIGCMD facts), `sweep`
+   (filesystem sweep kinds), `interactiveUsers`, `failIf`.
+3. If a new fact is needed, add a `kv name "$(...)"` line to
+   `scripts/os_stig_facts.sh` (bounded: `head`, `tr` newlines to `;`) or a
+   file to `stigdata.FileDumps`; parse new sections in
+   `nodeinfo.parseOSStig` and carry them in `Info.MergeSTIG`.
+4. Extend `hardenedNode()` in `osnamed_test.go` so the hardened fixture
+   passes the new evaluator, and add a broken case to
+   `TestNamedEvaluatorsFindings`.
+
+### 4.4 A new ComplianceAsCode template kind
 
 1. Read `shared/templates/<name>/template.py` (parameter preprocessing) and
    `oval.template` (semantics) in CAC.
@@ -206,7 +245,7 @@ Overrides win over CAC templates for that vulnerability ID.
 4. Add cases to `TestTemplateEvaluators` (synthetic `nodeinfo.Info`) - one
    pass, one fail, and the "fact missing" path, which must be Manual/NA.
 
-### 4.4 A new operating system release
+### 4.5 A new operating system release
 
 1. Confirm a DISA STIG exists (probe the zip name) and that CAC has a
    `stig_<product>.yml` controls file plus `products/<product>/product.yml`.
@@ -221,6 +260,9 @@ Overrides win over CAC templates for that vulnerability ID.
 
 - The node script runs as root via `sudo`, `dzdo` or `doas` (`ssh.become`,
   probed per host; see README "What SSH needs"); `sshd -T`, `auditctl -l`,
+  the account-database facts (`/etc/shadow` is reduced to hash type and
+  ageing fields, never the hash), the filesystem sweep (one `find` over the
+  local filesystems, 120 s cap, 200 hits max),
   `stat` of `/etc/shadow` and the recursive `find` scans need root. Without
   it those rules report MANUAL, never FAIL.
 - Runtime state is what is graded (`sysctl -a`, loaded audit rules, mounted

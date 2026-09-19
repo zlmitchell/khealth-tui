@@ -63,6 +63,7 @@ perf:                             # the tool's own footprint (docs/PERFORMANCE.m
   protobuf: true                  # protobuf instead of JSON for typed lists (3-4x fewer bytes, cheaper for the apiserver)
   discovery_ttl: 5m               # cache API discovery + CRD definitions between refreshes (0 = every cycle)
   configz_ttl: 10m                # cache the per-node kubelet configz (0 = every cycle)
+  denied_ttl: 10m                 # do not retry API calls the token was refused (403) or that do not exist for this long (R retries)
 
 actions:
   enabled: true                   # Helm tab: u = helm upgrade, b = helm rollback (always confirmed); --read-only disables

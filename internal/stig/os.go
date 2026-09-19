@@ -1,6 +1,6 @@
 package stig
 
-// DISA operating-system STIGs (RHEL 8/9/10, Ubuntu 20.04/22.04/24.04) applied
+// DISA operating-system STIGs (RHEL 8/9/10, Ubuntu 22.04/24.04) applied
 // per node from /etc/os-release. Every rule of the matched STIG is emitted:
 //
 //   - hand-written checks (this file, keyed by rhel.go / ubuntu.go) win when
@@ -28,7 +28,7 @@ type OSBenchmark struct {
 	Version string
 	product string // stigdata product: rhel9, ubuntu2204 ...
 	family  string // "rhel" or "ubuntu"
-	release string // VERSION_ID prefix: "8", "9", "10", "20.04", ...
+	release string // VERSION_ID prefix: "8", "9", "10", "22.04", ...
 	rules   map[string]osRef
 }
 
@@ -72,9 +72,15 @@ func (b *OSBenchmark) overrides() map[string]osCheck {
 	return out
 }
 
+// templated reports whether any check behind a rule can be evaluated: a
+// ComplianceAsCode template we implement, or a named evaluator for one of
+// CAC's hand-written checks (osnamed.go).
 func templated(r stigdata.Rule) bool {
 	for _, c := range r.Checks {
 		if _, ok := templateEvals[c.Template]; ok {
+			return true
+		}
+		if _, ok := namedEvals[c.Rule]; ok && c.Template == "" {
 			return true
 		}
 	}
@@ -128,16 +134,22 @@ func evalTemplated(info *nodeinfo.Info, rule stigdata.Rule) (Status, string) {
 	var fails, manuals, custom []string
 	passes, nas := 0, 0
 	for i, c := range rule.Checks {
-		ev, ok := templateEvals[c.Template]
-		if !ok {
-			if c.Template == "" {
+		var st Status
+		var detail string
+		switch ev, ok := templateEvals[c.Template]; {
+		case ok:
+			st, detail = ev(info, c, stigdata.CheckID(rule.VID, i))
+		case c.Template == "":
+			ne, named := namedEvals[c.Rule]
+			if !named {
 				custom = append(custom, c.Rule)
-			} else {
-				manuals = append(manuals, c.Rule+": template "+c.Template+" not supported")
+				continue
 			}
+			st, detail = ne(info)
+		default:
+			manuals = append(manuals, c.Rule+": template "+c.Template+" not supported")
 			continue
 		}
-		st, detail := ev(info, c, stigdata.CheckID(rule.VID, i))
 		switch st {
 		case Pass:
 			passes++
@@ -151,9 +163,9 @@ func evalTemplated(info *nodeinfo.Info, rule stigdata.Rule) (Status, string) {
 	}
 	switch {
 	case len(fails) > 0:
-		return Fail, strings.Join(fails, "; ")
+		return Fail, strings.Join(uniq(fails), "; ")
 	case len(manuals) > 0:
-		return Manual, strings.Join(manuals, "; ")
+		return Manual, strings.Join(uniq(manuals), "; ")
 	case len(custom) > 0 && passes > 0:
 		return Manual, "automated part passes; verify " + truncList(custom, 3) + " manually"
 	case passes > 0:

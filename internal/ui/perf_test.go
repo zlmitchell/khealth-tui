@@ -1,13 +1,16 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"k8s-health-tui/internal/etcd"
+	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/perf"
 )
@@ -100,4 +103,37 @@ func TestRecomputeIsCoalesced(t *testing.T) {
 		t.Fatal("recompute not re-armed after it ran")
 	}
 	_ = before
+}
+
+func TestInspectYAMLPageScrolls(t *testing.T) {
+	a := testApp()
+	a.height = 20
+	var dump []string
+	for i := 0; i < 60; i++ {
+		dump = append(dump, fmt.Sprintf("line-%02d", i))
+	}
+	a.inspect = []inspectLevel{{meta: []string{"kind: Pod", "phase: Running"}, refs: []k8s.ObjRef{{Via: "owner", Kind: "ReplicaSet", Name: "rs-1"}}, dump: dump}}
+	_, lines := a.renderInspect()
+	body := strings.Join(lines, "\n")
+	if !strings.Contains(body, "References (1)") || !strings.Contains(body, "line-00") {
+		t.Fatalf("unscrolled view must show references and the YAML start:\n%s", body)
+	}
+	// j past the last reference scrolls into the YAML: header and references go away
+	a.handleInspectKey("j")
+	a.handleInspectKey("j")
+	_, lines = a.renderInspect()
+	body = strings.Join(lines, "\n")
+	if strings.Contains(body, "References (1)") || strings.Contains(body, "kind: Pod") {
+		t.Fatalf("scrolled view must drop the header so the YAML fills the body:\n%s", body)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(ansi.Strip(lines[1])), "YAML") || !strings.Contains(lines[2], "line-02") {
+		t.Fatalf("YAML should start at the top from the scrolled line:\n%s", body)
+	}
+	// k twice back to line 1 restores the references
+	a.handleInspectKey("k")
+	a.handleInspectKey("k")
+	_, lines = a.renderInspect()
+	if !strings.Contains(strings.Join(lines, "\n"), "References (1)") {
+		t.Fatal("references not restored at line 1")
+	}
 }
