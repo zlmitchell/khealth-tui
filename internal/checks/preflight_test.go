@@ -200,3 +200,21 @@ func TestAuditMB(t *testing.T) {
 		t.Error("auditMB")
 	}
 }
+
+func TestRegistryProbeOffline(t *testing.T) {
+	// airgapped node: implicit upstreams are listed as skipped, never a finding
+	skipped := nodeinfo.RegProbe{Host: "docker.io", URL: "https://registry-1.docker.io", Implicit: true, Skipped: "airgap"}
+	if _, _, _, bad := regVerdict(skipped); bad {
+		t.Fatal("skipped probe produced a finding")
+	}
+	// an implicit upstream that was probed and is unreachable says why containerd would go there
+	msg, _, sev, bad := regVerdict(nodeinfo.RegProbe{Host: "docker.io", URL: "https://registry-1.docker.io", Exit: 6, Implicit: true})
+	if !bad || sev != SevWarn || !strings.Contains(msg, "no mirror endpoint") {
+		t.Fatalf("implicit unreachable: %v %q", bad, msg)
+	}
+	// explicit mirror endpoints keep the plain wording
+	msg, _, _, _ = regVerdict(nodeinfo.RegProbe{Host: "harbor.local", URL: "https://harbor.local", Exit: 7})
+	if strings.Contains(msg, "no mirror endpoint") {
+		t.Fatalf("explicit endpoint tagged implicit: %q", msg)
+	}
+}

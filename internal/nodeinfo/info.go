@@ -50,27 +50,34 @@ type Info struct {
 	Dist                   string
 	ControlPlane           bool
 	Certs                  []Cert
-	KubeletFlags           map[string]string
-	KubeletPID             int
-	Sysctl                 map[string]string
-	Perms                  []Perm
-	EtcdUser               bool
-	SELinux                string
-	OS                     OSRelease
-	Hardening              map[string]string // selinux, fips, apparmor, svc_*, lockdown, secureboot, reboot_required, ...
-	ConfigFiles            []ConfigFile      // rke2/k3s config.yaml(.d) (secrets masked)
-	ExtraFiles             []ConfigFile      // audit policy, PSS config, /etc/rancher listings
-	Manifests              []ManifestFile    // rke2/k3s server/manifests (auto-deploy dir)
-	StaticPods             []ManifestFile    // pod-manifests / /etc/kubernetes/manifests
-	DataDir                string            // rke2/k3s data-dir
-	Settings               map[string]string // merged top-level key: value from config files
-	Rancher                RancherNode
-	CNI                    []CNIConf
-	Registries             []ConfigFile
-	RegistryMirrors        []string // registry hosts with mirrors in registries.yaml
-	ContainerdHosts        []string // registries containerd has certs.d/hosts.toml for
-	ContainerdConfig       []ConfigFile
-	Preflight              Preflight // what stops rke2 from (re)starting or the node from re-provisioning (preflight.go)
+	// APIServerSANs: subjectAltName entries of the apiserver serving
+	// certificate (DNS names and IPs); TLSSAN: tls-san from config.yaml.
+	// Entries in TLSSAN missing from APIServerSANs mean the certificate has
+	// not been reissued since the config changed (rke2 does that on restart).
+	APIServerSANs    []string
+	APIServerCert    string // path of the serving certificate
+	TLSSAN           []string
+	KubeletFlags     map[string]string
+	KubeletPID       int
+	Sysctl           map[string]string
+	Perms            []Perm
+	EtcdUser         bool
+	SELinux          string
+	OS               OSRelease
+	Hardening        map[string]string // selinux, fips, apparmor, svc_*, lockdown, secureboot, reboot_required, ...
+	ConfigFiles      []ConfigFile      // rke2/k3s config.yaml(.d) (secrets masked)
+	ExtraFiles       []ConfigFile      // audit policy, PSS config, /etc/rancher listings
+	Manifests        []ManifestFile    // rke2/k3s server/manifests (auto-deploy dir)
+	StaticPods       []ManifestFile    // pod-manifests / /etc/kubernetes/manifests
+	DataDir          string            // rke2/k3s data-dir
+	Settings         map[string]string // merged top-level key: value from config files
+	Rancher          RancherNode
+	CNI              []CNIConf
+	Registries       []ConfigFile
+	RegistryMirrors  []string // registry hosts with mirrors in registries.yaml
+	ContainerdHosts  []string // registries containerd has certs.d/hosts.toml for
+	ContainerdConfig []ConfigFile
+	Preflight        Preflight // what stops rke2 from (re)starting or the node from re-provisioning (preflight.go)
 
 	// OS STIG facts (internal/stigdata templates)
 	SysctlAll      map[string]string
@@ -361,7 +368,7 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 				info.Dist = "kubeadm"
 			}
 		}
-		if d == "/var/lib/rancher/rke2/server" || d == "/var/lib/rancher/k3s/server" || d == "/etc/kubernetes/manifests" || d == "/var/lib/etcd" || d == "/var/lib/rancher/rke2/server/db/etcd" {
+		if d == "/var/lib/rancher/rke2/server" || d == "/var/lib/rancher/k3s/server" || d == "/etc/kubernetes/manifests/kube-apiserver.yaml" || d == "/var/lib/etcd" || d == "/var/lib/rancher/rke2/server/db/etcd" {
 			info.ControlPlane = true
 		}
 	}
@@ -444,6 +451,15 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	info.ExtraFiles = parseDumps(secs["RKE2EXTRA"])
 	info.Manifests = parseManifests(secs["MANIFESTS"])
 	info.StaticPods = parseManifests(secs["STATICPODS"])
+	for _, cf := range parseDumps(secs["APISERVERCERT"]) {
+		if dns, ips, err := CertSANs(cf.Content); err == nil {
+			info.APIServerCert = cf.Path
+			info.APIServerSANs = append(append(info.APIServerSANs, dns...), ips...)
+		}
+	}
+	for _, cf := range info.ConfigFiles {
+		info.TLSSAN = append(info.TLSSAN, YAMLList(cf.Content, "tls-san")...)
+	}
 	for _, cf := range info.ConfigFiles {
 		for _, l := range strings.Split(cf.Content, "\n") {
 			if strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t") || strings.HasPrefix(l, "-") {
@@ -1322,6 +1338,7 @@ func (i *Info) MergeConfig(prev *Info) {
 	}
 	i.ConfigProbed, i.ConfigCollected = true, prev.ConfigCollected
 	i.Certs, i.Sysctl, i.Perms = prev.Certs, prev.Sysctl, prev.Perms
+	i.APIServerSANs, i.APIServerCert, i.TLSSAN = prev.APIServerSANs, prev.APIServerCert, prev.TLSSAN
 	if i.NTPSynced == nil { // timedatectl only runs on config cycles when chrony/timesyncd are not there
 		i.NTPSynced, i.NTPEnabled = prev.NTPSynced, prev.NTPEnabled
 	}

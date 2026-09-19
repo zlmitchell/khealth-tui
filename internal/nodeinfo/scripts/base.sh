@@ -50,11 +50,11 @@ units() {
     /^$/{if(id!="" && l=="loaded") print id"|"l"|"a"|"ss"|"n"|"t"|"r"|"u; id="";l="";a="";ss="";n="";t="";r="";u=""}
     END{if(id!="" && l=="loaded") print id"|"l"|"a"|"ss"|"n"|"t"|"r"|"u}'
 }
-UNITS_OUT=$(units kubelet containerd rke2-server rke2-agent k3s k3s-agent etcd docker crio rancher-system-agent chronyd chrony ntpd ntp systemd-timesyncd firewalld ufw nftables iptables apparmor fapolicyd auditd unattended-upgrades dnf-automatic.timer usbguard sssd)
+UNITS_OUT=$(units kubelet containerd rke2-server rke2-agent k3s k3s-agent etcd docker crio rancher-system-agent chronyd chrony ntpd ntp systemd-timesyncd firewalld ufw nftables iptables apparmor fapolicyd auditd unattended-upgrades dnf-automatic.timer usbguard sssd cloud-init-local cloud-init cloud-config cloud-final)
 sec SVC
 echo "$UNITS_OUT" | awk -F'|' '$1=="kubelet"||$1=="containerd"||$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="etcd"||$1=="docker"||$1=="crio"||$1=="rancher-system-agent"||$1=="chronyd"||$1=="chrony"||$1=="ntpd"||$1=="ntp"||$1=="systemd-timesyncd"||$1=="firewalld"||$1=="ufw"||$1=="nftables"||$1=="iptables"||$1=="apparmor"{print $1, $2, $3, $4}'
 sec UNITS
-echo "$UNITS_OUT" | awk -F'|' '$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="kubelet"||$1=="containerd"||$1=="rancher-system-agent"||$1=="etcd"{print $1"|"$3"|"$4"|"$5"|"$6"|"$7"|"}'
+echo "$UNITS_OUT" | awk -F'|' '$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="kubelet"||$1=="containerd"||$1=="rancher-system-agent"||$1=="etcd"||$1=="cloud-init-local"||$1=="cloud-init"||$1=="cloud-config"||$1=="cloud-final"{print $1"|"$3"|"$4"|"$5"|"$6"|"$7"|"}'
 sec NTP
 # timedatectl activates systemd-timedated over D-Bus (~0.8 s wall); read the
 # time daemon directly when it is chrony (6 ms) or timesyncd (a file) and
@@ -72,6 +72,8 @@ sec DIST
 for d in /etc/rancher/rke2 /var/lib/rancher/rke2/server /var/lib/rancher/rke2/agent /etc/rancher/k3s /var/lib/rancher/k3s/server /etc/kubernetes/manifests /etc/kubernetes/pki /var/lib/etcd /var/lib/rancher/rke2/server/db/etcd; do
   [ -d "$d" ] && echo "$d"
 done
+# kubeadm workers also have an (empty) manifests dir: the apiserver manifest marks a control-plane node
+[ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] && echo /etc/kubernetes/manifests/kube-apiserver.yaml
 if [ "__CONFIG__" = 1 ]; then
 sec CERTS
 if command -v openssl >/dev/null 2>&1; then
@@ -82,6 +84,12 @@ if command -v openssl >/dev/null 2>&1; then
     [ -n "$e" ] && echo "$f|$e"
   done
 fi
+sec APISERVERCERT
+# serving cert PEM: its SANs decide which names/VIPs a kubeconfig may use
+for c in /var/lib/rancher/rke2/server/tls/serving-kube-apiserver.crt /var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt /etc/kubernetes/pki/apiserver.crt; do
+  [ -f "$c" ] || continue
+  echo "--- $c"; cat "$c"; break
+done
 fi
 sec KUBELETCMD
 # pidof walks all of /proc (~40 ms); reuse the pid from the previous probe

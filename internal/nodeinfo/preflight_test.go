@@ -11,6 +11,10 @@ const preflightSample = `
 ===DIST
 /etc/rancher/rke2
 /var/lib/rancher/rke2/agent
+===UNITS
+rke2-server|active|running|0|Wed 2024-09-18 10:00:00 UTC|success|
+cloud-init|active|exited|0|Wed 2024-09-18 10:00:00 UTC|success|
+cloud-final|failed|failed|0|Wed 2024-09-18 10:00:05 UTC|exit-code|
 ===SWAPS
 /dev/dm-1                               partition	2097148	1024	-2
 ===PFUNITS
@@ -43,6 +47,13 @@ datasource_list=[ NoCloud, VMware, None ]
 datasource=DataSourceNoCloud [seed=/dev/sr0][dsmode=net]
 status={"v1": {"datasource": "DataSourceNoCloud [seed=/dev/sr0][dsmode=net]", "init": {"errors": [], "finished": 1.0, "start": 0.5}, "modules-final": {"errors": ["('scripts-user', RuntimeError('Runparts: 1 failures'))"], "finished": 3.0, "start": 2.0}, "stage": null}}
 srdev=/dev/sr0
+wwn=2
+===CLOUDINIT
+result={"v1": {"datasource": "DataSourceNoCloud", "errors": ["('scripts-user', RuntimeError('Runparts'))"]}}
+log=2026-09-19 10:00:00,000 - cc_scripts_user.py[ERROR]: Failed to run module scripts_user
+===VCENTER
+vc.corp:443|200|0
+vc2.corp|000|7
 ===FAPOLICYD
 present=yes
 permissive=0
@@ -62,6 +73,8 @@ driver=csi.vsphere.vmware.com|
 dir=/var/lib/longhorn/engine-binaries
 dir=/var/lib/longhorn
 multipath_blacklist=0
+find_multipaths=no
+mount_nfs=yes
 ===AUDITD
 log_file=/var/log/audit/audit.log
 max_log_file=8
@@ -84,6 +97,9 @@ user|ops|1001|/bin/bash|locked|19950|1|60|7||20100
 faillock_deny=3
 faillock|root|0
 faillock|rancher|3
+ci_user=rancher
+ci_default=rocky
+sudo|rancher|nopasswd=yes|keys=1
 ===PROXY
 /etc/default/rke2-server|HTTP_PROXY=http://<masked>@proxy.corp:3128
 /etc/default/rke2-server|NO_PROXY=127.0.0.0/8,10.42.0.0/16,10.43.0.0/16,.svc,.cluster.local
@@ -136,6 +152,18 @@ func TestParsePreflight(t *testing.T) {
 	}
 	if p.CloudInit.Seed() != "/dev/sr0" || !p.CloudInit.Installed || len(p.CloudInit.Errors) != 1 || !strings.HasPrefix(p.CloudInit.Errors[0], "modules-final: ") {
 		t.Errorf("cloud-init: %+v", p.CloudInit)
+	}
+	if len(p.CloudInit.Units) != 2 || len(p.CloudInit.FailedUnits()) != 1 || p.CloudInit.FailedUnits()[0] != "cloud-final (exit-code)" || len(p.CloudInit.LogErrors) != 1 || len(p.CloudInit.ResultErrors) != 1 {
+		t.Errorf("cloud-init units/log: %+v", p.CloudInit)
+	}
+	if p.Virt.WWNDisks != 2 || len(p.VCenters) != 2 || p.VCenters[0].Code != 200 || p.VCenters[1].Exit != 7 {
+		t.Errorf("wwn/vcenter: %+v %+v", p.Virt, p.VCenters)
+	}
+	if len(p.CIUsers) != 1 || p.CIUsers[0] != "rancher" || p.CIDefault != "rocky" || !p.Sudo["rancher"].NoPasswd || p.Sudo["rancher"].Keys != 1 {
+		t.Errorf("ci users/sudo: %v %q %+v", p.CIUsers, p.CIDefault, p.Sudo)
+	}
+	if p.CSI.FindMultipaths != "no" || !p.CSI.MountNFS {
+		t.Errorf("csi host prereqs: %+v", p.CSI)
 	}
 	fa := p.Fapolicyd
 	if !fa.Present || fa.Permissive != "0" || len(fa.RulesFiles) != 5 || fa.DenyFile != "90-deny-execute.rules" || fa.CompiledK8s != 4 || len(fa.AllowRules) != 5 || len(fa.K8sRules) != 4 {
@@ -236,7 +264,10 @@ func TestPreflightMerge(t *testing.T) {
 }
 
 func TestScriptIncludesPreflight(t *testing.T) {
-	s := Script(Options{Config: true, Heavy: true})
+	s := Script(Options{Config: true, Heavy: true, VCenters: []string{"vc.corp:443", "bad host;rm", "vc2.corp"}})
+	if !strings.Contains(s, "for vc in vc.corp:443 vc2.corp; do") {
+		t.Errorf("vcenter list not substituted/sanitised")
+	}
 	for _, want := range []string{"sec SWAPS", "sec PFUNITS", "sec MOUNTOPTS", "sec REGPROBE", "sec FAPDENY", "sec CSI"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script lacks %s", want)

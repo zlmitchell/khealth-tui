@@ -42,6 +42,10 @@ type Preflight struct {
 	Denies       []FapDeny // fapolicyd denials from the audit log (heavy)
 	DeniesProbed bool
 	CSI          CSIInfo
+	CIUsers      []string            // users cloud-init created (sudoers.d/90-cloud-init-users)
+	CIDefault    string              // default_user from /etc/cloud/cloud.cfg
+	Sudo         map[string]SudoInfo // ssh user and cloud-init users
+	VCenters     []VCenterProbe
 }
 
 // CSIInfo is what storage drivers left on the host: the CSI node plugins
@@ -51,7 +55,22 @@ type CSIInfo struct {
 	Drivers            []string // e.g. driver.longhorn.io, csi.vsphere.vmware.com
 	HostDirs           []string
 	ISCSID             bool
-	MultipathBlacklist int // blacklist stanzas in /etc/multipath.conf (-1 when no file)
+	MultipathBlacklist int    // blacklist stanzas in /etc/multipath.conf (-1 when no file)
+	FindMultipaths     string // multipath.conf find_multipaths (Trident iSCSI wants "no")
+	MountNFS           bool   // mount.nfs present (NAS backends)
+}
+
+// SudoInfo is the sudo/ssh-key state of the ssh user and the cloud-init users.
+type SudoInfo struct {
+	NoPasswd bool
+	Keys     int
+}
+
+// VCenterProbe is one curl to a vCenter SDK endpoint from the node.
+type VCenterProbe struct {
+	Host string
+	Code int
+	Exit int
 }
 
 // Has reports whether a CSI driver whose name contains s is registered.
@@ -118,7 +137,12 @@ type VirtInfo struct {
 	VMTools         bool // vmtoolsd binary present
 	SRDevs          []string
 	CIData          string // block device labelled cidata (the NoCloud ISO)
+	WWNDisks        int    // /dev/disk/by-id/wwn-* entries (vSphere disk.EnableUUID)
+	IMDS            string // AWS: HTTP status of the IMDSv2 token request ("" when not probed)
 }
+
+// AWS reports whether the node is an EC2 instance.
+func (v VirtInfo) AWS() bool { return strings.Contains(v.Vendor, "Amazon") }
 
 // VMware reports whether the node is a vSphere VM.
 func (v VirtInfo) VMware() bool {
@@ -131,8 +155,27 @@ type CloudInit struct {
 	Disabled       bool
 	DatasourceList string
 	Datasource     string   // /var/lib/cloud/instance/datasource, e.g. "DataSourceNoCloud [seed=/dev/sr0][dsmode=net]"
-	Errors         []string // from /run/cloud-init/status.json
+	Errors         []string // stage errors and recoverable ERRORs from /run/cloud-init/status.json
 	Stage          string
+	Units          []CloudInitUnit // cloud-init-local, cloud-init, cloud-config, cloud-final
+	LogErrors      []string        // ERROR/CRITICAL/Traceback lines from /var/log/cloud-init.log (last 5)
+	ResultErrors   []string        // errors from /run/cloud-init/result.json
+}
+
+// CloudInitUnit is one of the four cloud-init systemd units.
+type CloudInitUnit struct {
+	Name, Active, Sub, Result string
+}
+
+// FailedUnits returns the cloud-init units whose last run failed.
+func (c CloudInit) FailedUnits() []string {
+	var out []string
+	for _, u := range c.Units {
+		if u.Active == "failed" || (u.Result != "" && u.Result != "success") {
+			out = append(out, u.Name+" ("+u.Result+")")
+		}
+	}
+	return out
 }
 
 // Seed returns the device the NoCloud datasource read its data from.
@@ -215,6 +258,8 @@ type RegProbe struct {
 	TokenCode int // HTTP status of the bearer token endpoint (0 when none)
 	Auth, CA  bool
 	Insecure  bool
+	Implicit  bool   // registries.yaml only names the registry (no mirror endpoint): containerd would go to it directly
+	Skipped   string // why the endpoint was not probed ("airgap": image tarballs on the node, no egress attempted)
 }
 
 // RegFile is a TLS file registries.yaml names.
@@ -307,7 +352,7 @@ func parsePreflight(info *Info, secs map[string]string) {
 		p.Modules[strings.TrimSpace(l)] = true
 	}
 	v := kvLines(secs["VIRT"])
-	p.Virt = VirtInfo{Vendor: v["vendor"], Product: v["product"], VMTools: v["vmtoolsd"] == "yes", SRDevs: strings.Fields(v["srdev"]), CIData: strings.TrimSpace(v["cidata"])}
+	p.Virt = VirtInfo{Vendor: v["vendor"], Product: v["product"], VMTools: v["vmtoolsd"] == "yes", SRDevs: strings.Fields(v["srdev"]), CIData: strings.TrimSpace(v["cidata"]), WWNDisks: atoiDef(v["wwn"], 0), IMDS: v["imds"]}
 	p.CloudInit = CloudInit{Installed: v["cloud_init"] == "yes", Disabled: v["cloud_init_disabled"] == "yes", DatasourceList: v["datasource_list"], Datasource: strings.TrimSpace(v["datasource"])}
 	if st := v["status"]; st != "" {
 		var doc struct {
@@ -334,6 +379,41 @@ func parsePreflight(info *Info, secs map[string]string) {
 					}
 				}
 			}
+			// cloud-init >= 23.4: recoverable_errors {"ERROR": [...], "WARNING": [...]}
+			var rec map[string][]string
+			if raw, ok := doc.V1["recoverable_errors"]; ok && json.Unmarshal(raw, &rec) == nil {
+				for _, e := range rec["ERROR"] {
+					p.CloudInit.Errors = append(p.CloudInit.Errors, "recoverable: "+e)
+				}
+			}
+		}
+	}
+	for _, u := range info.Units {
+		switch u.Name {
+		case "cloud-init-local", "cloud-init", "cloud-config", "cloud-final":
+			p.CloudInit.Units = append(p.CloudInit.Units, CloudInitUnit{Name: u.Name, Active: u.Active, Sub: u.Sub, Result: u.Result})
+		}
+	}
+	for _, l := range nonEmpty(secs["CLOUDINIT"]) {
+		k, v, _ := strings.Cut(l, "=")
+		switch k {
+		case "log":
+			p.CloudInit.LogErrors = append(p.CloudInit.LogErrors, v)
+		case "result":
+			var res struct {
+				V1 struct {
+					Errors []string `json:"errors"`
+				} `json:"v1"`
+			}
+			if json.Unmarshal([]byte(v), &res) == nil {
+				p.CloudInit.ResultErrors = res.V1.Errors
+			}
+		}
+	}
+	for _, l := range nonEmpty(secs["VCENTER"]) {
+		f := strings.Split(l, "|")
+		if len(f) == 3 {
+			p.VCenters = append(p.VCenters, VCenterProbe{Host: f[0], Code: atoiDef(f[1], 0), Exit: atoiDef(f[2], 0)})
 		}
 	}
 	fa := kvLines(secs["FAPOLICYD"])
@@ -363,6 +443,10 @@ func parsePreflight(info *Info, secs map[string]string) {
 			p.CSI.ISCSID = v == "active"
 		case "multipath_blacklist":
 			p.CSI.MultipathBlacklist = atoiDef(v, 0)
+		case "find_multipaths":
+			p.CSI.FindMultipaths = strings.TrimSpace(v)
+		case "mount_nfs":
+			p.CSI.MountNFS = v == "yes"
 		}
 	}
 	p.Auditd = kvLines(secs["AUDITD"])
@@ -380,6 +464,8 @@ func parsePreflight(info *Info, secs map[string]string) {
 	}
 	p.FaillockDeny = atoiDef(acc["faillock_deny"], 0)
 	p.Faillock = map[string]int{}
+	p.CIDefault = acc["ci_default"]
+	p.Sudo = map[string]SudoInfo{}
 	for _, l := range nonEmpty(secs["ACCOUNTS"]) {
 		f := strings.Split(l, "|")
 		switch {
@@ -388,6 +474,10 @@ func parsePreflight(info *Info, secs map[string]string) {
 			p.Accounts = append(p.Accounts, a)
 		case f[0] == "faillock" && len(f) == 3:
 			p.Faillock[f[1]] = atoiDef(f[2], 0)
+		case strings.HasPrefix(f[0], "ci_user="):
+			p.CIUsers = append(p.CIUsers, strings.TrimPrefix(f[0], "ci_user="))
+		case f[0] == "sudo" && len(f) == 4:
+			p.Sudo[f[1]] = SudoInfo{NoPasswd: f[2] == "nopasswd=yes", Keys: atoiDef(strings.TrimPrefix(f[3], "keys="), 0)}
 		}
 	}
 	for _, l := range nonEmpty(secs["PROXY"]) {
@@ -417,8 +507,12 @@ func parsePreflight(info *Info, secs map[string]string) {
 		switch {
 		case f[0] == "F" && len(f) == 5:
 			p.RegFiles = append(p.RegFiles, RegFile{Key: f[1], Kind: f[2], Path: f[3], Missing: f[4] == "missing"})
-		case len(f) == 8:
-			p.RegProbes = append(p.RegProbes, RegProbe{Host: f[0], URL: f[1], Code: atoiDef(f[2], 0), Exit: atoiDef(f[3], 0), TokenCode: atoiDef(f[4], 0), Auth: f[5] == "yes", CA: f[6] == "yes", Insecure: f[7] == "true"})
+		case f[0] == "skipped" && len(f) == 4:
+			p.RegProbes = append(p.RegProbes, RegProbe{Host: f[1], URL: f[2], Implicit: true, Skipped: f[3]})
+		case len(f) == 8 || len(f) == 9:
+			rp := RegProbe{Host: f[0], URL: f[1], Code: atoiDef(f[2], 0), Exit: atoiDef(f[3], 0), TokenCode: atoiDef(f[4], 0), Auth: f[5] == "yes", CA: f[6] == "yes", Insecure: f[7] == "true"}
+			rp.Implicit = len(f) == 9 && f[8] == "yes"
+			p.RegProbes = append(p.RegProbes, rp)
 		}
 	}
 	sort.Slice(p.RegProbes, func(i, j int) bool { return p.RegProbes[i].URL < p.RegProbes[j].URL })

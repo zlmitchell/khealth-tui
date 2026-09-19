@@ -201,6 +201,8 @@ func (a *App) nodeDetail(name string) (string, []string) {
 				state = styleWarn.Render("WARN")
 			case "crit":
 				state = styleCrit.Render("CRIT")
+			case "dim":
+				state = styleDim.Render("skip")
 			}
 			tr = append(tr, []string{r[0], trunc(r[1], w-36), state})
 		}

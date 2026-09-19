@@ -430,3 +430,24 @@ func TestKubeletPIDReuse(t *testing.T) {
 		t.Fatalf("pid/flags: %d %v", info.KubeletPID, info.KubeletFlags)
 	}
 }
+
+func TestRegProbeParseImplicitAndSkipped(t *testing.T) {
+	info := Parse("n1", "h", "===MOUNTOPTS\n/|xfs|rw\n===REGPROBE\nharbor.local|https://harbor.local|200|0||yes|yes|false|\ndocker.io|https://registry-1.docker.io|000|6|||||yes\nskipped|quay.io|https://quay.io|airgap\n===END\n", time.Now())
+	p := info.Preflight
+	if len(p.RegProbes) != 3 {
+		t.Fatalf("probes: %+v", p)
+	}
+	byHost := map[string]RegProbe{}
+	for _, r := range p.RegProbes {
+		byHost[r.Host] = r
+	}
+	if byHost["harbor.local"].Implicit || byHost["harbor.local"].Code != 200 || !byHost["harbor.local"].Auth {
+		t.Fatalf("explicit: %+v", byHost["harbor.local"])
+	}
+	if !byHost["docker.io"].Implicit || byHost["docker.io"].Exit != 6 {
+		t.Fatalf("implicit: %+v", byHost["docker.io"])
+	}
+	if byHost["quay.io"].Skipped != "airgap" || !byHost["quay.io"].Implicit {
+		t.Fatalf("skipped: %+v", byHost["quay.io"])
+	}
+}

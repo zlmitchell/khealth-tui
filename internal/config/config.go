@@ -34,6 +34,18 @@ type Config struct {
 	Perf Perf `yaml:"perf"`
 
 	Diag bool `yaml:"-"` // --diag: print API/permission diagnostics and exit
+
+	// Bootstrap (--bootstrap-kubeconfig): build a kubeconfig over SSH from a
+	// server node before starting, for operators who have node access but no
+	// kubeconfig (see internal/bootstrap).
+	Bootstrap Bootstrap `yaml:"-"`
+}
+
+// Bootstrap holds the --bootstrap-* flags.
+type Bootstrap struct {
+	Hosts []string // server nodes to fetch the admin kubeconfig from, in order
+	Out   string   // output path (default ~/.kube/khealth-<cluster>.yaml)
+	Name  string   // cluster/context name (default: from the endpoint DNS name or node hostname)
 }
 
 // Perf configures footprint measurement and the API-side load reducers.
@@ -217,6 +229,9 @@ func Load(args []string) (Config, error) {
 		noBackoff    = fs.Bool("no-backoff", false, "do not skip cycles for nodes whose probes are slow or still running")
 		noWatchCache = fs.Bool("no-watch-cache", false, "list with a quorum read (resourceVersion unset) instead of the apiserver watch cache")
 		noProtobuf   = fs.Bool("no-protobuf", false, "use JSON instead of protobuf for typed API lists")
+		bootstrap    = fs.String("bootstrap-kubeconfig", "", "comma-separated server node addresses: fetch the admin kubeconfig over SSH, point it at a VIP/DNS the apiserver cert is valid for, name the context after the cluster, write it under ~/.kube and use it")
+		bootstrapOut = fs.String("bootstrap-out", "", "where --bootstrap-kubeconfig writes the file (default ~/.kube/khealth-<cluster>.yaml)")
+		bootstrapNm  = fs.String("bootstrap-name", "", "cluster/context name for --bootstrap-kubeconfig (default: first label of the endpoint DNS name, else the node hostname)")
 		showVersion  = fs.Bool("version", false, "print version and exit")
 		initConfig   = fs.Bool("init-config", false, "write the annotated example config to --config (default: the user config path) and exit; never overwrites")
 		printConfig  = fs.Bool("print-config", false, "print the annotated example config to stdout and exit")
@@ -318,8 +333,19 @@ func Load(args []string) (Config, error) {
 			cfg.Perf.WatchCache = !*noWatchCache
 		case "no-protobuf":
 			cfg.Perf.Protobuf = !*noProtobuf
+		case "bootstrap-kubeconfig":
+			for _, h := range strings.Split(*bootstrap, ",") {
+				if h = strings.TrimSpace(h); h != "" {
+					cfg.Bootstrap.Hosts = append(cfg.Bootstrap.Hosts, h)
+				}
+			}
+		case "bootstrap-out":
+			cfg.Bootstrap.Out = *bootstrapOut
+		case "bootstrap-name":
+			cfg.Bootstrap.Name = *bootstrapNm
 		}
 	})
+	cfg.Bootstrap.Out = expand(cfg.Bootstrap.Out)
 
 	cfg.Kubeconfig = expand(cfg.Kubeconfig)
 	cfg.Perf.Log = expand(cfg.Perf.Log)

@@ -58,6 +58,7 @@ type Input struct {
 	S3Reach    map[string]etcd.S3Check // S3 endpoint reachability per etcd node
 	Logs       map[string]*logs.Summary
 	Stig       []stig.Result
+	APIServer  string // kubeconfig server URL, compared with the apiserver certificate SANs
 	HelmLatest map[string]helmcheck.Latest
 	SSHEnabled bool
 	SSHErr     string
@@ -192,6 +193,9 @@ func Evaluate(in Input) []Finding {
 		}
 	}
 
+	// ---- cloud provider / CSI (API) ----
+	evalCloud(in, add)
+
 	// ---- nodes (SSH) ----
 	for name, ni := range in.Nodes {
 		if ni == nil {
@@ -305,6 +309,9 @@ func Evaluate(in Input) []Finding {
 			add(SevWarn, "node", name, fmt.Sprintf("rancher-system-agent health probes failing (%d lines%s)", n, ago(ls.Last("rancher-probe-fail"))), "Rancher marks the machine unhealthy and holds plans; Logs tab for the probe name")
 		}
 	}
+
+	// ---- API endpoint vs tls-san / serving certificate ----
+	evalEndpoint(in, add)
 
 	// ---- etcd ----
 	evalEtcd(in, add, addF)

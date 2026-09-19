@@ -679,27 +679,9 @@ func (a *App) addonsContent() content {
 		add("  " + styleBold.Render(n) + "  " + strings.Join(parts, "  "))
 	}
 
-	// CSI
-	add("", styleTitle.Render("CSI"))
-	if len(s.CSIDrivers) == 0 {
-		add(styleDim.Render("  no CSIDriver objects"))
-	}
-	nodesPer := map[string]int{}
-	for i := range s.CSINodes {
-		for _, d := range s.CSINodes[i].Spec.Drivers {
-			nodesPer[d.Name]++
-		}
-	}
-	for i := range s.CSIDrivers {
-		d := s.CSIDrivers[i].Name
-		var scs []string
-		for j := range s.StorageClasses {
-			if s.StorageClasses[j].Provisioner == d {
-				scs = append(scs, s.StorageClasses[j].Name)
-			}
-		}
-		add(fmt.Sprintf("  %s  %s  %s", styleBold.Render(d), kv("nodes", fmt.Sprintf("%d/%d", nodesPer[d], len(s.Nodes))), kv("storageclasses", strings.Join(scs, ","))))
-	}
+	// cloud provider integration and CSI
+	add("", styleTitle.Render("Cloud provider (CPI)")+"  "+styleDim.Render("cloud-controller-manager, node initialisation, CSI drivers and their backends"))
+	add(a.cloudLines(s)...)
 
 	// system add-ons
 	add("", styleTitle.Render("System add-ons"))
@@ -2006,4 +1988,136 @@ func raftLine(p *etcdpkg.Probe) string {
 		return ""
 	}
 	return strings.Join(parts, "  ")
+}
+
+// cloudLines renders the cloud provider / CSI picture for the Addons tab:
+// the controller workloads, what they did to the nodes, and each CSI driver
+// with its controller, node plugin, backends and recent failures.
+func (a *App) cloudLines(s *k8s.Snapshot) []string {
+	ci := s.Cloud()
+	var out []string
+	comp := func(c *k8s.Component) string {
+		if c == nil {
+			return styleDim.Render("not installed")
+		}
+		st := fmt.Sprintf("%d/%d", c.Ready, c.Desired)
+		if c.OK() {
+			st = styleOK.Render(st)
+		} else {
+			st = styleCrit.Render(st)
+			if c.Problem != "" {
+				st += " " + styleCrit.Render(trunc(c.Problem, 60))
+			}
+		}
+		r := ""
+		if c.Restarts > 0 {
+			r = "  " + styleWarn.Render(fmt.Sprintf("%d restarts", c.Restarts))
+		}
+		return fmt.Sprintf("%s %s/%s %s%s", c.Kind, c.Namespace, c.Name, st, r)
+	}
+	out = append(out, "  "+kv("provider", styleBold.Render(ci.Provider))+"  "+styleDim.Render(ci.Source))
+	for i := range ci.CCMs {
+		c := &ci.CCMs[i]
+		out = append(out, fmt.Sprintf("  %-28s %s  %s", c.Label, comp(c), styleDim.Render(c.Image)))
+	}
+	// nodes
+	var uninit, noID, zones []string
+	byScheme := map[string]int{}
+	for _, n := range ci.Nodes {
+		if n.Uninitialized {
+			uninit = append(uninit, n.Name)
+		}
+		if n.ProviderID == "" {
+			noID = append(noID, n.Name)
+		} else {
+			sch, _, _ := strings.Cut(n.ProviderID, "://")
+			byScheme[sch]++
+		}
+		if n.Zone != "" {
+			zones = append(zones, n.Zone)
+		}
+	}
+	var ids []string
+	for _, k := range sortedKeys(byScheme) {
+		ids = append(ids, fmt.Sprintf("%s:// x%d", k, byScheme[k]))
+	}
+	line := "  " + kv("node providerIDs", strings.Join(ids, ", "))
+	if len(noID) > 0 {
+		line += "  " + styleWarn.Render("none on "+strings.Join(noID, ","))
+	}
+	if len(uninit) > 0 {
+		line += "  " + styleCrit.Render("UNINITIALIZED taint on "+strings.Join(uninit, ","))
+	}
+	if len(zones) > 0 {
+		line += "  " + kv("zones", strings.Join(uniqStrings(zones), ","))
+	}
+	out = append(out, line)
+	// node-side facts from the preflight probe
+	for _, n := range sortedKeys(a.nodes) {
+		ni := a.nodes[n]
+		if ni.Err != nil {
+			continue
+		}
+		p := &ni.Preflight
+		var parts []string
+		if v := ni.KubeletFlags["cloud-provider"]; v != "" {
+			parts = append(parts, "kubelet cloud-provider="+v)
+		}
+		if p.Virt.AWS() && p.Virt.IMDS != "" {
+			parts = append(parts, "imds "+okText(p.Virt.IMDS == "200", "ok", "HTTP "+p.Virt.IMDS))
+		}
+		if p.Virt.VMware() && p.Probed {
+			parts = append(parts, "disk.EnableUUID "+okText(p.Virt.WWNDisks > 0, "ok", "NOT SET"))
+		}
+		for _, vc := range p.VCenters {
+			parts = append(parts, "vcenter "+vc.Host+" "+okText(vc.Code > 0, "reachable", "unreachable"))
+		}
+		if len(parts) > 0 {
+			out = append(out, "  "+styleBold.Render(n)+"  "+strings.Join(parts, "  "))
+		}
+	}
+
+	out = append(out, "", styleTitle.Render("CSI"))
+	if len(ci.CSI) == 0 {
+		out = append(out, styleDim.Render("  no CSIDriver objects"))
+	}
+	for _, d := range ci.CSI {
+		nodes := fmt.Sprintf("%d/%d", d.Registered, len(s.Nodes))
+		if len(d.Missing) > 0 {
+			nodes = styleWarn.Render(nodes) + styleDim.Render(" missing "+strings.Join(d.Missing, ","))
+		} else {
+			nodes = styleOK.Render(nodes)
+		}
+		out = append(out, fmt.Sprintf("  %s  %s  %s  %s", styleBold.Render(d.Driver), kv("nodes", nodes), kv("pvs", fmt.Sprint(d.PVs)), kv("storageclasses", strings.Join(d.StorageCls, ","))))
+		out = append(out, fmt.Sprintf("      controller: %s", comp(d.Controller)))
+		out = append(out, fmt.Sprintf("      node plugin: %s", comp(d.NodePlugin)))
+		for _, b := range d.Trident {
+			st := okText(b.Online && (b.State == "" || b.State == "online"), b.State, strings.ToUpper(b.State))
+			out = append(out, fmt.Sprintf("      backend %s  %s  %s  %s", styleBold.Render(b.BackendName), b.Driver, st, styleDim.Render(b.Version)))
+		}
+		if v := d.VSphere; v != nil {
+			sec := "secret " + v.SecretRef
+			if v.SecretRef != "" {
+				sec = okText(v.SecretFound, sec, sec+" MISSING")
+			}
+			out = append(out, fmt.Sprintf("      vsphere.conf: %s  %s  insecure=%v  %s", kv("vcenters", strings.Join(v.VCenters, ",")), kv("datacenters", strings.Join(v.Datacenters, ",")), v.Insecure, sec))
+		}
+		if len(d.Failures) > 0 {
+			f := d.Failures[0]
+			out = append(out, "      "+styleWarn.Render(fmt.Sprintf("%d failure events in the last hour", len(d.Failures)))+"  "+styleDim.Render(f.Reason+" "+f.Object+": "+trunc(f.Message, 100)))
+		}
+	}
+	return out
+}
+
+func uniqStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }

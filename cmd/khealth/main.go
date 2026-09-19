@@ -4,20 +4,25 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	_ "net/http/pprof" // --pprof: CPU/heap profiles of the running TUI
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
 	"k8s.io/klog/v2"
 
+	"k8s-health-tui/internal/bootstrap"
 	"k8s-health-tui/internal/config"
 	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/sshrun"
 	"k8s-health-tui/internal/ui"
 )
 
@@ -68,6 +73,10 @@ func main() {
 		}
 		cfg.SSH.Password = string(pw)
 	}
+	if err := bootstrapKubeconfig(&cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
 	// klog (client-go throttling notices etc.) writes to stderr, which lands on
 	// top of the alt-screen; silence it while the TUI owns the terminal.
 	klog.SetOutput(io.Discard)
@@ -86,4 +95,61 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// bootstrapKubeconfig builds a kubeconfig over SSH when asked to
+// (--bootstrap-kubeconfig), or offers to when the configured kubeconfig does
+// not load and ssh.hosts names nodes to try. On success cfg points at the
+// written file.
+func bootstrapKubeconfig(cfg *config.Config) error {
+	hosts := cfg.Bootstrap.Hosts
+	if len(hosts) == 0 {
+		loadErr := k8s.CheckKubeconfig(cfg.Kubeconfig, cfg.Context)
+		if loadErr == nil || !cfg.SSH.Enabled || len(cfg.SSH.Hosts) == 0 || !term.IsTerminal(int(os.Stdin.Fd())) {
+			return nil // the TUI reports the kubeconfig error itself
+		}
+		for _, h := range sortedValues(cfg.SSH.Hosts) {
+			hosts = append(hosts, h)
+		}
+		fmt.Fprintf(os.Stderr, "kubeconfig: %v\nFetch the admin kubeconfig over SSH from %s and write it under ~/.kube? [Y/n] ", loadErr, strings.Join(hosts, ", "))
+		var ans string
+		fmt.Fscanln(os.Stdin, &ans)
+		if a := strings.ToLower(strings.TrimSpace(ans)); a != "" && a != "y" && a != "yes" {
+			return nil
+		}
+	}
+	if !cfg.SSH.Enabled {
+		return errors.New("--bootstrap-kubeconfig needs SSH (remove --no-ssh / set ssh.enabled)")
+	}
+	r, err := sshrun.New(cfg.SSH)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	fmt.Fprintln(os.Stderr, "bootstrapping kubeconfig over SSH:")
+	res, err := bootstrap.Run(ctx, r, bootstrap.Options{
+		Hosts: hosts, Out: cfg.Bootstrap.Out, Name: cfg.Bootstrap.Name,
+		Log: func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "wrote %s  (context %q, server %s)\n", res.Path, res.Name, res.Server)
+	for _, n := range res.Notes {
+		fmt.Fprintln(os.Stderr, "note:", n)
+	}
+	fmt.Fprintf(os.Stderr, "use it later with --kubeconfig %s, or merge: KUBECONFIG=~/.kube/config:%s kubectl config view --flatten\n", res.Path, res.Path)
+	cfg.Kubeconfig, cfg.Context = res.Path, res.Name
+	return nil
+}
+
+func sortedValues(m map[string]string) []string {
+	var out []string
+	for _, v := range m {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }

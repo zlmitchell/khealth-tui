@@ -73,8 +73,13 @@ type Snapshot struct {
 
 	RKE2Snapshots []EtcdSnapshotRecord
 	HelmCharts    []HelmChartCR
-	HelmReleases  []HelmRelease
-	Rancher       *RancherInfo
+	Kubeadm       *KubeadmConfig // upstream clusters: kube-system/kubeadm-config ClusterConfiguration
+	// Cloud provider / CSI extras (cloud.go): Trident backends and the
+	// vSphere CPI config; everything else is derived by Snapshot.Cloud.
+	TridentBackends []TridentBackend
+	VSphereConf     *VSphereConf
+	HelmReleases    []HelmRelease
+	Rancher         *RancherInfo
 
 	Errors []string
 
@@ -495,6 +500,28 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		s.HelmCharts = charts
 		mu.Unlock()
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tb := c.tridentBackends(ctx)
+		mu.Lock()
+		s.TridentBackends = tb
+		mu.Unlock()
+	}()
+	optional("kubeadm-config", func() error {
+		kc := c.kubeadmConfig(ctx)
+		mu.Lock()
+		s.Kubeadm = kc
+		mu.Unlock()
+		return nil
+	})
+	optional("vsphere-cloud-config", func() error {
+		vc := c.vsphereConf(ctx)
+		mu.Lock()
+		s.VSphereConf = vc
+		mu.Unlock()
+		return nil
+	})
 	if _, denied := c.Denied("rancher"); !denied {
 		wg.Add(1)
 		go func() {

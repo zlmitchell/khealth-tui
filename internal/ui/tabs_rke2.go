@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"k8s-health-tui/internal/checks"
 	"k8s-health-tui/internal/nodeinfo"
 )
 
@@ -15,9 +16,21 @@ var driftKeys = []string{"profile", "cni", "selinux", "secrets-encryption", "pro
 func (a *App) rke2Content() content {
 	s := a.snap
 	dist := s.Distribution
-	hdr := []string{styleTitle.Render("RKE2 / k3s configuration") + "  " + kv("distribution", dist) + "  " + kv("version", s.Version) + styleDim.Render("   enter = full config.yaml, manifests and static pod dumps for the node")}
+	hdr := []string{styleTitle.Render(a.tabName(tabRKE2)+" configuration") + "  " + kv("distribution", dist) + "  " + kv("version", s.Version) + styleDim.Render("   enter = full config.yaml, manifests and static pod dumps for the node")}
 	if dist != "rke2" && dist != "k3s" {
-		return content{header: hdr, empty: "cluster does not look like rke2/k3s (no rke2/k3s node annotations)"}
+		// upstream: no config.yaml, but the endpoint / certificate SAN check
+		// applies just the same (kubeadm-config carries certSANs)
+		hdr[0] = styleTitle.Render(a.tabName(tabRKE2)+" configuration") + "  " + kv("distribution", dist) + "  " + kv("version", s.Version)
+		if kc := s.Kubeadm; kc != nil {
+			hdr = append(hdr, kv("kubeadm ClusterConfiguration", fmt.Sprintf("clusterName=%s controlPlaneEndpoint=%s certSANs=[%s] serviceSubnet=%s", kc.ClusterName, kc.ControlPlaneEndpoint, strings.Join(kc.CertSANs, ", "), kc.ServiceSubnet)))
+		} else {
+			hdr = append(hdr, styleDim.Render("no kube-system/kubeadm-config ConfigMap: not kubeadm, or no RBAC to read it"))
+		}
+		if !a.sshEnabled {
+			hdr = append(hdr, styleWarn.Render("SSH collection is off - the apiserver certificate SANs come from the control-plane nodes."))
+		}
+		hdr = append(hdr, a.endpointLines()...)
+		return content{header: hdr, empty: "rke2/k3s node settings and drift need an rke2/k3s cluster"}
 	}
 	if !a.sshEnabled {
 		hdr = append(hdr, styleWarn.Render("SSH collection is off - config.yaml and manifest directories need SSH."))
@@ -39,7 +52,11 @@ func (a *App) rke2Content() content {
 			if vs[k] == nil {
 				vs[k] = map[string]bool{}
 			}
-			vs[k][ni.Settings[k]] = true
+			v := ni.Settings[k]
+			if k == "tls-san" { // block lists are empty in Settings; use the parsed list
+				v = strings.Join(ni.TLSSAN, ",")
+			}
+			vs[k][v] = true
 		}
 	}
 	var drift []string
@@ -56,6 +73,10 @@ func (a *App) rke2Content() content {
 	} else if len(a.nodes) > 1 {
 		hdr = append(hdr, styleOK.Render("no config drift across nodes for ")+styleDim.Render(strings.Join(driftKeys[:8], ", ")+", ..."))
 	}
+
+	// API endpoint: what the kubeconfig uses vs what the serving certificate
+	// allows vs what tls-san asks for
+	hdr = append(hdr, a.endpointLines()...)
 
 	// cluster-side bundled charts
 	overrides := 0
@@ -272,4 +293,63 @@ func (a *App) rke2Detail(node string) (string, []string) {
 		add(wrap(strings.Join(flags, " "), w)...)
 	}
 	return "RKE2 " + node, out
+}
+
+// endpointLines renders the API endpoint section of the RKE2 tab: the
+// kubeconfig server, whether it is a VIP or a single node, and per server
+// the tls-san config against the serving certificate's SANs.
+func (a *App) endpointLines() []string {
+	rep := checks.Endpoint(a.apiServer(), a.snap.Nodes, a.nodes, a.snap.Kubeadm)
+	dist := a.snap.Distribution
+	sanKey := checks.SANKey(dist)
+	certName := "serving-kube-apiserver.crt"
+	if dist == "kubeadm" {
+		certName = "pki/apiserver.crt"
+	}
+	out := []string{"", styleTitle.Render("API endpoint") + styleDim.Render("  kubeconfig server vs "+sanKey+" vs "+certName+" SANs; an entry missing from the cert needs the certificate reissued: "+checks.ReissueHint(dist))}
+	ep := styleDim.Render("unknown")
+	if rep.Host != "" {
+		ep = styleBold.Render(rep.Host)
+		switch {
+		case rep.IsNode != "":
+			ep += "  " + styleWarn.Render("single server node ("+rep.IsNode+")")
+		default:
+			ep += "  " + styleOK.Render("VIP / load balancer / external name")
+		}
+	}
+	out = append(out, kv("kubeconfig server", ep))
+	if len(rep.Servers) == 0 {
+		out = append(out, styleDim.Render("  no server node has reported config.yaml and the serving certificate yet (SSH config tier)"))
+		return out
+	}
+	var rows [][]string
+	for _, s := range rep.Servers {
+		tls := styleDim.Render("(none: only node IPs / in-cluster names)")
+		if len(s.TLSSAN) > 0 {
+			tls = strings.Join(s.TLSSAN, ", ")
+		}
+		cert := styleDim.Render("no cert read")
+		if s.HasCert {
+			cert = strings.Join(s.CertSANs, ", ")
+		}
+		missing := styleOK.Render("ok")
+		if len(s.Missing) > 0 {
+			missing = styleWarn.Render("missing: " + strings.Join(s.Missing, ", ") + " (reissue cert)")
+		} else if !s.HasCert {
+			missing = styleDim.Render("-")
+		}
+		host := styleDim.Render("-")
+		if rep.Host != "" && s.HasCert {
+			host = okText(s.HostOK, "in cert", "NOT in cert")
+		}
+		rows = append(rows, []string{s.Node, tls, cert, missing, host})
+	}
+	cfgCol := "TLS-SAN (config.yaml)"
+	if dist == "kubeadm" {
+		cfgCol = "CERTSANS + CP ENDPOINT (kubeadm-config)"
+	}
+	h, lines := renderTable(a.width, []column{{title: "SERVER"}, {title: cfgCol, max: 40}, {title: "CERT SANS (external)", max: 50}, {title: "CERT vs CONFIG"}, {title: "KUBECONFIG HOST"}}, rows)
+	out = append(out, h)
+	out = append(out, lines...)
+	return out
 }

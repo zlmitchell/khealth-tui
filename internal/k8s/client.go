@@ -286,3 +286,18 @@ func NewWithOptions(kubeconfig, ctxName string, opts Options) (*Client, error) {
 	}
 	return &Client{CS: cs, Dyn: dyn, Meta: md, Config: restCfg, Context: name, Host: restCfg.Host, Opts: opts, stats: st, configz: map[string]configzEntry{}}, nil
 }
+
+// CheckKubeconfig reports whether a kubeconfig loads and yields a usable
+// client config, without connecting.
+func CheckKubeconfig(kubeconfig, ctxName string) error {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfig != "" {
+		rules.ExplicitPath = kubeconfig
+	}
+	overrides := &clientcmd.ConfigOverrides{}
+	if ctxName != "" {
+		overrides.CurrentContext = ctxName
+	}
+	_, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
+	return err
+}

@@ -275,6 +275,57 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				add(sev, "security", name, fmt.Sprintf("%s is locked out by pam_faillock (%d failed attempts, deny=%d)", user, n, p.FaillockDeny), "faillock --user "+user+" --reset; find the client retrying with stale credentials")
 			}
 		}
+		// the provisioning user cloud-init created for Rancher: it must not be
+		// subject to STIG password aging (no password, key auth) and must keep
+		// NOPASSWD sudo, or Rancher/automation over SSH breaks when it rotates
+		maxDays := atoiOr(p.LoginDefs["PASS_MAX_DAYS"], 99999)
+		for _, u := range provisioningUsers(p) {
+			a := p.Account(u)
+			if a == nil {
+				continue
+			}
+			sudo, hasSudo := p.Sudo[u]
+			switch {
+			case a.PW == "set" && a.Max >= 0 && a.Max < 99999:
+				add(SevWarn, "security", name, fmt.Sprintf("provisioning user %s (cloud-init) has a password with aging (max %d days, PASS_MAX_DAYS=%d): the STIG rotation policy expires it and SSH/sudo automation as this user stops working", u, a.Max, maxDays), "passwd -l "+u+" (key-only login, no password to age) and keep NOPASSWD sudo; or make it a system account (useradd -r) with no password; cloud-init: lock_passwd: true")
+			case a.PW == "set":
+				add(SevInfo, "security", name, fmt.Sprintf("provisioning user %s has a password exempt from aging (max %d): STIG scanners flag it (RHEL-08-020200); lock the password instead", u, a.Max), "passwd -l "+u)
+			}
+			if hasSudo && !sudo.NoPasswd {
+				if a.PW != "set" {
+					add(SevCrit, "security", name, "provisioning user "+u+" has no password and no NOPASSWD sudo rule: sudo asks for a password that does not exist, so Rancher/automation over SSH cannot escalate (STIG RHEL-08-010380 removed NOPASSWD?)", "restore /etc/sudoers.d/90-cloud-init-users: "+u+" ALL=(ALL) NOPASSWD:ALL, or exempt this account in the STIG remediation")
+				} else {
+					add(SevWarn, "security", name, "provisioning user "+u+" must type its password for sudo: SSH automation must supply it and it rotates with the STIG policy", "NOPASSWD sudo for the provisioning account, or use a service account with key auth")
+				}
+			}
+			if hasSudo && sudo.Keys == 0 && a.PW != "set" {
+				add(SevWarn, "security", name, "provisioning user "+u+" has neither a password nor authorized_keys: no way to log in as it", "")
+			}
+		}
+		// etcd user (rke2 CIS/STIG profile): a system account, nologin, no password
+		if strings.Contains(ni.Settings["profile"], "cis") && ni.ControlPlane && !ni.EtcdUser {
+			add(SevCrit, "security", name, "profile: cis is set but there is no etcd user on the host: rke2-server refuses to start (CIS pre-flight)", "useradd -r -c 'etcd user' -s /sbin/nologin -M etcd -U")
+		}
+		if e := p.Account("etcd"); e != nil {
+			var bad []string
+			if e.UID >= 1000 {
+				bad = append(bad, fmt.Sprintf("uid %d is not a system uid", e.UID))
+			}
+			if !strings.HasSuffix(e.Shell, "nologin") && !strings.HasSuffix(e.Shell, "false") {
+				bad = append(bad, "shell "+e.Shell)
+			}
+			if e.PW == "set" {
+				bad = append(bad, "has a password (aging applies)")
+			}
+			if len(bad) > 0 {
+				add(SevWarn, "security", name, "etcd user does not match the RKE2 STIG (useradd -r -s /sbin/nologin -M etcd -U): "+strings.Join(bad, ", "), "usermod -s /sbin/nologin etcd; passwd -l etcd; the etcd process runs as its uid and never logs in")
+			}
+			if ni.ControlPlane {
+				if perm := ni.Perm(dataDir + "/server/db/etcd"); perm != nil && (perm.User != "etcd" || perm.Group != "etcd") {
+					add(SevWarn, "security", name, fmt.Sprintf("etcd data directory is owned by %s:%s, not etcd:etcd (RKE2 STIG / CIS 1.1.12)", perm.User, perm.Group), "chown -R etcd:etcd "+dataDir+"/server/db/etcd")
+				}
+			}
+		}
 	}
 
 	// ---- proxies ----
@@ -340,6 +391,13 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		}
 		if len(ci.Errors) > 0 {
 			add(SevWarn, "node", name, "cloud-init reported errors: "+truncList(ci.Errors, 2), "cloud-init status --long; /var/log/cloud-init.log")
+		} else if len(ci.ResultErrors) > 0 {
+			add(SevWarn, "node", name, "cloud-init result.json lists errors: "+truncList(ci.ResultErrors, 2), "cloud-init status --long; /var/log/cloud-init.log")
+		} else if len(ci.LogErrors) > 0 {
+			add(SevWarn, "node", name, "cloud-init.log has errors: "+truncStr(ci.LogErrors[len(ci.LogErrors)-1], 200), "grep -E 'ERROR|CRITICAL' /var/log/cloud-init.log")
+		}
+		if fu := ci.FailedUnits(); len(fu) > 0 {
+			add(SevWarn, "node", name, "cloud-init units failed on the last boot: "+strings.Join(fu, ", ")+" - the Rancher user-data (users, ssh keys, rke2 registration) may be half-applied", "journalctl -u "+strings.Fields(fu[0])[0]+"; cloud-init status --long")
 		}
 		if vm {
 			switch {
@@ -417,6 +475,11 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		if n, err := strconv.Atoi(v); err == nil && n < 8192 {
 			add(SevInfo, "node", name, fmt.Sprintf("fs.inotify.max_user_instances=%d (RKE2 recommends 8192 for nodes with many pods or log watchers)", n), "echo 'fs.inotify.max_user_instances = 8192' > /etc/sysctl.d/99-inotify.conf; sysctl --system")
 		}
+	}
+
+	// ---- cloud provider / CSI on this node ----
+	if in.Snap != nil {
+		evalCloudNode(name, ni, in, in.Snap.Cloud(), add)
 	}
 
 	// ---- private registries ----
@@ -541,9 +604,40 @@ func uniq(s []string) []string {
 	return out
 }
 
+func atoiOr(s string, def int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+// provisioningUsers are the accounts cloud-init created for the platform
+// (Rancher's vSphere/AWS templates): sudoers.d/90-cloud-init-users entries,
+// the image's default_user when it has an account, and the ssh user when
+// it is one of them.
+func provisioningUsers(p *nodeinfo.Preflight) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, u := range append(append([]string{}, p.CIUsers...), p.CIDefault) {
+		if u == "" || u == "root" || seen[u] || p.Account(u) == nil {
+			continue
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	return out
+}
+
 // regVerdict interprets one curl probe of a registry endpoint.
 func regVerdict(r nodeinfo.RegProbe) (msg, hint string, sev Severity, ok bool) {
 	where := r.Host
+	if r.Skipped != "" {
+		return "", "", SevInfo, false
+	}
+	if r.Implicit {
+		where += " (no mirror endpoint in registries.yaml: containerd pulls from the registry itself)"
+	}
 	if r.Exit != 0 && r.Code == 0 {
 		reason := map[int]string{
 			6: "cannot resolve the host (DNS)", 7: "connection refused", 28: "timed out", 35: "TLS handshake failed (plain HTTP endpoint declared https, or FIPS/cipher mismatch)",
@@ -784,6 +878,29 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 		}
 		row("platform", v, st)
 	}
+	if p.Virt.AWS() && p.Virt.IMDS != "" {
+		row("aws imds", "HTTP "+p.Virt.IMDS, map[bool]string{true: "ok", false: "crit"}[p.Virt.IMDS == "200"])
+	}
+	if p.Virt.VMware() {
+		row("vsphere disk.EnableUUID", fmt.Sprintf("%d wwn disks", p.Virt.WWNDisks), map[bool]string{true: "ok", false: "warn"}[p.Virt.WWNDisks > 0])
+	}
+	for _, vc := range p.VCenters {
+		v := fmt.Sprintf("HTTP %d", vc.Code)
+		if vc.Code == 0 {
+			v = fmt.Sprintf("unreachable (curl exit %d)", vc.Exit)
+		}
+		row("vcenter "+vc.Host, v, map[bool]string{true: "ok", false: "crit"}[vc.Code > 0])
+	}
+	for _, u := range provisioningUsers(p) {
+		a := p.Account(u)
+		s := p.Sudo[u]
+		v := fmt.Sprintf("password %s, sudo nopasswd=%v, %d keys", a.PW, s.NoPasswd, s.Keys)
+		st := "ok"
+		if a.PW == "set" || !s.NoPasswd {
+			st = "warn"
+		}
+		row("provisioning user "+u, v, st)
+	}
 	if p.CloudInit.Installed {
 		v := p.CloudInit.Datasource
 		if v == "" {
@@ -792,6 +909,11 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 		st := "ok"
 		if len(p.CloudInit.Errors) > 0 {
 			v, st = v+", errors: "+truncList(p.CloudInit.Errors, 1), "warn"
+		} else if len(p.CloudInit.LogErrors) > 0 {
+			v, st = v+", log errors", "warn"
+		}
+		if fu := p.CloudInit.FailedUnits(); len(fu) > 0 {
+			v, st = v+", failed: "+strings.Join(fu, ","), "warn"
 		}
 		for _, m := range p.Modprobe {
 			if (m.Module == "cdrom" || m.Module == "sr_mod" || m.Module == "isofs") && m.Disables() {
@@ -820,7 +942,9 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 			v += ", with credentials"
 		}
 		st := "ok"
-		if _, _, sev, bad := regVerdict(r); bad {
+		if r.Skipped == "airgap" {
+			v, st = "not probed: node has airgap image tarballs, no egress attempted ("+r.URL+")", "dim"
+		} else if _, _, sev, bad := regVerdict(r); bad {
 			st = "warn"
 			if sev == SevCrit {
 				st = "crit"

@@ -55,6 +55,26 @@ echo "datasource_list=$(grep -rhs '^datasource_list' /etc/cloud/cloud.cfg /etc/c
 [ -f /run/cloud-init/status.json ] && echo "status=$(tr -d '\n' < /run/cloud-init/status.json 2>/dev/null | head -c 4000)"
 echo "srdev=$(ls /dev/sr[0-9]* 2>/dev/null | tr '\n' ' ')"
 command -v blkid >/dev/null 2>&1 && echo "cidata=$(blkid -L cidata 2>/dev/null; blkid -L CIDATA 2>/dev/null)"
+# vSphere CSI needs disk.EnableUUID=TRUE on the VM: the disks then carry a
+# WWN and show up under /dev/disk/by-id/wwn-*
+echo "wwn=$(ls /dev/disk/by-id/ 2>/dev/null | grep -c '^wwn-')"
+# AWS: the cloud controller and the EBS CSI read instance identity from IMDS
+case "$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)" in *Amazon*) command -v curl >/dev/null 2>&1 && echo "imds=$(curl -s -m 2 -o /dev/null -w '%{http_code}' -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 30' 2>/dev/null)";; esac
+sec CLOUDINIT
+# (the cloud-init units' state/Result come from the UNITS section of base.sh)
+if command -v cloud-init >/dev/null 2>&1; then
+  [ -f /run/cloud-init/result.json ] && echo "result=$(tr -d '\n' < /run/cloud-init/result.json 2>/dev/null | head -c 1000)"
+  [ -f /var/log/cloud-init.log ] && grep -hE '\[(ERROR|CRITICAL)\]|Traceback' /var/log/cloud-init.log 2>/dev/null | tail -5 | cut -c1-300 | sed 's/^/log=/'
+fi
+sec VCENTER
+# vCenter hosts from the vSphere CPI config (kube-system vsphere-cloud-config):
+# the CPI and CSI on this node need to reach the SDK endpoint
+if command -v curl >/dev/null 2>&1; then
+  for vc in __VCENTERS__; do
+    ( code=$(curl -sk -m 5 -o /dev/null -w '%{http_code}' "https://$vc/sdk" 2>/dev/null); rc=$?; echo "$vc|$code|$rc" ) &
+  done
+  wait
+fi
 sec FAPOLICYD
 if [ -d /etc/fapolicyd ]; then
   echo "present=yes"
@@ -75,6 +95,9 @@ ls /var/lib/kubelet/plugins_registry 2>/dev/null | sed -E 's/-reg\.sock$/|/; s/\
 for d in /var/lib/longhorn/engine-binaries /var/lib/longhorn /opt/pwx/bin /var/lib/kubelet/volumeplugins /usr/libexec/kubernetes/kubelet-plugins/volume/exec /var/lib/rook /var/lib/trident /var/openebs; do [ -d "$d" ] && echo "dir=$d"; done
 [ -e /run/systemd/units/invocation:iscsid.service ] && echo "iscsid=active"
 [ -f /etc/multipath.conf ] && echo "multipath_blacklist=$(grep -c '^[[:space:]]*blacklist' /etc/multipath.conf 2>/dev/null)"
+# Trident iSCSI wants multipathd with find_multipaths no; NAS backends need mount.nfs
+[ -f /etc/multipath.conf ] && echo "find_multipaths=$(grep -hsE '^[[:space:]]*find_multipaths' /etc/multipath.conf 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '"')"
+command -v mount.nfs >/dev/null 2>&1 && echo "mount_nfs=yes"
 sec AUDITD
 grep -hsE '^[[:space:]]*(log_file|max_log_file|max_log_file_action|num_logs|space_left|space_left_action|admin_space_left|admin_space_left_action|disk_full_action|disk_error_action)[[:space:]]*=' /etc/audit/auditd.conf 2>/dev/null | tr -d ' \t'
 sec ACCOUNTS
@@ -92,6 +115,20 @@ if command -v faillock >/dev/null 2>&1; then
     echo "faillock|$u|$(faillock --user "$u" 2>/dev/null | grep -c ' V$')"
   done
 fi
+# the provisioning user cloud-init created (Rancher's vSphere/AWS templates):
+# named in /etc/sudoers.d/90-cloud-init-users, or the image's default_user
+grep -hsE '^[^#]+ALL' /etc/sudoers.d/90-cloud-init-users 2>/dev/null | awk '{print "ci_user="$1}'
+echo "ci_default=$(grep -hsA3 '^[[:space:]]*default_user:' /etc/cloud/cloud.cfg 2>/dev/null | sed -nE 's/^[[:space:]]*name:[[:space:]]*//p' | head -1)"
+# sudo|user|nopasswd=yes/no|keys=N for the ssh user and the cloud-init users
+for u in $( { echo "${SUDO_USER:-}"; grep -hsE '^[^#]+ALL' /etc/sudoers.d/90-cloud-init-users 2>/dev/null | awk '{print $1}'; } | grep . | sort -u); do
+  np=no
+  for g in "$u" $(id -Gn "$u" 2>/dev/null | sed 's/\([^ ][^ ]*\)/%\1/g'); do
+    grep -hsE "^[[:space:]]*$g[[:space:]].*NOPASSWD" /etc/sudoers /etc/sudoers.d/* >/dev/null 2>&1 && np=yes
+  done
+  h=$(getent passwd "$u" 2>/dev/null | cut -d: -f6)
+  keys=$(grep -cE '^(ssh|ecdsa)-' "$h/.ssh/authorized_keys" 2>/dev/null)
+  echo "sudo|$u|nopasswd=$np|keys=${keys:-0}"
+done
 sec PROXY
 for f in /etc/default/rke2-server /etc/default/rke2-agent /etc/sysconfig/rke2-server /etc/sysconfig/rke2-agent /etc/systemd/system/rke2-server.service.env /etc/systemd/system/rke2-agent.service.env /etc/systemd/system/k3s.service.env /etc/systemd/system/k3s-agent.service.env /etc/systemd/system/rke2-server.service.d/*.conf /etc/systemd/system/rke2-agent.service.d/*.conf /etc/systemd/system/k3s.service.d/*.conf /etc/systemd/system/k3s-agent.service.d/*.conf /etc/systemd/system/containerd.service.d/*.conf /etc/environment; do
   [ -f "$f" ] || continue
@@ -108,8 +145,14 @@ sec REGPROBE
 # curl (GET /v2/, then the bearer token endpoint the registry names) using
 # the configured credentials and TLS files, so "keys not working" shows up
 # here instead of as ImagePullBackOff later. One line per endpoint:
-# host|url|http|curlexit|tokenhttp|auth|ca|insecure
+# host|url|http|curlexit|tokenhttp|auth|ca|insecure|implicit
 # and F|key|kind|path|ok/missing for every TLS file the configs section names.
+# implicit=yes marks a registry registries.yaml only names (a mirror without
+# endpoints, a configs key that is no endpoint): containerd goes to the
+# registry itself. On an airgapped node - image tarballs in agent/images -
+# the endpoint-less mirrors (upstream fallbacks such as docker.io) are not
+# probed at all: no egress attempt, no "unreachable" finding; they are
+# listed as skipped|host|url|airgap. configs-only keys are still probed.
 # fields are separated by the unit separator (0x1f): `read` collapses runs
 # of tab/space so empty fields would shift, and passwords may contain '|'
 T=$(printf '\037')
@@ -120,7 +163,7 @@ regyaml() {
     function val(s,  i) { i=index(s,":"); s=substr(s,i+1); sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+#.*$/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^["'\'']|["'\'']$/,"",s); return s }
     /^[[:space:]]*(#|$)/ {next}
     /^[^[:space:]]/ { cflush(); mflush(); top=$1; sub(/:.*/,"",top); reg=""; neps=0; next }
-    top=="mirrors" && /^  [^[:space:]]/ { mflush(); reg=$0; sub(/^  /,"",reg); sub(/:[[:space:]]*$/,"",reg); gsub(/["'\'']/,"",reg); neps=0; next }
+    top=="mirrors" && /^  [^[:space:]]/ { mflush(); reg=$0; sub(/^  /,"",reg); sub(/:[[:space:]]*({})?[[:space:]]*$/,"",reg); gsub(/["'\'']/,"",reg); neps=0; next }
     top=="mirrors" && /^[[:space:]]+endpoint:[[:space:]]*\[/ { s=$0; sub(/^[^[]*\[/,"",s); sub(/\].*$/,"",s); n=split(s,a,","); for(i=1;i<=n;i++){e=a[i]; gsub(/["'\'' ]/,"",e); if(e!=""){print "M\037" reg "\037" e; neps++}} next }
     top=="mirrors" && reg!="" && /^[[:space:]]*-[[:space:]]*/ { e=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",e); gsub(/["'\'' ]/,"",e); if (e!="") {print "M\037" reg "\037" e; neps++} next }
     top=="configs" && /^  [^[:space:]]/ { cflush(); reg=$0; sub(/^  /,"",reg); sub(/:[[:space:]]*$/,"",reg); gsub(/["'\'']/,"",reg); next }
@@ -128,8 +171,8 @@ regyaml() {
       if (k=="username") u=val(l); else if (k=="password") p=val(l); else if (k=="ca_file") ca=val(l); else if (k=="cert_file") ce=val(l); else if (k=="key_file") ke=val(l); else if (k=="insecure_skip_verify") ins=val(l); next }
     END { cflush(); mflush() }' "$1"
 }
-probe() { # url host user pass ca cert key insecure
-  url=$1; host=$2; user=$3; pass=$4; ca=$5; cert=$6; key=$7; ins=$8
+probe() { # url host user pass ca cert key insecure implicit
+  url=$1; host=$2; user=$3; pass=$4; ca=$5; cert=$6; key=$7; ins=$8; impl=$9
   opts() {
     [ -n "$user" ] && printf 'user = "%s:%s"\n' "$user" "$pass"
     [ -n "$ca" ] && printf 'cacert = "%s"\n' "$ca"
@@ -149,8 +192,9 @@ probe() { # url host user pass ca cert key insecure
     service=$(printf '%s' "$out" | grep -i '^www-authenticate: *bearer' | sed -nE 's/.*service="([^"]+)".*/\1/p' | head -1)
     [ -n "$realm" ] && code2=$(opts | curl -m 6 -o /dev/null -w '%{http_code}' -K - "$realm?service=$service&scope=repository:library/busybox:pull" 2>/dev/null)
   fi
-  echo "$host|$url|${code:-000}|$rc|$code2|${user:+yes}|${ca:+yes}|$ins"
+  echo "$host|$url|${code:-000}|$rc|$code2|${user:+yes}|${ca:+yes}|$ins|$impl"
 }
+AIRGAP=; for d in "$RKE2_DD"/agent/images "$K3S_DD"/agent/images; do ls "$d"/*.tar* >/dev/null 2>&1 && AIRGAP=yes; done
 if ! command -v curl >/dev/null 2>&1; then echo "curl=missing"; else
 for f in /etc/rancher/rke2/registries.yaml /etc/rancher/k3s/registries.yaml; do
   [ -f "$f" ] || continue
@@ -164,27 +208,33 @@ for f in /etc/rancher/rke2/registries.yaml /etc/rancher/k3s/registries.yaml; do
   # every endpoint (or the registry itself when a mirror lists none) plus
   # every configs key that is not an endpoint; probes run in parallel and
   # the subshell waits for them so their lines stay inside this section
+  # explicit endpoints first; a mirror that names a registry without endpoints
+  # is tagged "~" (upstream fallback: skipped on airgap nodes), a configs-only
+  # key "+" (referenced directly by image names: always probed, the
+  # credential check is the point)
   EPS=$(printf '%s\n' "$R" | grep '^M' | while IFS="$T" read -r _ reg e; do
       # (pattern) form: bash 5.1 cannot parse an unparenthesised case pattern inside $( )
-      [ -z "$e" ] && { case "$reg" in (docker.io) e=https://registry-1.docker.io;; (*) e=https://$reg;; esac; }
+      [ -z "$e" ] && { case "$reg" in (docker.io) e=~https://registry-1.docker.io;; (*) e=~https://$reg;; esac; }
       echo "$e"
     done | sed 's|/*$||')
-  EPHOSTS=" $(printf '%s\n' "$EPS" | sed -E 's#^[a-z]+://##; s#/.*##' | tr '\n' ' ')"
+  EPHOSTS=" $(printf '%s\n' "$EPS" | sed -E 's#^~?[a-z]+://##; s#/.*##' | tr '\n' ' ')"
   { printf '%s\n' "$EPS"
     printf '%s\n' "$R" | grep '^C' | while IFS="$T" read -r _ k _; do
       case "$k" in \**) continue;; esac
-      case "$EPHOSTS" in *" $k "*) ;; *) echo "https://$k";; esac
+      case "$EPHOSTS" in *" $k "*) ;; *) echo "+https://$k";; esac
     done
   } | grep . | sort -u | head -8 | {
     while read -r url; do
+      impl=; up=; case "$url" in ('~'*) impl=yes; up=yes; url=${url#'~'};; ('+'*) impl=yes; url=${url#'+'};; esac  # '~' quoted: bare ~ in a pattern is tilde-expanded
       host=$(printf '%s' "$url" | sed -E 's#^[a-z]+://##; s#/.*##')
+      if [ -n "$up" ] && [ -n "$AIRGAP" ]; then echo "skipped|$host|$url|airgap"; continue; fi
       c=$(printf '%s\n' "$R" | grep "^C${T}${host}${T}" | head -1)
       [ -z "$c" ] && c=$(printf '%s\n' "$R" | grep "^C${T}${host%%:*}${T}" | head -1)
       u=; p=; ca=; ce=; ke=; ins=
       [ -n "$c" ] && IFS="$T" read -r _ _ u p ca ce ke ins <<EOF
 $c
 EOF
-      probe "$url" "$host" "$u" "$p" "$ca" "$ce" "$ke" "${ins:-false}" &
+      probe "$url" "$host" "$u" "$p" "$ca" "$ce" "$ke" "${ins:-false}" "$impl" &
     done
     wait
   }

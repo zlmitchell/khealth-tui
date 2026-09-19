@@ -24,7 +24,10 @@ type Options struct {
 	LogSince      string   // journalctl --since
 	KnownTarballs []string // "path|size|mtime" entries whose manifests are already known
 	PVPaths       []string // hostPath/local PV directories to measure with du (heavy)
+	VCenters      []string // vCenter host[:port]s from the vSphere CPI config, probed from the node (config tier)
 }
+
+var safeHost = regexp.MustCompile(`^[A-Za-z0-9._-]{1,253}(:[0-9]{1,5})?$`)
 
 var safeSince = regexp.MustCompile(`^[-+0-9a-zA-Z: ]{1,40}$`)
 var safePath = regexp.MustCompile(`^/[A-Za-z0-9_./@:+-]{1,400}$`)
@@ -53,7 +56,14 @@ func Script(o Options) string {
 	base = strings.ReplaceAll(base, "__CPUSAMPLE__", map[bool]string{true: "1", false: "0"}[o.CPUSample])
 	b.WriteString(strings.ReplaceAll(base, "__KPID__", fmt.Sprint(max(o.KubeletPID, 0))))
 	pf := strings.ReplaceAll(preflightScript, "__CONFIG__", map[bool]string{true: "1", false: "0"}[o.Config])
-	b.WriteString(strings.ReplaceAll(pf, "__HEAVY__", map[bool]string{true: "1", false: "0"}[o.Heavy]))
+	pf = strings.ReplaceAll(pf, "__HEAVY__", map[bool]string{true: "1", false: "0"}[o.Heavy])
+	var vcs []string
+	for _, h := range o.VCenters {
+		if safeHost.MatchString(h) {
+			vcs = append(vcs, h)
+		}
+	}
+	b.WriteString(strings.ReplaceAll(pf, "__VCENTERS__", strings.Join(vcs, " ")))
 	if o.OSStig {
 		b.WriteString(osStigScript)
 		b.WriteString(stigdata.ProbeScript())
