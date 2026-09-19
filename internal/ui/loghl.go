@@ -11,7 +11,34 @@ import (
 // Log line highlighting: JSON, logfmt (key=value), klog and plain lines get
 // keys dimmed, level tokens coloured by severity and messages emphasised.
 
+// keyPalette gives every key a stable, distinct colour (hashed by name) so
+// the same field is easy to pick out across lines.
+var keyPalette = []lipgloss.AdaptiveColor{
+	{Light: "#0969da", Dark: "#79c0ff"}, // blue
+	{Light: "#8250df", Dark: "#d2a8ff"}, // purple
+	{Light: "#bf3989", Dark: "#f778ba"}, // pink
+	{Light: "#9a6700", Dark: "#e3b341"}, // gold
+	{Light: "#1a7f37", Dark: "#56d364"}, // green
+	{Light: "#0a7d8c", Dark: "#76e3ea"}, // teal
+	{Light: "#bc4c00", Dark: "#f0883e"}, // orange
+}
+
+func keyStyle(key string) lipgloss.Style {
+	h := uint32(2166136261)
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= 16777619
+	}
+	return lipgloss.NewStyle().Foreground(keyPalette[h%uint32(len(keyPalette))]).Bold(true)
+}
+
+// renderKey colours a key and dims its separator (":" or "=").
+func renderKey(key, sep string) string {
+	return keyStyle(key).Render(key) + styleLogSep.Render(sep)
+}
+
 var (
+	styleLogSep   = lipgloss.NewStyle().Foreground(colorDim)
 	styleLogKey   = lipgloss.NewStyle().Foreground(colorDim)
 	styleLogStr   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#0a7f5a", Dark: "#7ee787"})
 	styleLogNum   = lipgloss.NewStyle().Foreground(colorInfo)
@@ -81,7 +108,8 @@ func highlightJSON(s string) string {
 	for i < len(s) {
 		if m := reJSONKey.FindStringSubmatchIndex(s[i:]); m != nil && m[0] == 0 {
 			key := s[i+m[2] : i+m[3]]
-			b.WriteString(styleLogKey.Render(s[i : i+m[1]]))
+			keyEnd := i + m[3] + 1 // include the closing quote
+			b.WriteString(keyStyle(key).Render(s[i:keyEnd]) + styleLogSep.Render(s[keyEnd:i+m[1]]))
 			lastKey = key
 			i += m[1]
 			if v := reJSONVal.FindStringIndex(s[i:]); v != nil {
@@ -124,24 +152,24 @@ func highlightLogfmt(s string) string {
 		key, val := m[1], m[2]
 		if isLevelKey(key) {
 			if st, ok := levelStyle(val); ok {
-				return styleLogKey.Render(key+"=") + st.Bold(true).Render(val)
+				return renderKey(key, "=") + st.Bold(true).Render(val)
 			}
 		}
 		if isMsgKey(key) {
 			if strings.EqualFold(key, "error") || strings.EqualFold(key, "err") {
-				return styleLogKey.Render(key+"=") + styleCrit.Render(val)
+				return renderKey(key, "=") + styleCrit.Render(val)
 			}
-			return styleLogKey.Render(key+"=") + styleLogMsg.Render(val)
+			return renderKey(key, "=") + styleLogMsg.Render(val)
 		}
 		switch {
 		case strings.HasPrefix(val, `"`):
-			return styleLogKey.Render(key+"=") + styleLogStr.Render(val)
+			return renderKey(key, "=") + styleLogStr.Render(val)
 		case val == "true" || val == "false":
-			return styleLogKey.Render(key+"=") + styleLogBool.Render(val)
+			return renderKey(key, "=") + styleLogBool.Render(val)
 		case isNumber(val):
-			return styleLogKey.Render(key+"=") + styleLogNum.Render(val)
+			return renderKey(key, "=") + styleLogNum.Render(val)
 		}
-		return styleLogKey.Render(key+"=") + val
+		return renderKey(key, "=") + val
 	})
 }
 
