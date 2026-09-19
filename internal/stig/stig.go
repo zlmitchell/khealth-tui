@@ -92,6 +92,8 @@ type Result struct {
 	Detail  string
 	Fix     string
 	Ref     string            // reference document when not derivable from the ID prefix (OS STIGs)
+	RuleID  string            // STIG rule ID (RHEL-09-211010) when the reference has one
+	Check   string            // the reference's own check text (OS STIGs), shown in the detail view
 	PerNode map[string]Status // per-node outcome for perNode rules
 }
 

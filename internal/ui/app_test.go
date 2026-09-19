@@ -236,6 +236,24 @@ func TestPodLogsViewer(t *testing.T) {
 	}
 }
 
+func TestLogHighlighting(t *testing.T) {
+	cases := map[string]string{
+		`{"level":"error","msg":"boom","count":3,"ok":true}`:                 "boom",
+		`time=2024 level=warn msg="disk slow" took=12ms`:                     "disk slow",
+		`E0919 04:47:06.815780       1 logging.go:55] grpc: addrConn failed`: "grpc",
+		`plain text with ERROR inside`:                                       "ERROR",
+	}
+	for in, want := range cases {
+		out := highlightLog(in)
+		if !strings.Contains(ansi.Strip(out), want) {
+			t.Errorf("highlight lost content %q -> %q", in, ansi.Strip(out))
+		}
+		if ansi.Strip(out) != in {
+			t.Errorf("highlight changed text: %q -> %q", in, ansi.Strip(out))
+		}
+	}
+}
+
 func TestKeyHandling(t *testing.T) {
 	a := testApp()
 	a.handleKey(tea.KeyMsg{Type: tea.KeyTab})

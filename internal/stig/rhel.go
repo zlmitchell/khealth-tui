@@ -7,7 +7,7 @@ package stig
 // Keys are osCheck.key values from os.go; the category is the STIG severity.
 
 var rhelBenchmarks = []OSBenchmark{
-	{Name: "DISA RHEL 8 STIG", Version: "V2R8 (01 Jul 2026)", family: "rhel", release: "8", rules: map[string]osRef{
+	{Name: "DISA RHEL 8 STIG", Version: "V2R8 (01 Jul 2026)", product: "rhel8", family: "rhel", release: "8", rules: map[string]osRef{
 		"fips":                     {"V-230223", "I"},  // FIPS 140-3 systemwide crypto policy (fips-mode-setup)
 		"mac":                      {"V-230240", "II"}, // SELinux enforcing
 		"fapolicyd":                {"V-244546", "II"}, // fapolicyd deny-all, permit-by-exception
@@ -28,7 +28,7 @@ var rhelBenchmarks = []OSBenchmark{
 		"source_route_default":     {"V-244552", "II"},
 		"echo_broadcast":           {"V-230537", "II"},
 	}},
-	{Name: "DISA RHEL 9 STIG", Version: "V2R9 (01 Jul 2026)", family: "rhel", release: "9", rules: map[string]osRef{
+	{Name: "DISA RHEL 9 STIG", Version: "V2R9 (01 Jul 2026)", product: "rhel9", family: "rhel", release: "9", rules: map[string]osRef{
 		"fips":                     {"V-258230", "I"},
 		"mac":                      {"V-258078", "I"},
 		"fapolicyd":                {"V-270180", "II"},
@@ -49,7 +49,7 @@ var rhelBenchmarks = []OSBenchmark{
 		"source_route_default":     {"V-257964", "II"},
 		"echo_broadcast":           {"V-257966", "II"},
 	}},
-	{Name: "DISA RHEL 10 STIG", Version: "V1R2 (01 Jul 2026)", family: "rhel", release: "10", rules: map[string]osRef{
+	{Name: "DISA RHEL 10 STIG", Version: "V1R2 (01 Jul 2026)", product: "rhel10", family: "rhel", release: "10", rules: map[string]osRef{
 		"fips":                     {"V-281009", "I"},
 		"mac":                      {"V-281251", "II"},
 		"fapolicyd":                {"V-280971", "II"},

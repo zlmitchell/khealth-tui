@@ -8,12 +8,15 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	corev1 "k8s.io/api/core/v1"
 
 	"k8s-health-tui/internal/k8s"
 )
 
 const logBufferLines = 5000
+
+func ansiWidth(s string) int { return ansi.StringWidth(s) }
 
 // logView is the streaming pod log viewer state.
 type logView struct {
@@ -25,7 +28,8 @@ type logView struct {
 	previous   bool
 	follow     bool
 	wrap       bool
-	tsMode     int // 0 short HH:MM:SS, 1 hidden, 2 full RFC3339
+	tsMode     int  // 0 short HH:MM:SS, 1 hidden, 2 full RFC3339
+	plain      bool // no syntax highlighting
 	filter     string
 	lines      []string
 	scroll     int
@@ -206,14 +210,44 @@ func (a *App) logVisibleLines() []string {
 		if f != "" && !strings.Contains(strings.ToLower(l), f) {
 			continue
 		}
-		l = shortenTimestamp(l, lv.tsMode)
+		t, rest, hasTS := splitTimestamp(l)
+		prefix := ""
+		if hasTS {
+			switch lv.tsMode {
+			case 0:
+				prefix = styleDim.Render(t.Local().Format("15:04:05")) + " "
+			case 2:
+				prefix = styleDim.Render(l[:len(l)-len(rest)-1]) + " "
+			}
+		}
+		hl := func(frag string) string {
+			if lv.plain {
+				return frag
+			}
+			return highlightLog(frag)
+		}
 		if lv.wrap {
-			out = append(out, wrap(l, w)...)
+			// wrap the plain text first so escape sequences are never split
+			frags := wrap(rest, w-len(prefixPlain(prefix)))
+			for i, fr := range frags {
+				if i == 0 {
+					out = append(out, prefix+hl(fr))
+				} else {
+					out = append(out, strings.Repeat(" ", len(prefixPlain(prefix)))+hl(fr))
+				}
+			}
 		} else {
-			out = append(out, l)
+			out = append(out, prefix+hl(rest))
 		}
 	}
 	return out
+}
+
+func prefixPlain(p string) string {
+	if p == "" {
+		return ""
+	}
+	return strings.Repeat(" ", ansiWidth(p))
 }
 
 func (a *App) logMaxScroll() int {
@@ -272,6 +306,8 @@ func (a *App) handleLogKey(key string) (tea.Model, tea.Cmd) {
 		lv.scroll = a.logMaxScroll()
 	case "T":
 		lv.tsMode = (lv.tsMode + 1) % 3
+	case "H":
+		lv.plain = !lv.plain
 	case "r":
 		return a, a.startLogStream()
 	case "j", "down":
@@ -327,7 +363,7 @@ func (a *App) renderPodLogs() (string, []string) {
 	}
 	lines := []string{
 		kv("containers", strings.Join(ctrs, " ")) + "   " + strings.Join(mode, "  "),
-		styleDim.Render("[ ] or tab switch container · { } next/prev pod of the same controller · p previous · f follow · w wrap · T timestamps (short/off/full) · r reload · j/k G g scroll · esc close"),
+		styleDim.Render("[ ] or tab switch container · { } next/prev pod of the same controller · p previous · f follow · w wrap · T timestamps (short/off/full) · H highlighting on/off · r reload · j/k G g scroll · esc close"),
 	}
 	if len(lv.pods) > 1 {
 		lines[0] += "   " + kv("pod", fmt.Sprintf("%d/%d", lv.podIdx+1, len(lv.pods)))
@@ -345,46 +381,12 @@ func (a *App) renderPodLogs() (string, []string) {
 	if lv.scroll > end {
 		lv.scroll = end
 	}
-	for _, l := range vis[lv.scroll:end] {
-		lines = append(lines, colorLogLine(l))
-	}
+	lines = append(lines, vis[lv.scroll:end]...)
 	if len(vis) == 0 && lv.err == "" && !lv.streaming {
 		lines = append(lines, styleDim.Render("(no output)"))
 	}
 	lines = append(lines, styleDim.Render(fmt.Sprintf("-- lines %d-%d of %d --", lv.scroll+1, end, len(vis))))
 	return title, lines
-}
-
-// shortenTimestamp rewrites the leading kubelet RFC3339 timestamp: mode 0 =
-// local HH:MM:SS, 1 = dropped, 2 = untouched.
-func shortenTimestamp(l string, mode int) string {
-	if mode == 2 {
-		return l
-	}
-	ts, rest, ok := strings.Cut(l, " ")
-	if !ok || len(ts) < 20 || ts[4] != '-' || ts[10] != 'T' {
-		return l
-	}
-	t, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		return l
-	}
-	if mode == 1 {
-		return rest
-	}
-	return styleDim.Render(t.Local().Format("15:04:05")) + " " + rest
-}
-
-// colorLogLine highlights obvious severities without parsing formats.
-func colorLogLine(l string) string {
-	low := strings.ToLower(l)
-	switch {
-	case strings.Contains(low, "level=error") || strings.Contains(low, " error ") || strings.Contains(low, "\"level\":\"error\"") || strings.Contains(low, "fatal") || strings.Contains(low, "panic"):
-		return styleCrit.Render(l)
-	case strings.Contains(low, "level=warn") || strings.Contains(low, " warn") || strings.Contains(low, "\"level\":\"warn"):
-		return styleWarn.Render(l)
-	}
-	return l
 }
 
 // podForLogs resolves the selected Inspect row to a pod and its siblings.

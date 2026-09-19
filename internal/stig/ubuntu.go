@@ -8,7 +8,7 @@ package stig
 // sysctl rules, so those checks are skipped for Ubuntu nodes.
 
 var ubuntuBenchmarks = []OSBenchmark{
-	{Name: "DISA Ubuntu 20.04 LTS STIG", Version: "V2R4 (01 Oct 2025)", family: "ubuntu", release: "20.04", rules: map[string]osRef{
+	{Name: "DISA Ubuntu 20.04 LTS STIG", Version: "V2R4 (01 Oct 2025)", product: "ubuntu2004", family: "ubuntu", release: "20.04", rules: map[string]osRef{
 		"fips":     {"V-238363", "I"},   // NIST FIPS-validated cryptography (fips_enabled)
 		"mac":      {"V-238360", "II"},  // AppArmor active and enabled
 		"auditd":   {"V-238298", "II"},  // auditd installed, enabled, active
@@ -17,7 +17,7 @@ var ubuntuBenchmarks = []OSBenchmark{
 		"aslr":     {"V-238369", "II"},
 		"dmesg":    {"V-255913", "III"},
 	}},
-	{Name: "DISA Ubuntu 22.04 LTS STIG", Version: "V2R9 (01 Jul 2026)", family: "ubuntu", release: "22.04", rules: map[string]osRef{
+	{Name: "DISA Ubuntu 22.04 LTS STIG", Version: "V2R9 (01 Jul 2026)", product: "ubuntu2204", family: "ubuntu", release: "22.04", rules: map[string]osRef{
 		"fips":     {"V-260650", "I"},
 		"mac":      {"V-260557", "II"},
 		"auditd":   {"V-260591", "II"},
@@ -26,7 +26,7 @@ var ubuntuBenchmarks = []OSBenchmark{
 		"aslr":     {"V-260474", "II"},
 		"dmesg":    {"V-260472", "III"},
 	}},
-	{Name: "DISA Ubuntu 24.04 LTS STIG", Version: "V1R6 (01 Jul 2026)", family: "ubuntu", release: "24.04", rules: map[string]osRef{
+	{Name: "DISA Ubuntu 24.04 LTS STIG", Version: "V1R6 (01 Jul 2026)", product: "ubuntu2404", family: "ubuntu", release: "24.04", rules: map[string]osRef{
 		"fips":     {"V-270744", "I"},
 		"mac":      {"V-270660", "II"},
 		"auditd":   {"V-270657", "II"},

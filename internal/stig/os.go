@@ -1,10 +1,16 @@
 package stig
 
 // DISA operating-system STIGs (RHEL 8/9/10, Ubuntu 20.04/22.04/24.04) applied
-// per node from /etc/os-release. The rule tables live in rhel.go and
-// ubuntu.go; this file holds the checks, which are the same across releases
-// (only the vulnerability ID and category differ). Nodes whose OS has no
-// table fall back to generic OS-* rule IDs.
+// per node from /etc/os-release. Every rule of the matched STIG is emitted:
+//
+//   - hand-written checks (this file, keyed by rhel.go / ubuntu.go) win when
+//     they exist, because they carry runtime-vs-boot detail;
+//   - otherwise the ComplianceAsCode template checks embedded in
+//     internal/stigdata are evaluated (ostemplates.go);
+//   - rules with no automatable check are reported MANUAL with the STIG's
+//     own check text.
+//
+// Nodes whose OS has no table fall back to generic OS-* rule IDs.
 
 import (
 	"fmt"
@@ -12,16 +18,67 @@ import (
 	"strings"
 
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/stigdata"
 )
 
-// OSBenchmark is one DISA OS STIG release and the rule IDs it assigns to the
-// facts the node probe collects.
+// OSBenchmark is one DISA OS STIG release: the embedded table plus the
+// hand-written overrides for facts the node probe collects directly.
 type OSBenchmark struct {
 	Name    string
 	Version string
+	product string // stigdata product: rhel9, ubuntu2204 ...
 	family  string // "rhel" or "ubuntu"
 	release string // VERSION_ID prefix: "8", "9", "10", "20.04", ...
 	rules   map[string]osRef
+}
+
+// Table returns the embedded rule table (nil when none is embedded).
+func (b *OSBenchmark) Table() *stigdata.Table {
+	t, err := stigdata.Load(b.product)
+	if err != nil {
+		return nil
+	}
+	return t
+}
+
+// Coverage summarises how the table's rules are evaluated.
+func (b *OSBenchmark) Coverage() (total, automated int) {
+	t := b.Table()
+	if t == nil {
+		return len(b.rules), len(b.rules)
+	}
+	override := b.overrides()
+	for _, r := range t.Rules {
+		total++
+		if _, ok := override[r.VID]; ok || templated(r) {
+			automated++
+		}
+	}
+	return total, automated
+}
+
+// overrides maps vulnerability IDs to hand-written checks.
+func (b *OSBenchmark) overrides() map[string]osCheck {
+	byKey := map[string]osCheck{}
+	for _, c := range osChecks {
+		byKey[c.key] = c
+	}
+	out := map[string]osCheck{}
+	for key, ref := range b.rules {
+		if c, ok := byKey[key]; ok {
+			out[ref.ID] = c
+		}
+	}
+	return out
+}
+
+func templated(r stigdata.Rule) bool {
+	for _, c := range r.Checks {
+		if _, ok := templateEvals[c.Template]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 type osRef struct {
@@ -59,6 +116,50 @@ func OSBenchmarkFor(os nodeinfo.OSRelease) *OSBenchmark {
 }
 
 func (b *OSBenchmark) String() string { return b.Name + " " + b.Version }
+
+// evalTemplated runs every template check behind a rule on one node. Any
+// failure fails the rule; a rule that also carries an untemplated (custom
+// OVAL) check is reported Manual when its automated part passes, because
+// only part of it was verified.
+func evalTemplated(info *nodeinfo.Info, rule stigdata.Rule) (Status, string) {
+	var fails, manuals, custom []string
+	passes, nas := 0, 0
+	for i, c := range rule.Checks {
+		ev, ok := templateEvals[c.Template]
+		if !ok {
+			if c.Template == "" {
+				custom = append(custom, c.Rule)
+			} else {
+				manuals = append(manuals, c.Rule+": template "+c.Template+" not supported")
+			}
+			continue
+		}
+		st, detail := ev(info, c, stigdata.CheckID(rule.VID, i))
+		switch st {
+		case Pass:
+			passes++
+		case NA:
+			nas++
+		case Fail:
+			fails = append(fails, detail)
+		default:
+			manuals = append(manuals, detail)
+		}
+	}
+	switch {
+	case len(fails) > 0:
+		return Fail, strings.Join(fails, "; ")
+	case len(manuals) > 0:
+		return Manual, strings.Join(manuals, "; ")
+	case len(custom) > 0 && passes > 0:
+		return Manual, "automated part passes; verify " + truncList(custom, 3) + " manually"
+	case passes > 0:
+		return Pass, ""
+	case nas > 0:
+		return NA, ""
+	}
+	return Manual, "nothing evaluated"
+}
 
 // rhelLike is true for RHEL and its rebuilds, but not SUSE (which
 // nodeinfo folds into the "rhel" family for package-manager purposes).
@@ -233,9 +334,9 @@ var osChecks = []osCheck{
 	sysctlEq("echo_broadcast", "net.ipv4.icmp_echo_ignore_broadcasts", "1", "OS-broadcast", "ICMP echo to broadcast addresses ignored", "II"),
 }
 
-// osRules evaluates osChecks per node, grouped by the OS STIG that applies so
-// each group reports under that STIG's vulnerability IDs. Rules the STIG
-// does not carry for that OS (e.g. fapolicyd on Ubuntu) are skipped.
+// osRules evaluates every rule of each node's OS STIG, grouping nodes by
+// benchmark so each group reports under that STIG's vulnerability IDs.
+// Nodes without a benchmark get the generic osChecks under OS-* IDs.
 func (e *evaluator) osRules() {
 	g := "os"
 	nodes := e.sshNodes()
@@ -260,19 +361,53 @@ func (e *evaluator) osRules() {
 	})
 	for _, b := range order {
 		members := groups[b]
-		for _, c := range osChecks {
-			id, cat, ref := c.id, c.cat, ""
-			if b != nil {
+		if b == nil {
+			for _, c := range osChecks {
+				e.perNode(c.id, c.title, c.cat, g, c.fix, members, func(n string) (Status, string) { return c.eval(ni(n)) })
+			}
+			continue
+		}
+		t := b.Table()
+		if t == nil {
+			// no embedded table: the hand-written subset only
+			for _, c := range osChecks {
 				r, ok := b.rules[c.key]
 				if !ok {
 					continue
 				}
-				id, cat, ref = r.ID, r.Cat, b.String()
+				start := len(e.out)
+				e.perNode(r.ID, c.title, r.Cat, g, c.fix, members, func(n string) (Status, string) { return c.eval(ni(n)) })
+				for i := start; i < len(e.out); i++ {
+					e.out[i].Ref = b.String()
+				}
 			}
+			continue
+		}
+		override := b.overrides()
+		for _, rule := range t.Rules {
+			rule := rule
 			start := len(e.out)
-			e.perNode(id, c.title, cat, g, c.fix, members, func(n string) (Status, string) { return c.eval(ni(n)) })
+			fix := rule.Fix
+			if oc, ok := override[rule.VID]; ok {
+				fix = oc.fix + "\n\nSTIG: " + rule.Fix
+				e.perNode(rule.VID, rule.Title, rule.Cat, g, fix, members, func(n string) (Status, string) { return oc.eval(ni(n)) })
+			} else if templated(rule) {
+				e.perNode(rule.VID, rule.Title, rule.Cat, g, fix, members, func(n string) (Status, string) { return evalTemplated(ni(n), rule) })
+			} else {
+				reason := "not automated by ComplianceAsCode"
+				if rule.Status != "unmapped" && len(rule.Checks) > 0 {
+					var names []string
+					for _, c := range rule.Checks {
+						names = append(names, c.Rule)
+					}
+					reason = "custom OVAL only (" + truncList(names, 3) + ")"
+				}
+				e.add(Result{ID: rule.VID, Title: rule.Title, Cat: rule.Cat, Group: g, Status: Manual, Detail: reason, Fix: fix})
+			}
 			for i := start; i < len(e.out); i++ {
-				e.out[i].Ref = ref
+				e.out[i].Ref = b.String()
+				e.out[i].RuleID = rule.STIGID
+				e.out[i].Check = rule.Check
 			}
 		}
 	}
