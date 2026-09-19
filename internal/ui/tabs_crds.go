@@ -109,7 +109,7 @@ func (a *App) openCRDInstances(id string) tea.Cmd {
 	info := crds[idx]
 	lvl := inspectLevel{title: info.Kind + " (" + info.Group + ")", loading: true}
 	a.inspect = append(a.inspect, lvl)
-	a.overlay = ovInspect
+	a.showInspect()
 	a.inspectSeq++
 	seq := a.inspectSeq
 	client := a.client

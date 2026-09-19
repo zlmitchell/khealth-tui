@@ -117,6 +117,32 @@ for d in /var/lib/rancher/rke2/server/tls /var/lib/rancher/rke2/server/tls/etcd 
 done
 sec ETCDUSER; id etcd 2>/dev/null
 sec SELINUX; getenforce 2>/dev/null
+sec OSREL; grep -E '^(ID|VERSION_ID|PRETTY_NAME|ID_LIKE)=' /etc/os-release 2>/dev/null
+sec HARDENING
+echo "selinux=$(getenforce 2>/dev/null)"
+echo "selinux_config=$(grep -E '^SELINUX=' /etc/selinux/config 2>/dev/null | cut -d= -f2)"
+echo "fips=$(cat /proc/sys/crypto/fips_enabled 2>/dev/null)"
+command -v fips-mode-setup >/dev/null 2>&1 && echo "fips_setup=$(fips-mode-setup --check 2>/dev/null | head -1)"
+[ -f /sys/module/apparmor/parameters/enabled ] && echo "apparmor=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)"
+command -v aa-status >/dev/null 2>&1 && echo "apparmor_enforced=$(aa-status --enforced 2>/dev/null)"
+for s in fapolicyd auditd firewalld ufw apparmor unattended-upgrades dnf-automatic.timer usbguard sssd; do
+  st=$(systemctl show -p LoadState,ActiveState,UnitFileState --value "$s" 2>/dev/null | tr '\n' ' ')
+  case "$st" in loaded*) echo "svc_$s=$st";; esac
+done
+echo "cmdline=$(cat /proc/cmdline 2>/dev/null)"
+grep -qsE '\bfips=1\b' /etc/default/grub /boot/loader/entries/*.conf /boot/grub2/grubenv /boot/grub/grub.cfg /etc/kernel/cmdline 2>/dev/null && echo "fips_boot=yes" || echo "fips_boot=no"
+[ -f /etc/ufw/ufw.conf ] && echo "ufw_config=$(grep -E '^ENABLED=' /etc/ufw/ufw.conf 2>/dev/null | cut -d= -f2)"
+[ -f /etc/apparmor.d ] || [ -d /etc/apparmor.d ] && echo "apparmor_installed=yes"
+[ -d /etc/fapolicyd/rules.d ] && echo "fapolicyd_rules=$(ls /etc/fapolicyd/rules.d 2>/dev/null | wc -l)"
+[ -f /sys/kernel/security/lockdown ] && echo "lockdown=$(cat /sys/kernel/security/lockdown 2>/dev/null)"
+command -v mokutil >/dev/null 2>&1 && echo "secureboot=$(mokutil --sb-state 2>/dev/null | head -1)"
+[ -f /var/run/reboot-required ] && echo "reboot_required=yes"
+if command -v needs-restarting >/dev/null 2>&1; then needs-restarting -r >/dev/null 2>&1 || echo "reboot_required=yes"; fi
+command -v ufw >/dev/null 2>&1 && echo "ufw=$(ufw status 2>/dev/null | head -1 | sed 's/^Status: //')"
+command -v pro >/dev/null 2>&1 && echo "ubuntu_pro=$(pro status 2>/dev/null | grep -iE '^(fips|fips-updates|esm-infra|usg) ' | tr -s ' ' | tr '\n' ';')"
+command -v auditctl >/dev/null 2>&1 && echo "audit_rules=$(auditctl -l 2>/dev/null | grep -vc 'No rules')"
+[ -f /etc/crypto-policies/config ] && echo "crypto_policy=$(cat /etc/crypto-policies/config 2>/dev/null)"
+[ -f /proc/sys/kernel/randomize_va_space ] && echo "aslr=$(cat /proc/sys/kernel/randomize_va_space)"
 sec RKE2CFG
 for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do
   [ -f "$f" ] || continue

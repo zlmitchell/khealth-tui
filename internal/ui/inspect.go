@@ -35,7 +35,7 @@ type inspectMsg struct {
 func (a *App) openInspectRef(ref k8s.ObjRef) tea.Cmd {
 	lvl := inspectLevel{title: refTitle(ref), loading: true}
 	a.inspect = append(a.inspect, lvl)
-	a.overlay = ovInspect
+	a.showInspect()
 	a.inspectSeq++
 	seq := a.inspectSeq
 	client := a.client
@@ -70,13 +70,13 @@ func (a *App) openInspectObject(u *unstructured.Unstructured, extraMeta []string
 		lvl.meta = append(extraMeta, "")
 	}
 	a.inspect = append(a.inspect, lvl)
-	a.overlay = ovInspect
+	a.showInspect()
 }
 
 // openInspectList pushes a level that is just a list of references.
 func (a *App) openInspectList(title string, meta []string, refs []k8s.ObjRef) {
 	a.inspect = append(a.inspect, inspectLevel{title: title, meta: meta, refs: refs})
-	a.overlay = ovInspect
+	a.showInspect()
 }
 
 func refTitle(r k8s.ObjRef) string {
@@ -138,7 +138,12 @@ func (a *App) handleInspectMsg(m inspectMsg) {
 
 func (a *App) handleInspectKey(key string) (tea.Model, tea.Cmd) {
 	if len(a.inspect) == 0 {
-		a.overlay = ovNone
+		if a.overlay == ovInspect {
+			a.overlay = ovNone
+		} else {
+			a.sub[a.tab] = 0
+			a.wlPods = false
+		}
 		return a, nil
 	}
 	top := &a.inspect[len(a.inspect)-1]
@@ -147,7 +152,12 @@ func (a *App) handleInspectKey(key string) (tea.Model, tea.Cmd) {
 	case "esc", "backspace", "q":
 		a.inspect = a.inspect[:len(a.inspect)-1]
 		if len(a.inspect) == 0 {
-			a.overlay = ovNone
+			if a.overlay == ovInspect {
+				a.overlay = ovNone
+			} else {
+				a.sub[a.tab] = 0
+				a.wlPods = false
+			}
 		}
 	case "j", "down":
 		if top.cursor < len(top.refs)-1 {

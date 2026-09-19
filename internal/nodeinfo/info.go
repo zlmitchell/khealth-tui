@@ -40,6 +40,8 @@ type Info struct {
 	Perms                  []Perm
 	EtcdUser               bool
 	SELinux                string
+	OS                     OSRelease
+	Hardening              map[string]string // selinux, fips, apparmor, svc_*, lockdown, secureboot, reboot_required, ...
 	ConfigFiles            []ConfigFile      // rke2/k3s config.yaml(.d) (secrets masked)
 	ExtraFiles             []ConfigFile      // audit policy, PSS config, /etc/rancher listings
 	Manifests              []ManifestFile    // rke2/k3s server/manifests (auto-deploy dir)
@@ -107,6 +109,23 @@ type ConfigFile struct {
 	Content string
 }
 
+// OSRelease is the parsed /etc/os-release.
+type OSRelease struct {
+	ID, IDLike, VersionID, Pretty string
+}
+
+// Family returns "rhel", "debian" or "" based on ID/ID_LIKE.
+func (o OSRelease) Family() string {
+	ids := strings.ToLower(o.ID + " " + o.IDLike)
+	switch {
+	case strings.Contains(ids, "rhel") || strings.Contains(ids, "fedora") || strings.Contains(ids, "centos") || strings.Contains(ids, "rocky") || strings.Contains(ids, "alma") || strings.Contains(ids, "ol") || strings.Contains(ids, "sles") || strings.Contains(ids, "suse"):
+		return "rhel"
+	case strings.Contains(ids, "ubuntu") || strings.Contains(ids, "debian"):
+		return "debian"
+	}
+	return ""
+}
+
 // ManifestFile is a file from an auto-deploy or static pod manifest directory.
 type ManifestFile struct {
 	Path    string
@@ -158,7 +177,7 @@ type Tarball struct {
 // Parse turns the script output into an Info. sentAt is when the script was
 // started locally (used for clock skew).
 func Parse(node, host, out string, sentAt time.Time) *Info {
-	info := &Info{Node: node, Host: host, Collected: time.Now(), KubeletFlags: map[string]string{}, Sysctl: map[string]string{}, Settings: map[string]string{}}
+	info := &Info{Node: node, Host: host, Collected: time.Now(), KubeletFlags: map[string]string{}, Sysctl: map[string]string{}, Settings: map[string]string{}, Hardening: map[string]string{}}
 	secs := splitSections(out)
 
 	if v := strings.TrimSpace(secs["TIME"]); v != "" {
@@ -269,6 +288,30 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	}
 	info.EtcdUser = strings.Contains(secs["ETCDUSER"], "uid=")
 	info.SELinux = strings.TrimSpace(secs["SELINUX"])
+	for _, l := range nonEmpty(secs["OSREL"]) {
+		k, v, ok := strings.Cut(l, "=")
+		if !ok {
+			continue
+		}
+		v = strings.Trim(strings.TrimSpace(v), `"`)
+		switch k {
+		case "ID":
+			info.OS.ID = v
+		case "ID_LIKE":
+			info.OS.IDLike = v
+		case "VERSION_ID":
+			info.OS.VersionID = v
+		case "PRETTY_NAME":
+			info.OS.Pretty = v
+		}
+	}
+	for _, l := range nonEmpty(secs["HARDENING"]) {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			if v = strings.TrimSpace(v); v != "" {
+				info.Hardening[k] = v
+			}
+		}
+	}
 	for _, l := range nonEmpty(secs["DATADIR"]) {
 		if k, v, ok := strings.Cut(l, "="); ok && v != "" {
 			if (k == "rke2" && info.Dist == "rke2") || (k == "k3s" && info.Dist == "k3s") {
@@ -796,6 +839,148 @@ func tarballImages(path, content string) []string {
 		imgs = append(imgs, m.RepoTags...)
 	}
 	return imgs
+}
+
+// FIPS reports whether the kernel runs in FIPS mode.
+func (i *Info) FIPS() bool { return i.Hardening["fips"] == "1" }
+
+// ServiceState returns "active"/"inactive"/"" for a hardening service key.
+func (i *Info) ServiceState(name string) string {
+	f := strings.Fields(i.Hardening["svc_"+name])
+	if len(f) >= 2 {
+		return f[1]
+	}
+	return ""
+}
+
+// ServiceEnabled returns the unit file state (enabled/disabled/masked/static).
+func (i *Info) ServiceEnabled(name string) string {
+	f := strings.Fields(i.Hardening["svc_"+name])
+	if len(f) >= 3 {
+		return f[2]
+	}
+	return ""
+}
+
+// HardeningItem is one runtime-vs-boot fact.
+type HardeningItem struct {
+	Name     string
+	Runtime  string // what is in effect now
+	Boot     string // what the configuration says for the next boot
+	OK       bool   // runtime state is the desired one
+	Mismatch bool   // runtime and boot config disagree
+	Detail   string
+}
+
+// HardeningItems derives the at-a-glance table (runtime vs boot config).
+func (i *Info) HardeningItems() []HardeningItem {
+	h := i.Hardening
+	var out []HardeningItem
+	cmdline := h["cmdline"]
+	has := func(k string) bool { return strings.Contains(" "+cmdline+" ", " "+k+" ") }
+
+	// MAC
+	switch {
+	case h["selinux"] != "":
+		rt := h["selinux"]
+		cfg := h["selinux_config"]
+		if cfg == "" {
+			cfg = "?"
+		}
+		out = append(out, HardeningItem{Name: "SELinux", Runtime: rt, Boot: cfg, OK: strings.EqualFold(rt, "Enforcing"), Mismatch: !strings.EqualFold(rt, cfg)})
+	case h["apparmor"] != "" || h["apparmor_installed"] != "":
+		rt := "disabled"
+		if h["apparmor"] == "Y" {
+			rt = "enabled"
+			if n := h["apparmor_enforced"]; n != "" {
+				rt += " (" + n + " enforced)"
+			}
+		}
+		boot := "enabled"
+		if has("apparmor=0") || strings.Contains(cmdline, "security=selinux") || i.ServiceEnabled("apparmor") == "disabled" || i.ServiceEnabled("apparmor") == "masked" {
+			boot = "disabled"
+		}
+		out = append(out, HardeningItem{Name: "AppArmor", Runtime: rt, Boot: boot, OK: h["apparmor"] == "Y" && h["apparmor_enforced"] != "0", Mismatch: (h["apparmor"] == "Y") != (boot == "enabled")})
+	default:
+		out = append(out, HardeningItem{Name: "MAC", Runtime: "none", Boot: "none", OK: false})
+	}
+
+	// FIPS
+	rt := map[string]string{"1": "on", "0": "off"}[h["fips"]]
+	if rt == "" {
+		rt = "?"
+	}
+	boot := "?"
+	switch {
+	case h["fips_boot"] == "yes" || has("fips=1"):
+		boot = "on"
+	case h["fips_boot"] == "no":
+		boot = "off"
+	}
+	if strings.Contains(strings.ToLower(h["ubuntu_pro"]), "fips") && strings.Contains(strings.ToLower(h["ubuntu_pro"]), "enabled") {
+		boot = "on (ubuntu pro)"
+	}
+	out = append(out, HardeningItem{Name: "FIPS", Runtime: rt, Boot: boot, OK: rt == "on", Mismatch: rt != "?" && boot != "?" && strings.HasPrefix(boot, "on") != (rt == "on"), Detail: h["fips_setup"]})
+
+	svc := func(label, unit string, wantActive bool) {
+		act := i.ServiceState(unit)
+		en := i.ServiceEnabled(unit)
+		if act == "" {
+			out = append(out, HardeningItem{Name: label, Runtime: "not installed", Boot: "-", OK: !wantActive})
+			return
+		}
+		bootOn := en == "enabled" || en == "static" || en == "enabled-runtime" || en == "alias" || en == "indirect"
+		out = append(out, HardeningItem{Name: label, Runtime: act, Boot: en, OK: (act == "active") == wantActive, Mismatch: (act == "active") != bootOn})
+	}
+	svc("fapolicyd", "fapolicyd", true)
+	svc("auditd", "auditd", true)
+	if i.ServiceState("firewalld") != "" {
+		svc("firewalld", "firewalld", true)
+	}
+	if i.ServiceState("ufw") != "" || h["ufw"] != "" {
+		rt := h["ufw"]
+		if rt == "" {
+			rt = i.ServiceState("ufw")
+		}
+		boot := "?"
+		switch h["ufw_config"] {
+		case "yes":
+			boot = "enabled"
+		case "no":
+			boot = "disabled"
+		}
+		out = append(out, HardeningItem{Name: "ufw", Runtime: rt, Boot: boot, OK: strings.HasPrefix(rt, "active"), Mismatch: boot != "?" && strings.HasPrefix(rt, "active") != (boot == "enabled")})
+	}
+	if i.ServiceState("firewalld") == "" && i.ServiceState("ufw") == "" && h["ufw"] == "" {
+		out = append(out, HardeningItem{Name: "firewall", Runtime: "none found", Boot: "-", OK: false})
+	}
+	if v := h["secureboot"]; v != "" {
+		out = append(out, HardeningItem{Name: "Secure Boot", Runtime: strings.TrimPrefix(v, "SecureBoot "), Boot: "-", OK: strings.Contains(v, "enabled")})
+	}
+	if v := h["lockdown"]; v != "" {
+		cur := v
+		if a := strings.Index(v, "["); a >= 0 {
+			if b := strings.Index(v[a:], "]"); b > 0 {
+				cur = v[a+1 : a+b]
+			}
+		}
+		boot := "none"
+		for _, m := range []string{"integrity", "confidentiality"} {
+			if has("lockdown=" + m) {
+				boot = m
+			}
+		}
+		out = append(out, HardeningItem{Name: "Kernel lockdown", Runtime: cur, Boot: boot, OK: cur != "none", Mismatch: cur != boot && boot != "none"})
+	}
+	if v := h["crypto_policy"]; v != "" {
+		out = append(out, HardeningItem{Name: "Crypto policy", Runtime: v, Boot: v, OK: strings.HasPrefix(v, "FIPS") || strings.HasPrefix(v, "DEFAULT") || strings.HasPrefix(v, "FUTURE")})
+	}
+	rb := "no"
+	if h["reboot_required"] == "yes" {
+		rb = "yes"
+	}
+	out = append(out, HardeningItem{Name: "Reboot required", Runtime: rb, Boot: "-", OK: rb == "no"})
+	return out
 }
 
 // UnusedImages returns images not referenced by any running container.

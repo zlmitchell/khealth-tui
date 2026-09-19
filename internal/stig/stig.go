@@ -21,6 +21,23 @@ import (
 	"k8s-health-tui/internal/nodeinfo"
 )
 
+// Benchmark names a reference document the rule IDs were written against.
+type Benchmark struct {
+	Name    string
+	Version string
+	Prefix  string // rule ID prefix
+	Note    string
+}
+
+// Benchmarks lists the references behind the rule table. The IDs are a
+// best-effort mapping: confirm against the release you are audited on.
+var Benchmarks = []Benchmark{
+	{Name: "DISA Kubernetes STIG", Version: "V2R2 (Jan 2025)", Prefix: "V-24", Note: "vulnerability IDs V-2423xx..V-2424xx, V-2455xx, V-254800"},
+	{Name: "DISA Rancher RKE2 STIG", Version: "V2R1 (2024)", Prefix: "RKE2-", Note: "profile: cis, etcd user, config permissions, SELinux"},
+	{Name: "CIS Kubernetes Benchmark", Version: "v1.9 / CIS RKE2 Benchmark v1.x", Prefix: "CIS-", Note: "section numbers"},
+	{Name: "OS hardening (RHEL/Ubuntu STIG themes)", Version: "FIPS, MAC, fapolicyd, auditd, firewall, secure boot", Prefix: "OS-", Note: "per-node facts over SSH"},
+}
+
 // Status of one rule.
 type Status int
 
@@ -743,6 +760,115 @@ func (e *evaluator) nodeRules() {
 			return Fail, "swap enabled"
 		}
 		return Pass, ""
+	})
+	// OS hardening (per node)
+	e.perNode("OS-fips", "Kernel running in FIPS mode", "II", g, "RHEL: fips-mode-setup --enable && reboot; Ubuntu: pro enable fips-updates; rke2: also set profile/cipher suites", nodes, func(n string) (Status, string) {
+		h := ni(n).Hardening
+		switch h["fips"] {
+		case "1":
+			if h["fips_boot"] == "no" && !strings.Contains(strings.ToLower(h["ubuntu_pro"]), "fips") {
+				return Fail, "FIPS on now but fips=1 missing from grub/kernel cmdline config: lost on reboot"
+			}
+			return Pass, ""
+		case "0":
+			if h["fips_boot"] == "yes" {
+				return Fail, "fips_enabled=0 now, but fips=1 configured for next boot (reboot pending?)"
+			}
+			return Fail, "fips_enabled=0"
+		}
+		return Manual, "/proc/sys/crypto/fips_enabled not readable"
+	})
+	e.perNode("OS-mac", "Mandatory access control enforcing (SELinux or AppArmor)", "II", g, "RHEL: SELINUX=enforcing (+ rke2-selinux); Ubuntu: AppArmor enabled with profiles enforced", nodes, func(n string) (Status, string) {
+		info := ni(n)
+		h := info.Hardening
+		if strings.EqualFold(h["selinux"], "Enforcing") {
+			if cfg := h["selinux_config"]; cfg != "" && !strings.EqualFold(cfg, "enforcing") {
+				return Fail, "enforcing now but /etc/selinux/config SELINUX=" + cfg + " (reverts on reboot)"
+			}
+			return Pass, ""
+		}
+		if h["apparmor"] == "Y" {
+			if h["apparmor_enforced"] == "0" {
+				return Fail, "AppArmor enabled but no profiles enforced"
+			}
+			return Pass, ""
+		}
+		if h["selinux"] != "" {
+			return Fail, "SELinux " + h["selinux"] + " (config " + h["selinux_config"] + ")"
+		}
+		return Fail, "neither SELinux enforcing nor AppArmor enabled"
+	})
+	e.perNode("OS-fapolicyd", "Application allow-listing (fapolicyd) active on RHEL-family nodes", "II", g, "dnf install fapolicyd && systemctl enable --now fapolicyd (add container runtime paths to rules.d)", nodes, func(n string) (Status, string) {
+		info := ni(n)
+		if info.OS.Family() != "rhel" {
+			return NA, ""
+		}
+		switch info.ServiceState("fapolicyd") {
+		case "active":
+			if en := info.ServiceEnabled("fapolicyd"); en == "disabled" || en == "masked" {
+				return Fail, "fapolicyd active now but " + en + " at boot"
+			}
+			return Pass, ""
+		case "":
+			return Fail, "fapolicyd not installed"
+		default:
+			if info.ServiceEnabled("fapolicyd") == "enabled" {
+				return Fail, "fapolicyd " + info.ServiceState("fapolicyd") + " now (enabled at boot: stopped manually?)"
+			}
+			return Fail, "fapolicyd " + info.ServiceState("fapolicyd") + "/" + info.ServiceEnabled("fapolicyd")
+		}
+	})
+	e.perNode("OS-auditd", "Audit daemon active", "II", g, "systemctl enable --now auditd; load STIG audit rules", nodes, func(n string) (Status, string) {
+		info := ni(n)
+		switch info.ServiceState("auditd") {
+		case "active":
+			if r := info.Hardening["audit_rules"]; r == "0" {
+				return Fail, "auditd active but no rules loaded"
+			}
+			if en := info.ServiceEnabled("auditd"); en == "disabled" || en == "masked" {
+				return Fail, "auditd active now but " + en + " at boot"
+			}
+			return Pass, ""
+		case "":
+			return Fail, "auditd not installed"
+		default:
+			return Fail, "auditd " + info.ServiceState("auditd")
+		}
+	})
+	e.perNode("OS-firewall", "Host firewall active (firewalld / ufw)", "II", g, "firewalld or ufw with the Kubernetes/rke2 ports opened", nodes, func(n string) (Status, string) {
+		info := ni(n)
+		if info.ServiceState("firewalld") == "active" || info.ServiceState("ufw") == "active" || strings.HasPrefix(info.Hardening["ufw"], "active") {
+			if en := info.ServiceEnabled("firewalld"); en == "disabled" || en == "masked" {
+				return Fail, "firewalld active now but " + en + " at boot"
+			}
+			if info.Hardening["ufw_config"] == "no" && strings.HasPrefix(info.Hardening["ufw"], "active") {
+				return Fail, "ufw active now but ENABLED=no in /etc/ufw/ufw.conf"
+			}
+			return Pass, ""
+		}
+		if info.ServiceEnabled("firewalld") == "enabled" {
+			return Fail, "firewalld enabled at boot but not active now"
+		}
+		if info.ServiceState("firewalld") == "" && info.ServiceState("ufw") == "" && info.Hardening["ufw"] == "" {
+			return Manual, "no firewalld/ufw found (nftables/iptables managed elsewhere?)"
+		}
+		return Fail, "firewall inactive"
+	})
+	e.perNode("OS-reboot", "No pending reboot (kernel/security updates applied)", "III", g, "reboot the node in a maintenance window", nodes, func(n string) (Status, string) {
+		if ni(n).Hardening["reboot_required"] == "yes" {
+			return Fail, "reboot required"
+		}
+		return Pass, ""
+	})
+	e.perNode("OS-secureboot", "UEFI Secure Boot enabled", "III", g, "enable Secure Boot in firmware (signed kernel/modules required)", nodes, func(n string) (Status, string) {
+		sb := ni(n).Hardening["secureboot"]
+		switch {
+		case strings.Contains(sb, "enabled"):
+			return Pass, ""
+		case sb == "":
+			return Manual, "mokutil not available / BIOS boot"
+		}
+		return Fail, sb
 	})
 }
 

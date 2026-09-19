@@ -73,6 +73,22 @@ kernel.panic=10
 uid=998(etcd) gid=996(etcd) groups=996(etcd)
 ===SELINUX
 Enforcing
+===OSREL
+ID="rhel"
+ID_LIKE="fedora"
+VERSION_ID="9.4"
+PRETTY_NAME="Red Hat Enterprise Linux 9.4 (Plow)"
+===HARDENING
+selinux=Enforcing
+selinux_config=enforcing
+fips=1
+fips_setup=FIPS mode is enabled.
+svc_fapolicyd=loaded active
+svc_auditd=loaded active
+svc_firewalld=loaded inactive
+lockdown=[none] integrity confidentiality
+secureboot=SecureBoot enabled
+crypto_policy=FIPS
 ===RKE2CFG
 --- /etc/rancher/rke2/config.yaml
 token: <masked>
@@ -202,6 +218,9 @@ func TestParse(t *testing.T) {
 	}
 	if !info.EtcdUser || info.SELinux != "Enforcing" {
 		t.Errorf("etcd user / selinux")
+	}
+	if info.OS.ID != "rhel" || info.OS.VersionID != "9.4" || info.OS.Family() != "rhel" || !info.FIPS() || info.ServiceState("fapolicyd") != "active" || info.ServiceState("firewalld") != "inactive" || info.Hardening["secureboot"] != "SecureBoot enabled" {
+		t.Errorf("os/hardening: %+v %v", info.OS, info.Hardening)
 	}
 	if info.Settings["profile"] != "cis" || info.Settings["server"] != "https://10.0.0.1:9345" || info.Settings["etcd-s3-config-secret"] != "rke2-s3" {
 		t.Errorf("settings: %v", info.Settings)

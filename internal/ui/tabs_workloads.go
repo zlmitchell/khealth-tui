@@ -214,7 +214,7 @@ func (a *App) workloadsContent() content {
 	if a.problemOnly {
 		mode = "problems only (a toggles)"
 	}
-	hdr = append(hdr, styleTitle.Render("Workloads")+"  "+kv("items", fmt.Sprint(total))+"  "+kv("unhealthy", colorCount(unhealthy, "", styleCrit))+"  "+styleDim.Render(mode)+"  "+styleKey.Render("p")+styleDim.Render(" all pods view  ")+styleKey.Render("enter")+styleDim.Render(" inspect + references  ")+styleKey.Render("t")+styleDim.Render(" rollout restart"))
+	hdr = append(hdr, styleTitle.Render("Workloads")+"  "+kv("items", fmt.Sprint(total))+"  "+kv("unhealthy", colorCount(unhealthy, "", styleCrit))+"  "+styleDim.Render(mode)+"  "+styleKey.Render("enter")+styleDim.Render(" inspect + references  ")+styleKey.Render("t")+styleDim.Render(" rollout restart  ")+styleKey.Render("l")+styleDim.Render(" pods / inspect sub-tabs"))
 	hdr = append(hdr, a.podsSummaryLine())
 	h, lines := renderTable(a.width, []column{{title: "KIND"}, {title: "NAMESPACE", max: 24}, {title: "NAME", max: 48}, {title: "READY", right: true}, {title: "STATUS", max: 30}, {title: "AGE", right: true}, {title: "IMAGES / DETAILS"}}, rows)
 	hdr = append(hdr, h)
@@ -288,7 +288,7 @@ func (a *App) podsSummaryLine() string {
 // podsContent is the flat all-pods view (p toggles).
 func (a *App) podsContent() content {
 	s := a.snap
-	hdr := []string{styleTitle.Render("All pods") + "  " + styleKey.Render("p") + styleDim.Render(" back to controllers view  ") + styleKey.Render("enter") + styleDim.Render(" inspect + references"), a.podsSummaryLine()}
+	hdr := []string{styleTitle.Render("All pods") + "  " + styleKey.Render("h") + styleDim.Render(" controllers  ") + styleKey.Render("enter") + styleDim.Render(" inspect + references"), a.podsSummaryLine()}
 	var rows [][]string
 	var ids []string
 	total := 0

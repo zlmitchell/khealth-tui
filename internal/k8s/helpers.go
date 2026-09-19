@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -262,4 +263,78 @@ func IsSystemNamespace(ns string) bool {
 		}
 	}
 	return false
+}
+
+// CPIsolation summarises how well a control-plane/etcd node is isolated from
+// user workloads and whether the control-plane static pods have requests.
+type CPIsolation struct {
+	Node         string
+	Roles        []string
+	Taints       []string
+	Protected    bool // has a NoSchedule/NoExecute taint
+	UserPods     []string
+	UserCPUReq   int64 // milli
+	UserMemReq   int64 // bytes
+	AllCPUReq    int64
+	AllMemReq    int64
+	AllocCPU     int64
+	AllocMem     int64
+	CPComponents map[string]ResourceReq // kube-apiserver, etcd, ... -> requests
+}
+
+// ResourceReq holds container resource requests of a control-plane pod.
+type ResourceReq struct {
+	CPUMilli int64
+	MemBytes int64
+	Set      bool
+}
+
+// ControlPlaneIsolation evaluates every control-plane/etcd node.
+func (s *Snapshot) ControlPlaneIsolation() []CPIsolation {
+	var out []CPIsolation
+	for i := range s.Nodes {
+		n := &s.Nodes[i]
+		if !IsControlPlane(n) && !IsEtcdNode(s.Nodes, n) {
+			continue
+		}
+		iso := CPIsolation{Node: n.Name, Roles: NodeRoles(n), CPComponents: map[string]ResourceReq{}}
+		iso.AllocCPU = QuantityMilli(n.Status.Allocatable, corev1.ResourceCPU)
+		iso.AllocMem = QuantityValue(n.Status.Allocatable, corev1.ResourceMemory)
+		for _, t := range n.Spec.Taints {
+			iso.Taints = append(iso.Taints, fmt.Sprintf("%s=%s:%s", t.Key, t.Value, t.Effect))
+			if t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute {
+				iso.Protected = true
+			}
+		}
+		for j := range s.Pods {
+			p := &s.Pods[j]
+			if p.Spec.NodeName != n.Name || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			cpu, mem := SumRequests([]corev1.Pod{*p})
+			iso.AllCPUReq += cpu
+			iso.AllMemReq += mem
+			if comp := p.Labels["component"]; comp != "" && p.Namespace == "kube-system" && (comp == "kube-apiserver" || comp == "etcd" || comp == "kube-controller-manager" || comp == "kube-scheduler" || comp == "cloud-controller-manager" || comp == "kube-proxy") {
+				iso.CPComponents[comp] = ResourceReq{CPUMilli: cpu, MemBytes: mem, Set: cpu > 0 || mem > 0}
+				continue
+			}
+			if IsSystemNamespace(p.Namespace) {
+				continue
+			}
+			// daemonsets run everywhere by design; count them but mark
+			owner := ""
+			if len(p.OwnerReferences) > 0 {
+				owner = p.OwnerReferences[0].Kind
+			}
+			if owner == "DaemonSet" {
+				continue
+			}
+			iso.UserPods = append(iso.UserPods, p.Namespace+"/"+p.Name)
+			iso.UserCPUReq += cpu
+			iso.UserMemReq += mem
+		}
+		sort.Strings(iso.UserPods)
+		out = append(out, iso)
+	}
+	return out
 }

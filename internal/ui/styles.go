@@ -37,6 +37,8 @@ var (
 	styleTabOn     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Background(colorAccent).Padding(0, 1)
 	styleTabOff    = lipgloss.NewStyle().Foreground(colorTabTxt).Background(colorTabBar)
 	styleTabKey    = lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Background(colorTabBar)
+	styleSubOn     = lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Underline(true)
+	styleSubOff    = lipgloss.NewStyle().Foreground(colorDim)
 	styleRule      = lipgloss.NewStyle().Foreground(colorAccent)
 	styleRuleTitle = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	styleBar       = lipgloss.NewStyle().Foreground(colorDim)

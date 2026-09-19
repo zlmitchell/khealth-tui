@@ -48,6 +48,18 @@ const (
 var tabNames = [...]string{"Overview", "Nodes", "Workloads", "etcd", "Storage", "Events", "Addons", "Helm", "Images", "Security", "Logs", "RKE2", "CRDs"}
 var tabKeys = [...]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "c"}
 
+// subTabs are second-level views of a tab (h/l switch). "Inspect" renders
+// the object inspector in the body instead of an overlay.
+var subTabs = map[tab][]string{
+	tabWorkloads: {"Controllers", "Pods", "Inspect"},
+	tabCRDs:      {"Definitions", "Inspect"},
+	tabEvents:    {"Events", "Inspect"},
+	tabLogs:      {"Nodes", "Lines"},
+	tabSecurity:  {"Rules", "Node hardening"},
+}
+
+const subInspect = "Inspect"
+
 type overlayKind int
 
 const (
@@ -136,6 +148,66 @@ type App struct {
 	crdCounting bool
 	etcdExec    *etcd.Probe
 	wlPods      bool
+	sub         [tabCount]int // active sub-tab per tab
+}
+
+// subName returns the active sub-tab name ("" when the tab has none).
+func (a *App) subName() string {
+	st := subTabs[a.tab]
+	if len(st) == 0 {
+		return ""
+	}
+	if a.tab == tabLogs {
+		if a.logsNode != "" {
+			return "Lines"
+		}
+		return "Nodes"
+	}
+	i := a.sub[a.tab]
+	if i < 0 || i >= len(st) {
+		i = 0
+	}
+	return st[i]
+}
+
+// inInspect reports whether the body currently shows the inspector.
+func (a *App) inInspect() bool { return a.subName() == subInspect }
+
+// showInspect switches to the tab's Inspect sub-tab, or opens the overlay
+// when the tab has none.
+func (a *App) showInspect() {
+	for i, n := range subTabs[a.tab] {
+		if n == subInspect {
+			a.sub[a.tab] = i
+			a.overlay = ovNone
+			return
+		}
+	}
+	a.overlay = ovInspect
+}
+
+// setSub changes the sub-tab by delta (h/l).
+func (a *App) setSub(delta int) {
+	st := subTabs[a.tab]
+	if len(st) == 0 {
+		return
+	}
+	if a.tab == tabLogs {
+		if delta > 0 && a.logsNode == "" {
+			if id := a.selectedID(); id != "" {
+				a.logsNode = id
+				a.cursor[a.tab], a.scroll[a.tab], a.filters[a.tab] = 0, 0, ""
+			}
+		} else if delta < 0 {
+			a.logsNode = ""
+			a.cursor[a.tab], a.scroll[a.tab] = 0, 0
+		}
+		return
+	}
+	n := (a.sub[a.tab] + delta + len(st)) % len(st)
+	a.sub[a.tab] = n
+	a.wlPods = a.tab == tabWorkloads && st[n] == "Pods"
+	a.cursor[a.tab], a.scroll[a.tab] = 0, 0
 }
 
 type snapshotMsg struct {
@@ -624,9 +696,20 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 	}
+	if a.inInspect() {
+		switch key {
+		case "esc", "backspace", "j", "k", "down", "up", "enter", "J", "K", "pgdown", "pgup", " ", "ctrl+d", "ctrl+u", "g", "G", "home", "end":
+			return a.handleInspectKey(key)
+		}
+	}
 	if a.tab == tabWorkloads && a.snap != nil {
 		switch key {
 		case "p":
+			if a.wlPods {
+				a.sub[a.tab] = 0
+			} else {
+				a.sub[a.tab] = 1
+			}
 			a.wlPods = !a.wlPods
 			a.cursor[a.tab], a.scroll[a.tab] = 0, 0
 			return a, nil
@@ -660,16 +743,20 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "q":
 		return a, tea.Quit
-	case "tab", "]", "right", "l":
+	case "tab", "]", "right":
 		a.tab = (a.tab + 1) % tabCount
 		if a.tab == tabCRDs {
 			return a, a.crdCountCmd()
 		}
-	case "shift+tab", "[", "left", "h":
+	case "shift+tab", "[", "left":
 		a.tab = (a.tab + tabCount - 1) % tabCount
 		if a.tab == tabCRDs {
 			return a, a.crdCountCmd()
 		}
+	case "l":
+		a.setSub(1)
+	case "h":
+		a.setSub(-1)
 	case "n":
 		a.overlay = ovNamespace
 		a.nsInput.SetValue("")
@@ -889,6 +976,9 @@ func (a *App) nsOptions() []string {
 
 func (a *App) bodyHeight() int {
 	h := a.height - 5 // header, tab strip, rule, status line, footer
+	if len(subTabs[a.tab]) > 0 {
+		h-- // sub-tab strip
+	}
 	if h < 3 {
 		h = 3
 	}
@@ -978,9 +1068,16 @@ func (a *App) View() string {
 	b.WriteString("\n")
 	b.WriteString(a.renderTabs())
 	b.WriteString("\n")
-	if a.overlay != ovNone {
+	if st := a.renderSubTabs(); st != "" {
+		b.WriteString(st)
+		b.WriteString("\n")
+	}
+	switch {
+	case a.overlay != ovNone:
 		b.WriteString(a.renderOverlay())
-	} else {
+	case a.inInspect():
+		b.WriteString(a.renderInspectBody())
+	default:
 		b.WriteString(a.renderBody())
 	}
 	b.WriteString("\n")
@@ -1068,6 +1165,60 @@ func (a *App) renderTabs() string {
 		rule += styleRule.Render(strings.Repeat("━", a.width-w))
 	}
 	return strip + "\n" + trunc(rule, a.width)
+}
+
+// renderSubTabs draws the second-level strip for tabs that have one.
+func (a *App) renderSubTabs() string {
+	st := subTabs[a.tab]
+	if len(st) == 0 {
+		return ""
+	}
+	active := a.subName()
+	var b strings.Builder
+	b.WriteString(styleDim.Render(" ┗ "))
+	for i, n := range st {
+		label := n
+		if n == subInspect && len(a.inspect) > 0 {
+			label = fmt.Sprintf("%s (%d)", n, len(a.inspect))
+		}
+		if n == active {
+			b.WriteString(styleSubOn.Render(" " + label + " "))
+		} else {
+			b.WriteString(styleSubOff.Render(" " + label + " "))
+		}
+		if i < len(st)-1 {
+			b.WriteString(styleDim.Render("│"))
+		}
+	}
+	b.WriteString(styleDim.Render("   h/l switch"))
+	return trunc(b.String(), a.width)
+}
+
+// renderInspectBody renders the inspector stack in the body area.
+func (a *App) renderInspectBody() string {
+	h := a.bodyHeight()
+	title, lines := a.renderInspect()
+	var out []string
+	if len(a.inspect) == 0 {
+		out = append(out, styleDim.Render("nothing inspected yet: select a row on the other sub-tabs and press enter; references chain from here (esc goes back one level)"))
+	} else {
+		out = append(out, styleTitle.Render(title))
+		out = append(out, lines...)
+	}
+	for i := range out {
+		out[i] = trunc(out[i], a.width)
+	}
+	for len(out) < h {
+		out = append(out, "")
+	}
+	if len(out) > h {
+		out = out[:h]
+	}
+	status := ""
+	if a.status != "" && time.Since(a.statusAt) < 5*time.Second {
+		status = styleInfo.Render(a.status)
+	}
+	return strings.Join(out, "\n") + "\n" + trunc(status, a.width)
 }
 
 func (a *App) renderBody() string {

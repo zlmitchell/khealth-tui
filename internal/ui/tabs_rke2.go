@@ -70,6 +70,45 @@ func (a *App) rke2Content() content {
 	}
 	hdr = append(hdr, kv("bundled HelmCharts", fmt.Sprintf("%d (%d with HelmChartConfig overrides, %s)", len(s.HelmCharts), overrides, colorCount(failed, "failed", styleCrit)))+"  "+kv("rke2 settings on nodes", "see table; Addons tab shows registries/CNI"))
 
+	hdr = append(hdr, "", styleTitle.Render("Control-plane isolation")+styleDim.Render("  user pods = non-system namespaces excluding DaemonSets; CP requests = requests set on apiserver/etcd/scheduler/controller static pods"))
+	var isoRows [][]string
+	for _, iso := range s.ControlPlaneIsolation() {
+		taint := styleWarn.Render("none (schedulable)")
+		if iso.Protected {
+			taint = styleOK.Render(strings.Join(iso.Taints, " "))
+		} else if len(iso.Taints) > 0 {
+			taint = styleWarn.Render(strings.Join(iso.Taints, " "))
+		}
+		user := styleOK.Render("0")
+		if len(iso.UserPods) > 0 {
+			user = styleWarn.Render(fmt.Sprintf("%d: %s", len(iso.UserPods), truncJoin(iso.UserPods, 2)))
+		}
+		req := styleDim.Render("-")
+		if iso.AllocCPU > 0 {
+			req = gauge(float64(iso.AllCPUReq)*100/float64(iso.AllocCPU), 6, 60, 85) + styleDim.Render(" cpu ") + gauge(float64(iso.AllMemReq)*100/float64(max(iso.AllocMem, 1)), 6, 60, 85) + styleDim.Render(" mem")
+		}
+		var comps []string
+		for _, c := range []string{"kube-apiserver", "etcd", "kube-controller-manager", "kube-scheduler"} {
+			r, ok := iso.CPComponents[c]
+			if !ok {
+				continue
+			}
+			short := strings.TrimPrefix(c, "kube-")
+			if r.Set {
+				comps = append(comps, styleOK.Render(fmt.Sprintf("%s %dm/%s", short, r.CPUMilli, humanBytes(float64(r.MemBytes)))))
+			} else {
+				comps = append(comps, styleWarn.Render(short+" none"))
+			}
+		}
+		isoRows = append(isoRows, []string{iso.Node, strings.Join(iso.Roles, ","), taint, user, req, strings.Join(comps, " ")})
+	}
+	if len(isoRows) > 0 {
+		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "ROLES"}, {title: "TAINTS", max: 40}, {title: "USER PODS", max: 50}, {title: "REQUESTED OF ALLOCATABLE"}, {title: "CP STATIC POD REQUESTS"}}, isoRows)
+		hdr = append(hdr, h)
+		hdr = append(hdr, lines...)
+	}
+	hdr = append(hdr, "", styleTitle.Render("Nodes"))
+
 	var rows [][]string
 	var ids []string
 	for i := range s.Nodes {
@@ -132,6 +171,13 @@ func (a *App) rke2Content() content {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
 	return c
+}
+
+func truncJoin(l []string, n int) string {
+	if len(l) <= n {
+		return strings.Join(l, ", ")
+	}
+	return strings.Join(l[:n], ", ") + fmt.Sprintf(" +%d", len(l)-n)
 }
 
 // rke2Detail dumps a node's rke2 configuration.

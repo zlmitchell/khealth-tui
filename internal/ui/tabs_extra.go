@@ -12,6 +12,7 @@ import (
 	"k8s-health-tui/internal/helmcheck"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/logs"
+	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/stig"
 )
 
@@ -1054,6 +1055,9 @@ func (a *App) imagesDetail(node string) (string, []string) {
 // ---------- Security ----------
 
 func (a *App) securityContent() content {
+	if a.subName() == "Node hardening" {
+		return a.hardeningContent()
+	}
 	counts := stig.Counts(a.stigRes)
 	ssegs := []seg{{float64(counts[stig.Pass]), styleOK, "pass"}, {float64(counts[stig.Fail]), styleCrit, "fail"}, {float64(counts[stig.Manual]), styleWarn, "manual"}, {float64(counts[stig.NA] + counts[stig.Unknown]), styleDim, "n/a"}}
 	score := nan()
@@ -1062,7 +1066,8 @@ func (a *App) securityContent() content {
 	}
 	hdr := []string{
 		styleTitle.Render("STIG / CIS checks") + "  " + stacked(40, ssegs) + "  " + legend(ssegs) + "  " + kv("automated pass rate", gauge(score, 10, 200, 200)),
-		styleDim.Render("IDs reference the DISA Kubernetes STIG (V-...) and CIS benchmarks; confirm the mapping against your STIG release. 'a' hides passing rules; enter shows detail + fix."),
+		benchmarkLine(),
+		styleDim.Render("IDs are a best-effort mapping to those releases; confirm against the STIG version you are audited on. 'a' hides passing rules; enter shows detail + fix."),
 	}
 	var rows [][]string
 	var ids []string
@@ -1082,14 +1087,110 @@ func (a *App) securityContent() content {
 	return c
 }
 
+// hardeningContent shows per-node OS security facts (runtime vs boot config).
+func (a *App) hardeningContent() content {
+	hdr := []string{styleTitle.Render("Node OS hardening") + styleDim.Render("  each cell = runtime state / boot configuration; ") + styleWarn.Render("≠") + styleDim.Render(" marks a mismatch (a reboot changes the effective state). enter = node dashboard.")}
+	if !a.sshEnabled {
+		hdr = append(hdr, styleWarn.Render("SSH collection is off - these facts come from the nodes."))
+	}
+	cols := []string{"MAC", "FIPS", "fapolicyd", "auditd", "firewall", "Secure Boot", "Kernel lockdown", "Reboot required"}
+	var rows [][]string
+	var ids []string
+	for i := range a.snap.Nodes {
+		n := a.snap.Nodes[i].Name
+		ni := a.nodes[n]
+		if ni == nil || ni.Err != nil {
+			rows = append(rows, []string{n, styleDim.Render("no ssh data")})
+			ids = append(ids, n)
+			continue
+		}
+		osName := ni.OS.Pretty
+		if osName == "" {
+			osName = a.snap.Nodes[i].Status.NodeInfo.OSImage
+		}
+		items := map[string]nodeinfo.HardeningItem{}
+		for _, it := range ni.HardeningItems() {
+			key := it.Name
+			switch it.Name {
+			case "SELinux", "AppArmor":
+				key = "MAC"
+			case "firewalld", "ufw":
+				key = "firewall"
+			}
+			items[key] = it
+		}
+		row := []string{n, osName}
+		for _, c := range cols {
+			it, ok := items[c]
+			if !ok {
+				row = append(row, styleDim.Render("-"))
+				continue
+			}
+			row = append(row, hardeningCell(it))
+		}
+		rows = append(rows, row)
+		ids = append(ids, n)
+	}
+	columns := []column{{title: "NODE"}, {title: "OS", max: 30}}
+	for _, c := range cols {
+		columns = append(columns, column{title: strings.ToUpper(c)})
+	}
+	h, lines := renderTable(a.width, columns, rows)
+	hdr = append(hdr, h)
+	c := content{header: hdr, selectable: true, empty: "no nodes"}
+	for i, l := range lines {
+		c.rows = append(c.rows, row{id: ids[i], text: l})
+	}
+	return c
+}
+
+// hardeningCell renders "runtime/boot" coloured by desirability and mismatch.
+func hardeningCell(it nodeinfo.HardeningItem) string {
+	rt := it.Runtime
+	if it.Name == "SELinux" || it.Name == "AppArmor" {
+		rt = it.Name + " " + rt
+	}
+	var txt string
+	if it.OK {
+		txt = styleOK.Render(rt)
+	} else {
+		txt = styleWarn.Render(rt)
+	}
+	if it.Boot != "" && it.Boot != "-" && it.Boot != it.Runtime {
+		sep := styleDim.Render("/")
+		if it.Mismatch {
+			sep = styleWarn.Render("≠")
+		}
+		txt += sep + styleDim.Render(it.Boot)
+	}
+	return txt
+}
+
+func benchmarkLine() string {
+	var parts []string
+	for _, b := range stig.Benchmarks {
+		parts = append(parts, styleBold.Render(b.Name)+" "+b.Version+styleDim.Render(" ["+b.Prefix+"*]"))
+	}
+	return kv("references", strings.Join(parts, "  ·  "))
+}
+
 func (a *App) securityDetail(id string) (string, []string) {
+	if a.subName() == "Node hardening" {
+		return a.nodeDetail(id)
+	}
 	var idx int
 	if _, err := fmt.Sscan(id, &idx); err != nil || idx < 0 || idx >= len(a.stigRes) {
 		return "", nil
 	}
 	r := a.stigRes[idx]
 	w := a.width - 6
-	out := []string{stigStyle(r.Status).Render(r.Status.String()) + "  " + kv("category", r.Cat) + "  " + kv("group", r.Group), "", styleBold.Render(r.Title), ""}
+	ref := "custom"
+	for _, b := range stig.Benchmarks {
+		if strings.HasPrefix(r.ID, b.Prefix) {
+			ref = b.Name + " " + b.Version
+		}
+	}
+	out := []string{stigStyle(r.Status).Render(r.Status.String()) + "  " + kv("category", r.Cat) + "  " + kv("group", r.Group) + "  " + kv("reference", ref), "", styleBold.Render(r.Title), ""}
 	out = append(out, wrap("detail: "+r.Detail, w)...)
 	out = append(out, "")
 	out = append(out, wrap("fix: "+r.Fix, w)...)

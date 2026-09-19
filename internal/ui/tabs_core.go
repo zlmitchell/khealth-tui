@@ -721,7 +721,14 @@ func (a *App) nodeDetail(name string) (string, []string) {
 		if ni.NTPSynced != nil {
 			ntp = okText(*ni.NTPSynced, "synchronised", "NOT synchronised")
 		}
-		add(kv("ntp", ntp) + "  " + kv("clock offset", fmt.Sprint(ni.ClockOffset)) + "  " + kv("selinux", ni.SELinux))
+		add(kv("ntp", ntp) + "  " + kv("clock offset", fmt.Sprint(ni.ClockOffset)) + "  " + kv("os", ni.OS.Pretty))
+		if len(ni.Hardening) > 0 {
+			var kvs []string
+			for _, k := range sortedKeys(ni.Hardening) {
+				kvs = append(kvs, k+"="+ni.Hardening[k])
+			}
+			add(wrap("hardening: "+strings.Join(kvs, "  "), w)...)
+		}
 		var svcs []string
 		for _, svc := range ni.Services {
 			svcs = append(svcs, okText(svc.Active == "active", svc.Name, svc.Name+":"+svc.Active))
@@ -786,6 +793,91 @@ func (a *App) nodeDetail(name string) (string, []string) {
 		}
 	}
 	return "Node " + name, out
+}
+
+// nodeDashboard renders the tile row and the security at-a-glance table for a node.
+func (a *App) nodeDashboard(n *corev1.Node, w int) []string {
+	thr := a.cfg.Thresholds
+	name := n.Name
+	ni := a.nodes[name]
+	var out []string
+	tw, cnt := tileWidths(w, 6)
+	gw := tw - 9
+	sw := tw - 4
+	cpu, mem, load, root, data := nan(), nan(), nan(), nan(), nan()
+	dataMount := "-"
+	podsOn := 0
+	for i := range a.snap.Pods {
+		if a.snap.Pods[i].Spec.NodeName == name && a.snap.Pods[i].Status.Phase == corev1.PodRunning {
+			podsOn++
+		}
+	}
+	maxPods := k8s.QuantityValue(n.Status.Allocatable, corev1.ResourcePods)
+	if ni != nil && ni.Err == nil {
+		cpu, mem = ni.CPUPct, ni.MemPct
+		if ni.CPUs > 0 {
+			load = ni.Load1 / float64(ni.CPUs) * 100
+		}
+		if m := ni.MountFor("/"); m != nil {
+			root = float64(m.UsePct)
+		}
+		if m := ni.DataMount(); m != nil && m.Mountpoint != "/" {
+			data, dataMount = float64(m.UsePct), m.Mountpoint
+		}
+	} else if m, ok := a.snap.NodeMetrics[name]; ok {
+		if alloc := k8s.QuantityMilli(n.Status.Allocatable, corev1.ResourceCPU); alloc > 0 {
+			cpu = float64(m.CPUMilli) * 100 / float64(alloc)
+		}
+		if alloc := k8s.QuantityValue(n.Status.Allocatable, corev1.ResourceMemory); alloc > 0 {
+			mem = float64(m.MemBytes) * 100 / float64(alloc)
+		}
+	}
+	podPct := nan()
+	if maxPods > 0 {
+		podPct = float64(podsOn) * 100 / float64(maxPods)
+	}
+	tiles := []string{
+		tile(tw, "CPU", gauge(cpu, gw, thr.CPUWarnPct, 95), sparkStyled(a.values("node.cpu:"+name), sw, 100, thr.CPUWarnPct, 95)),
+		tile(tw, "Memory", gauge(mem, gw, thr.MemWarnPct, thr.MemCritPct), sparkStyled(a.values("node.mem:"+name), sw, 100, thr.MemWarnPct, thr.MemCritPct)),
+		tile(tw, "Load / CPU", gauge(load, gw, int(thr.LoadPerCPUWarn*100), 300), sparkStyled(a.values("node.load:"+name), sw, 0, int(thr.LoadPerCPUWarn*100), 300)),
+		tile(tw, "Root fs", gauge(root, gw, thr.DiskWarnPct, thr.DiskCritPct), sparkStyled(a.values("node.root:"+name), sw, 100, thr.DiskWarnPct, thr.DiskCritPct)),
+		tile(tw, "Data fs", gauge(data, gw, thr.DiskWarnPct, thr.DiskCritPct), styleDim.Render(trunc(dataMount, sw))),
+		tile(tw, "Pods", gauge(podPct, gw, 80, 90), styleDim.Render(fmt.Sprintf("%d running / %d max", podsOn, maxPods))),
+	}
+	out = append(out, tileRow(tiles[:cnt])...)
+	if ni != nil && ni.Err == nil {
+		items := ni.HardeningItems()
+		if len(items) > 0 {
+			out = append(out, styleTitle.Render("Security at a glance")+styleDim.Render("  runtime vs boot configuration"))
+			var rows [][]string
+			for _, it := range items {
+				state := styleOK.Render("ok")
+				switch {
+				case it.Mismatch:
+					state = styleWarn.Render("MISMATCH: reboot changes state")
+				case !it.OK:
+					state = styleWarn.Render("not hardened")
+				}
+				rows = append(rows, []string{it.Name, it.Runtime, it.Boot, state, it.Detail})
+			}
+			h, lines := renderTable(w, []column{{title: "ITEM"}, {title: "RUNTIME"}, {title: "BOOT CONFIG"}, {title: "ASSESSMENT"}, {title: "DETAIL"}}, rows)
+			out = append(out, h)
+			out = append(out, lines...)
+		}
+		var svcs []string
+		for _, u := range ni.Units {
+			txt := fmt.Sprintf("%s %s", u.Name, u.Active)
+			if u.NRestarts > 0 {
+				txt += fmt.Sprintf(" (restarts %d)", u.NRestarts)
+			}
+			svcs = append(svcs, okText(u.Active == "active", txt, txt))
+		}
+		if len(svcs) > 0 {
+			out = append(out, kv("k8s units", strings.Join(svcs, "  ")))
+		}
+	}
+	out = append(out, "")
+	return out
 }
 
 func pctOf(v, total int64) string {

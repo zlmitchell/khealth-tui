@@ -157,6 +157,38 @@ func Evaluate(in Input) []Finding {
 		}
 	}
 
+	// ---- control-plane isolation ----
+	for _, iso := range s.ControlPlaneIsolation() {
+		if len(iso.UserPods) > 0 {
+			sev := SevWarn
+			if iso.Protected {
+				sev = SevInfo // scheduled deliberately with tolerations
+			}
+			add(sev, "node", iso.Node, fmt.Sprintf("%d user workload pod(s) on control-plane node: %s", len(iso.UserPods), truncList(iso.UserPods, 3)), "rke2: node-taint: [CriticalAddonsOnly=true:NoExecute] on servers; move workloads to agents")
+		}
+		if !iso.Protected {
+			add(SevWarn, "node", iso.Node, "control-plane node has no NoSchedule/NoExecute taint", "rke2 config.yaml on servers: node-taint: [\"CriticalAddonsOnly=true:NoExecute\"]")
+		}
+		unset := []string{}
+		for _, comp := range []string{"kube-apiserver", "etcd", "kube-controller-manager", "kube-scheduler"} {
+			if r, ok := iso.CPComponents[comp]; ok && !r.Set {
+				unset = append(unset, comp)
+			}
+		}
+		if iso.AllocCPU > 0 && len(unset) > 0 {
+			pct := iso.AllCPUReq * 100 / iso.AllocCPU
+			memPct := int64(0)
+			if iso.AllocMem > 0 {
+				memPct = iso.AllMemReq * 100 / iso.AllocMem
+			}
+			if pct >= 60 || memPct >= 60 {
+				add(SevWarn, "node", iso.Node, fmt.Sprintf("control-plane pods %s have no resource requests while other pods already request %d%% CPU / %d%% memory: the control plane is not guaranteed capacity", strings.Join(unset, ","), pct, memPct), "rke2 config.yaml: control-plane-resource-requests: [kube-apiserver-cpu=500m,kube-apiserver-memory=1Gi,etcd-cpu=500m,etcd-memory=1Gi,...]")
+			} else {
+				add(SevInfo, "node", iso.Node, fmt.Sprintf("control-plane pods %s run without resource requests (best effort)", strings.Join(unset, ",")), "rke2: control-plane-resource-requests in config.yaml")
+			}
+		}
+	}
+
 	// ---- nodes (SSH) ----
 	for name, ni := range in.Nodes {
 		if ni == nil {
@@ -219,6 +251,14 @@ func Evaluate(in Input) []Finding {
 				add(SevCrit, "node", name, "certificate expired: "+c.Path, "rke2: restart rotates client certs; kubeadm certs renew all")
 			case left < thr.CertExpiryWarn:
 				add(SevWarn, "node", name, fmt.Sprintf("certificate expires in %dd: %s", int(left.Hours()/24), c.Path), "")
+			}
+		}
+		if ni.Hardening["reboot_required"] == "yes" {
+			add(SevInfo, "node", name, "reboot required (pending kernel/security updates)", "drain and reboot in a maintenance window")
+		}
+		for _, it := range ni.HardeningItems() {
+			if it.Mismatch {
+				add(SevWarn, "security", name, fmt.Sprintf("%s: runtime %q but boot config %q", it.Name, it.Runtime, it.Boot), "a reboot will change the effective state; align config and runtime")
 			}
 		}
 		// registries.yaml present but containerd has no mirror hosts -> not applied
@@ -693,6 +733,13 @@ func MergePVCUsage(s *k8s.Snapshot, nodes map[string]*nodeinfo.Info) map[string]
 		}
 	}
 	return out
+}
+
+func truncList(l []string, n int) string {
+	if len(l) <= n {
+		return strings.Join(l, ", ")
+	}
+	return strings.Join(l[:n], ", ") + fmt.Sprintf(" (+%d more)", len(l)-n)
 }
 
 func firstLine(s string) string {

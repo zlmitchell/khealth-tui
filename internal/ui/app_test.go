@@ -114,13 +114,19 @@ func TestRenderAllTabsAndDetails(t *testing.T) {
 	a.filters[tabWorkloads] = ""
 	a.cursor[tabWorkloads] = 0
 	a.openWorkload(wlID("Deployment", "default", "web"))
-	if a.overlay != ovInspect || len(a.inspect) != 1 {
-		t.Fatalf("expected inspector, overlay=%v levels=%d", a.overlay, len(a.inspect))
+	if !a.inInspect() || len(a.inspect) != 1 {
+		t.Fatalf("expected Inspect sub-tab, sub=%q levels=%d", a.subName(), len(a.inspect))
 	}
-	_ = a.View()
-	a.handleInspectKey("esc")
-	if a.overlay != ovNone {
-		t.Errorf("esc should close the inspector")
+	if v := ansi.Strip(a.View()); !strings.Contains(v, "Inspect (1)") || !strings.Contains(v, "References") {
+		t.Errorf("inspector body not rendered")
+	}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.inInspect() || a.subName() != "Controllers" {
+		t.Errorf("esc should return to Controllers, got %q", a.subName())
+	}
+	a.setSub(1)
+	if a.subName() != "Pods" || !a.wlPods {
+		t.Errorf("l should switch to Pods sub-tab, got %q", a.subName())
 	}
 	a.wlPods = true
 	_ = a.View()
