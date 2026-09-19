@@ -34,6 +34,8 @@ type SSH struct {
 	Enabled       bool              `yaml:"enabled"`
 	User          string            `yaml:"user"`
 	Key           string            `yaml:"key"`
+	Password      string            `yaml:"password"` // fallback when public key auth fails (prefer --ask-pass / KHT_SSH_PASSWORD)
+	AskPass       bool              `yaml:"ask_pass"` // prompt for the password at startup
 	Port          int               `yaml:"port"`
 	Sudo          bool              `yaml:"sudo"`
 	Timeout       time.Duration     `yaml:"timeout"`
@@ -142,6 +144,8 @@ func Load(args []string) (Config, error) {
 		sshUser     = fs.String("ssh-user", "", "SSH user for nodes")
 		sshKey      = fs.String("ssh-key", "", "SSH private key file")
 		sshPort     = fs.Int("ssh-port", 0, "SSH port")
+		sshPass     = fs.String("ssh-password", "", "SSH password fallback (prefer --ask-pass or KHT_SSH_PASSWORD; also used for sudo)")
+		askPass     = fs.Bool("ask-pass", false, "prompt for the SSH/sudo password at startup")
 		sshAddr     = fs.String("ssh-address", "", "node address type: InternalIP, ExternalIP or Hostname")
 		bastion     = fs.String("bastion", "", "SSH jump host (user@host[:port])")
 		noSSH       = fs.Bool("no-ssh", false, "disable SSH collection")
@@ -193,6 +197,10 @@ func Load(args []string) (Config, error) {
 			cfg.SSH.Key = *sshKey
 		case "ssh-port":
 			cfg.SSH.Port = *sshPort
+		case "ssh-password":
+			cfg.SSH.Password = *sshPass
+		case "ask-pass":
+			cfg.SSH.AskPass = *askPass
 		case "ssh-address":
 			cfg.SSH.Address = *sshAddr
 		case "bastion":
@@ -211,6 +219,9 @@ func Load(args []string) (Config, error) {
 	cfg.Kubeconfig = expand(cfg.Kubeconfig)
 	cfg.SSH.Key = expand(cfg.SSH.Key)
 	cfg.SSH.KnownHosts = expand(cfg.SSH.KnownHosts)
+	if cfg.SSH.Password == "" {
+		cfg.SSH.Password = os.Getenv("KHT_SSH_PASSWORD")
+	}
 	if cfg.SSH.User == "" {
 		cfg.SSH.User = os.Getenv("USER")
 		if cfg.SSH.User == "" {

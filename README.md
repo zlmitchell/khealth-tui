@@ -33,6 +33,11 @@ It uses two sources:
 | 0 | Security | **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap) |
 | - | Logs | journal of rke2-server/agent, kubelet, containerd, rancher-system-agent **classified** into normal-startup noise / warnings / errors with explanations (token mismatch, CA mismatch, cluster-id mismatch, NOSPACE, PLEG, pull failures, protect-kernel-defaults, …); persistent startup noise is escalated |
 
+Overview and etcd start with a tile row (gauges + sparklines over the last
+refreshes for CPU/memory/disk/etcd db size/fragmentation/fsync, pod and
+findings distribution); Nodes/Storage/Images/Security/Logs use bars and
+sparklines inline. History is kept in memory for the session (90 samples).
+
 Keys: `Tab`/`Shift+Tab` switch tabs, `j/k` move, `Enter` detail, `n` namespace,
 `/` filter, `a` problems-only, `r` refresh, `R` full refresh (logs/images),
 `s` toggle SSH, `?` help, `q` quit.
@@ -57,6 +62,7 @@ khealth --context prod --ssh-user ubuntu --ssh-key ~/.ssh/prod.pem
 khealth --no-ssh                          # API-only view
 khealth --bastion jump@bastion.example.com --insecure-host-key
 khealth --helm-updates                    # also look up newer chart versions
+khealth --ssh-user admin --ask-pass       # prompt for a password used when keys fail (and for sudo)
 ```
 
 Copy `config.example.yaml` to `~/.config/k8s-health-tui/config.yaml` (or
@@ -72,8 +78,11 @@ thresholds, extra etcd backup directories, Helm repos, etc.
   (`/var/lib/rancher/rke2/bin/crictl` on rke2), `zstd` only to read `.tar.zst`
   manifests
 * host keys must be in `~/.ssh/known_hosts` unless `strict_host_key: false`
-* auth: ssh-agent (incl. Windows OpenSSH agent), key file, `KHT_SSH_PASSPHRASE`,
-  `KHT_SSH_PASSWORD`
+* auth order: ssh-agent (incl. Windows OpenSSH agent) -> key file(s) ->
+  password fallback. The password comes from `--ask-pass` (prompted, not
+  echoed), `KHT_SSH_PASSWORD`, `ssh.password` in the config or `--ssh-password`;
+  it is also used for keyboard-interactive auth and fed to `sudo -S` when the
+  node's sudo is not `NOPASSWD`. Encrypted keys: `KHT_SSH_PASSPHRASE`.
 
 Light collection runs every refresh (default 30s, ~2s per node, parallel);
 heavy collection (journal, `crictl images`, tarball manifests) runs every

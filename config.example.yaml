@@ -12,6 +12,8 @@ ssh:
   user: ubuntu                    # default: $USER
   key: ~/.ssh/id_ed25519          # default: ssh-agent, then ~/.ssh/id_{ed25519,ecdsa,rsa}
                                   # encrypted key: export KHT_SSH_PASSPHRASE; password auth: export KHT_SSH_PASSWORD
+  password: ""                    # fallback if key auth fails; prefer --ask-pass (prompt) or KHT_SSH_PASSWORD
+  ask_pass: false                 # prompt for the password at startup (also fed to sudo -S when sudo needs it)
   port: 22
   sudo: true                      # runs the collection script with `sudo -n` (needs NOPASSWD)
   timeout: 20s

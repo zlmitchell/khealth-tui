@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"k8s-health-tui/internal/checks"
+	"k8s-health-tui/internal/config"
 	"k8s-health-tui/internal/k8s"
 )
 
@@ -16,6 +18,7 @@ import (
 
 func (a *App) overviewContent() content {
 	s := a.snap
+	thr := a.cfg.Thresholds
 	var hdr []string
 	cp, ready := 0, 0
 	for i := range s.Nodes {
@@ -26,22 +29,97 @@ func (a *App) overviewContent() content {
 			ready++
 		}
 	}
-	running, pending, failed, other := 0, 0, 0, 0
+	running, pending, failed, unhealthy := 0, 0, 0, 0
 	for i := range s.Pods {
-		switch s.Pods[i].Status.Phase {
+		p := &s.Pods[i]
+		switch p.Status.Phase {
 		case corev1.PodRunning:
 			running++
 		case corev1.PodPending:
 			pending++
 		case corev1.PodFailed:
 			failed++
-		case corev1.PodSucceeded:
-		default:
-			other++
+		}
+		if !k8s.PodHealthy(p) && p.Status.Phase != corev1.PodSucceeded {
+			unhealthy++
 		}
 	}
-	hdr = append(hdr, styleTitle.Render("Cluster")+"  "+kv("context", a.client.Context)+"  "+kv("server", a.client.Host)+"  "+kv("version", s.Version)+"  "+kv("distribution", s.Distribution))
-	hdr = append(hdr, kv("nodes", okText(ready == len(s.Nodes), fmt.Sprintf("%d/%d ready", ready, len(s.Nodes)), fmt.Sprintf("%d/%d ready", ready, len(s.Nodes))))+"  "+kv("control-plane", fmt.Sprint(cp))+"  "+kv("pods", fmt.Sprintf("%d running, %s, %s", running, colorCount(pending, "pending", styleWarn), colorCount(failed, "failed", styleCrit)))+"  "+kv("namespaces", fmt.Sprint(len(s.Namespaces))))
+	hdr = append(hdr, styleTitle.Render("Cluster")+"  "+kv("context", a.client.Context)+"  "+kv("server", a.client.Host)+"  "+kv("version", s.Version)+"  "+kv("distribution", s.Distribution)+"  "+kv("namespaces", fmt.Sprint(len(s.Namespaces)))+"  "+kv("control-plane", fmt.Sprint(cp)))
+
+	// ---- tiles ----
+	cpu, mem, disk := a.clusterUsage()
+	crit, warn, info := 0, 0, 0
+	for _, f := range a.findings {
+		switch f.Severity {
+		case checks.SevCrit:
+			crit++
+		case checks.SevWarn:
+			warn++
+		default:
+			info++
+		}
+	}
+	etcdDB, etcdFsync := nan(), nan()
+	etcdHealthy, etcdProbed := 0, 0
+	var etcdNode string
+	for _, n := range sortedKeys(a.etcd) {
+		p := a.etcd[n]
+		if p.Err != nil || p.Metrics == nil {
+			continue
+		}
+		etcdProbed++
+		if p.Health != nil && p.Health.Healthy {
+			etcdHealthy++
+		}
+		if p.Metrics.Quota > 0 {
+			pct := p.Metrics.DBSize / p.Metrics.Quota * 100
+			if math.IsNaN(etcdDB) || pct > etcdDB {
+				etcdDB, etcdNode = pct, n
+			}
+		}
+		if math.IsNaN(etcdFsync) || p.Metrics.WalFsyncAvgMs > etcdFsync {
+			etcdFsync = p.Metrics.WalFsyncAvgMs
+		}
+	}
+	tw, n := tileWidths(a.width, 6)
+	gw := tw - 4 - 5 // gauge bar width inside a tile (padding + "100%")
+	if gw < 6 {
+		gw = 6
+	}
+	sw := tw - 4
+	readyPct := 100.0
+	if len(s.Nodes) > 0 {
+		readyPct = float64(ready) * 100 / float64(len(s.Nodes))
+	}
+	podSegs := []seg{{float64(running - unhealthy), styleOK, "ok"}, {float64(unhealthy), styleCrit, "bad"}, {float64(pending), styleWarn, "pend"}, {float64(failed), styleCrit, "fail"}}
+	notReady := 100 - readyPct
+	tiles := []string{
+		tile(tw, "Nodes",
+			okText(ready == len(s.Nodes), fmt.Sprintf("%d/%d ready", ready, len(s.Nodes)), fmt.Sprintf("%d/%d ready", ready, len(s.Nodes)))+styleDim.Render(fmt.Sprintf("  %d cp", cp)),
+			bar(readyPct/100, gw, pctStyle(notReady, 1, 50))+pctStyle(notReady, 1, 50).Render(fmt.Sprintf("%4.0f%%", readyPct)),
+			styleDim.Render("ssh ")+sshSummary(a)),
+		tile(tw, "Pods",
+			fmt.Sprintf("%d run  %s", running, colorCount(unhealthy, "bad", styleCrit)),
+			stacked(gw+5, podSegs),
+			styleDim.Render("bad ")+sparkStyled(a.values("pods.unhealthy"), sw-4, 0, 1, 5)),
+		tile(tw, "CPU (avg)",
+			gauge(cpu, gw, thr.CPUWarnPct, 95),
+			sparkStyled(a.values("cluster.cpu"), sw, 100, thr.CPUWarnPct, 95),
+			styleDim.Render(usageSource(a))),
+		tile(tw, "Memory (avg)",
+			gauge(mem, gw, thr.MemWarnPct, thr.MemCritPct),
+			sparkStyled(a.values("cluster.mem"), sw, 100, thr.MemWarnPct, thr.MemCritPct),
+			styleDim.Render(usageSource(a))),
+		tile(tw, "Disk (worst fs)",
+			gauge(disk, gw, thr.DiskWarnPct, thr.DiskCritPct),
+			sparkStyled(a.values("cluster.disk"), sw, 100, thr.DiskWarnPct, thr.DiskCritPct),
+			styleDim.Render(worstDisk(a))),
+		tile(tw, "etcd",
+			etcdTileLine(etcdProbed, etcdHealthy, etcdFsync, thr),
+			gauge(etcdDB, gw, thr.EtcdDBWarnPct, 95),
+			sparkStyled(a.values("etcd.db:"+etcdNode), sw, 100, thr.EtcdDBWarnPct, 95)),
+	}
+	hdr = append(hdr, tileRow(tiles[:n])...)
 
 	readyFail, liveFail := 0, 0
 	for _, c := range s.Readyz {
@@ -59,37 +137,12 @@ func (a *App) overviewContent() content {
 	if s.Rancher != nil && s.Rancher.Managed {
 		api += "  " + kv("rancher", okText(s.Rancher.ClusterAgentOK, "connected "+s.Rancher.Server, "disconnected "+s.Rancher.Server))
 	}
+	api += "  " + kv("warning events", fmt.Sprint(len(s.Events))) + " " + styleInfo.Render(sparkline(a.values("events.warn"), 12, 0))
 	hdr = append(hdr, api)
-	if a.sshEnabled {
-		okN, errN := 0, 0
-		for _, ni := range a.nodes {
-			if ni.Err != nil {
-				errN++
-			} else {
-				okN++
-			}
-		}
-		hdr = append(hdr, kv("ssh", fmt.Sprintf("%d nodes collected, %s, %d pending", okN, colorCount(errN, "failed", styleWarn), len(a.pending)))+"  "+kv("etcd probes", fmt.Sprint(len(a.etcd))))
-	} else {
-		note := "disabled"
-		if a.sshErr != "" {
-			note = styleWarn.Render(a.sshErr)
-		}
-		hdr = append(hdr, kv("ssh", note))
-	}
-	crit, warn, info := 0, 0, 0
-	for _, f := range a.findings {
-		switch f.Severity {
-		case checks.SevCrit:
-			crit++
-		case checks.SevWarn:
-			warn++
-		default:
-			info++
-		}
-	}
-	hdr = append(hdr, "")
-	hdr = append(hdr, styleTitle.Render("Findings")+"  "+styleCrit.Render(fmt.Sprintf("%d critical", crit))+"  "+styleWarn.Render(fmt.Sprintf("%d warnings", warn))+"  "+styleInfo.Render(fmt.Sprintf("%d info", info))+styleDim.Render("   (a toggles info, enter shows hint)"))
+
+	fsegs := []seg{{float64(crit), styleCrit, "critical"}, {float64(warn), styleWarn, "warning"}, {float64(info), styleInfo, "info"}}
+	trend := sparkStyled(a.values("findings.crit"), 12, 0, 1, 1)
+	hdr = append(hdr, styleTitle.Render("Findings")+"  "+stacked(30, fsegs)+"  "+legend(fsegs)+"  "+styleDim.Render("crit trend ")+trend+styleDim.Render("   (a toggles info, enter shows hint)"))
 
 	var rows [][]string
 	var ids []string
@@ -107,6 +160,81 @@ func (a *App) overviewContent() content {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
 	return c
+}
+
+func sshSummary(a *App) string {
+	if !a.sshEnabled {
+		if a.sshErr != "" {
+			return styleWarn.Render("error")
+		}
+		return "off"
+	}
+	okN, errN := 0, 0
+	for _, ni := range a.nodes {
+		if ni.Err != nil {
+			errN++
+		} else {
+			okN++
+		}
+	}
+	out := styleOK.Render(fmt.Sprintf("%d ok", okN))
+	if errN > 0 {
+		out += " " + styleCrit.Render(fmt.Sprintf("%d err", errN))
+	}
+	if len(a.pending) > 0 {
+		out += styleDim.Render(fmt.Sprintf(" %d pending", len(a.pending)))
+	}
+	return out
+}
+
+func usageSource(a *App) string {
+	ssh := 0
+	for _, ni := range a.nodes {
+		if ni.Err == nil {
+			ssh++
+		}
+	}
+	switch {
+	case ssh > 0 && a.snap.MetricsAvailable:
+		return fmt.Sprintf("ssh %d nodes + metrics-server", ssh)
+	case ssh > 0:
+		return fmt.Sprintf("ssh %d nodes", ssh)
+	case a.snap.MetricsAvailable:
+		return "metrics-server"
+	}
+	return "no usage source"
+}
+
+func worstDisk(a *App) string {
+	worst := -1
+	where := ""
+	for _, n := range sortedKeys(a.nodes) {
+		ni := a.nodes[n]
+		if ni.Err != nil {
+			continue
+		}
+		for _, m := range ni.Mounts {
+			if m.UsePct > worst {
+				worst = m.UsePct
+				where = n + ":" + m.Mountpoint
+			}
+		}
+	}
+	if worst < 0 {
+		return "needs ssh"
+	}
+	return where
+}
+
+func etcdTileLine(probed, healthy int, fsync float64, thr config.Thresholds) string {
+	if probed == 0 {
+		return styleDim.Render("no probes (ssh)")
+	}
+	out := okText(healthy == probed, fmt.Sprintf("%d/%d ok", healthy, probed), fmt.Sprintf("%d/%d ok", healthy, probed))
+	if !math.IsNaN(fsync) {
+		out += styleDim.Render(" fsync ") + pctStyle(fsync, int(thr.EtcdFsyncWarnMs), int(thr.EtcdFsyncWarnMs*3)).Render(fmt.Sprintf("%.0fms", fsync))
+	}
+	return out
 }
 
 func colorCount(n int, label string, st interface{ Render(...string) string }) string {
@@ -136,19 +264,24 @@ func (a *App) nodesContent() content {
 				status += styleWarn.Render("," + strings.TrimSuffix(string(ct), "Pressure") + "!")
 			}
 		}
-		cpu, mem, load, root, data, kubelet, uptime, ssh := "-", "-", "-", "-", "-", "-", "-", styleDim.Render("-")
+		bw := 6
+		if a.width < 120 {
+			bw = 4
+		}
+		cpu, mem, load, root, data, kubelet, uptime, ssh := gauge(nan(), bw, 0, 0), gauge(nan(), bw, 0, 0), "-", gauge(nan(), bw, 0, 0), "-", "-", "-", styleDim.Render("-")
+		trend := sparkStyled(a.values("node.cpu:"+n.Name), 10, 100, thr.CPUWarnPct, 95)
 		if ni, ok := a.nodes[n.Name]; ok && ni.Err == nil {
-			cpu = pctText(ni.CPUPct, thr.CPUWarnPct, 95)
-			mem = pctText(ni.MemPct, thr.MemWarnPct, thr.MemCritPct)
+			cpu = gauge(ni.CPUPct, bw, thr.CPUWarnPct, 95)
+			mem = gauge(ni.MemPct, bw, thr.MemWarnPct, thr.MemCritPct)
 			load = fmt.Sprintf("%.1f", ni.Load1)
 			if ni.CPUs > 0 && ni.Load1/float64(ni.CPUs) >= thr.LoadPerCPUWarn {
 				load = styleWarn.Render(load)
 			}
 			if m := ni.MountFor("/"); m != nil {
-				root = pctText(float64(m.UsePct), thr.DiskWarnPct, thr.DiskCritPct)
+				root = gauge(float64(m.UsePct), bw, thr.DiskWarnPct, thr.DiskCritPct)
 			}
 			if m := ni.DataMount(); m != nil && m.Mountpoint != "/" {
-				data = pctText(float64(m.UsePct), thr.DiskWarnPct, thr.DiskCritPct) + styleDim.Render(" "+m.Mountpoint)
+				data = gauge(float64(m.UsePct), bw, thr.DiskWarnPct, thr.DiskCritPct) + styleDim.Render(" "+m.Mountpoint)
 			} else {
 				data = styleDim.Render("(root)")
 			}
@@ -169,19 +302,23 @@ func (a *App) nodesContent() content {
 		} else if a.pending[n.Name] {
 			ssh = styleDim.Render("…")
 		}
-		if m, ok := s.NodeMetrics[n.Name]; ok && cpu == "-" {
-			if alloc := k8s.QuantityMilli(n.Status.Allocatable, corev1.ResourceCPU); alloc > 0 {
-				cpu = pctText(float64(m.CPUMilli)*100/float64(alloc), thr.CPUWarnPct, 95) + styleDim.Render("m")
-			}
-			if alloc := k8s.QuantityValue(n.Status.Allocatable, corev1.ResourceMemory); alloc > 0 {
-				mem = pctText(float64(m.MemBytes)*100/float64(alloc), thr.MemWarnPct, thr.MemCritPct) + styleDim.Render("m")
+		if ni, ok := a.nodes[n.Name]; (!ok || ni.Err != nil) && s.MetricsAvailable {
+			if m, ok := s.NodeMetrics[n.Name]; ok {
+				if alloc := k8s.QuantityMilli(n.Status.Allocatable, corev1.ResourceCPU); alloc > 0 {
+					cpu = gauge(float64(m.CPUMilli)*100/float64(alloc), bw, thr.CPUWarnPct, 95) + styleDim.Render("m")
+				}
+				if alloc := k8s.QuantityValue(n.Status.Allocatable, corev1.ResourceMemory); alloc > 0 {
+					mem = gauge(float64(m.MemBytes)*100/float64(alloc), bw, thr.MemWarnPct, thr.MemCritPct) + styleDim.Render("m")
+				}
 			}
 		}
-		rows = append(rows, []string{n.Name, roles, status, n.Status.NodeInfo.KubeletVersion, cpu, mem, load, root, data, kubelet, uptime, age(n.CreationTimestamp.Time), ssh})
+		rows = append(rows, []string{n.Name, roles, status, n.Status.NodeInfo.KubeletVersion, cpu, trend, mem, load, root, data, kubelet, uptime, ssh})
 		ids = append(ids, n.Name)
 	}
-	h, lines := renderTable(a.width, []column{{title: "NAME"}, {title: "ROLES", max: 24}, {title: "STATUS"}, {title: "VERSION"}, {title: "CPU", right: true}, {title: "MEM", right: true}, {title: "LOAD", right: true}, {title: "ROOT", right: true}, {title: "DATA DISK"}, {title: "KUBELET"}, {title: "UPTIME"}, {title: "AGE"}, {title: "SSH"}}, rows)
-	c := content{header: []string{styleDim.Render("m = metrics-server value, ok+ = full collection done; enter for details"), h}, selectable: true, empty: "no nodes"}
+	h, lines := renderTable(a.width, []column{{title: "NAME"}, {title: "ROLES", max: 20}, {title: "STATUS"}, {title: "VERSION"}, {title: "CPU"}, {title: "CPU TREND"}, {title: "MEM"}, {title: "LOAD", right: true}, {title: "ROOT"}, {title: "DATA DISK"}, {title: "KUBELET"}, {title: "UPTIME"}, {title: "SSH"}}, rows)
+	cpuAvg, memAvg, _ := a.clusterUsage()
+	summary := styleTitle.Render("Nodes") + "  " + kv("cpu avg", gauge(cpuAvg, 12, thr.CPUWarnPct, 95)) + "  " + kv("mem avg", gauge(memAvg, 12, thr.MemWarnPct, thr.MemCritPct)) + "  " + kv("cpu trend", sparkStyled(a.values("cluster.cpu"), 20, 100, thr.CPUWarnPct, 95)) + "  " + kv("mem trend", sparkStyled(a.values("cluster.mem"), 20, 100, thr.MemWarnPct, thr.MemCritPct))
+	c := content{header: []string{summary, styleDim.Render("m = metrics-server value, ok+ = full collection done; trend = last refreshes; enter for details"), h}, selectable: true, empty: "no nodes"}
 	for i, l := range lines {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
@@ -248,6 +385,25 @@ func (a *App) workloadsContent() content {
 		}
 	}
 	hdr = append(hdr, styleTitle.Render("Workloads")+"  "+kv("deployments", fmt.Sprint(nDep))+"  "+kv("daemonsets", fmt.Sprint(nDS))+"  "+kv("statefulsets", fmt.Sprint(nSTS))+"  "+kv("jobs", fmt.Sprint(nJob))+"  "+kv("cronjobs", fmt.Sprint(nCron)))
+	var okPods, badPods, pendPods, donePods float64
+	for i := range s.Pods {
+		p := &s.Pods[i]
+		if !a.inNamespace(p.Namespace) {
+			continue
+		}
+		switch {
+		case p.Status.Phase == corev1.PodSucceeded:
+			donePods++
+		case p.Status.Phase == corev1.PodPending:
+			pendPods++
+		case k8s.PodHealthy(p):
+			okPods++
+		default:
+			badPods++
+		}
+	}
+	psegs := []seg{{okPods, styleOK, "healthy"}, {badPods, styleCrit, "unhealthy"}, {pendPods, styleWarn, "pending"}, {donePods, styleDim, "completed"}}
+	hdr = append(hdr, kv("pods", stacked(40, psegs))+"  "+legend(psegs)+"  "+styleDim.Render("unhealthy trend ")+sparkStyled(a.values("pods.unhealthy"), 16, 0, 1, 5))
 	if len(bad) > 0 {
 		hdr = append(hdr, "unhealthy: "+strings.Join(bad, "  "))
 	} else {
@@ -337,7 +493,36 @@ func (a *App) storageContent() content {
 	var out []string
 	add := func(l ...string) { out = append(out, l...) }
 
-	add(styleTitle.Render("StorageClasses"))
+	pvcSegs := []seg{{0, styleOK, "bound"}, {0, styleWarn, "pending"}, {0, styleCrit, "lost"}}
+	for i := range s.PVCs {
+		switch s.PVCs[i].Status.Phase {
+		case corev1.ClaimBound:
+			pvcSegs[0].n++
+		case corev1.ClaimPending:
+			pvcSegs[1].n++
+		default:
+			pvcSegs[2].n++
+		}
+	}
+	pvSegs := []seg{{0, styleOK, "bound"}, {0, styleInfo, "available"}, {0, styleWarn, "released"}, {0, styleCrit, "failed"}}
+	var pvBytes float64
+	for i := range s.PVs {
+		switch s.PVs[i].Status.Phase {
+		case corev1.VolumeBound:
+			pvSegs[0].n++
+		case corev1.VolumeAvailable:
+			pvSegs[1].n++
+		case corev1.VolumeReleased:
+			pvSegs[2].n++
+		default:
+			pvSegs[3].n++
+		}
+		if q, ok := s.PVs[i].Spec.Capacity[corev1.ResourceStorage]; ok {
+			pvBytes += float64(q.Value())
+		}
+	}
+	add(styleTitle.Render("Storage") + "  " + kv("PVCs", stacked(24, pvcSegs)) + " " + legend(pvcSegs) + "  " + kv("PVs", stacked(24, pvSegs)) + " " + legend(pvSegs) + "  " + kv("provisioned", humanBytes(pvBytes)))
+	add("", styleTitle.Render("StorageClasses"))
 	var rows [][]string
 	for i := range s.StorageClasses {
 		sc := &s.StorageClasses[i]
@@ -476,13 +661,13 @@ func (a *App) storageContent() content {
 			continue
 		}
 		for _, m := range ni.Mounts {
-			rows = append(rows, []string{name, m.Mountpoint, m.Type, humanKB(m.SizeKB), humanKB(m.UsedKB), humanKB(m.AvailKB), pctText(float64(m.UsePct), thr.DiskWarnPct, thr.DiskCritPct), pctText(float64(m.InodePct), thr.InodeWarnPct, 95)})
+			rows = append(rows, []string{name, m.Mountpoint, m.Type, humanKB(m.SizeKB), humanKB(m.UsedKB), humanKB(m.AvailKB), gauge(float64(m.UsePct), 12, thr.DiskWarnPct, thr.DiskCritPct), gauge(float64(m.InodePct), 8, thr.InodeWarnPct, 95)})
 		}
 	}
 	if len(rows) == 0 {
 		add(styleDim.Render("  no SSH data"))
 	} else {
-		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "MOUNT", max: 40}, {title: "TYPE"}, {title: "SIZE", right: true}, {title: "USED", right: true}, {title: "AVAIL", right: true}, {title: "USE%", right: true}, {title: "INODE%", right: true}}, rows)
+		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "MOUNT", max: 40}, {title: "TYPE"}, {title: "SIZE", right: true}, {title: "USED", right: true}, {title: "AVAIL", right: true}, {title: "USE"}, {title: "INODES"}}, rows)
 		add(h)
 		add(lines...)
 	}
@@ -619,8 +804,14 @@ func (a *App) nodeDetail(name string) (string, []string) {
 		add(styleCrit.Render("  error: " + ni.Err.Error()))
 	default:
 		add(kv("host", ni.Host) + "  " + kv("hostname", ni.Hostname) + "  " + kv("kernel", ni.Kernel) + "  " + kv("collected", age(ni.Collected)+" ago in "+humanDur(ni.Duration)) + "  " + kv("dist", ni.Dist))
-		add(kv("uptime", humanDur(ni.Uptime)) + "  " + kv("load", fmt.Sprintf("%.2f %.2f %.2f on %d cpus", ni.Load1, ni.Load5, ni.Load15, ni.CPUs)) + "  " + kv("cpu busy", pctText(ni.CPUPct, a.cfg.Thresholds.CPUWarnPct, 95)))
-		add(kv("memory", fmt.Sprintf("%s total, %s available, %s used", humanBytes(float64(ni.MemTotal)), humanBytes(float64(ni.MemAvail)), pctText(ni.MemPct, a.cfg.Thresholds.MemWarnPct, a.cfg.Thresholds.MemCritPct))) + "  " + kv("swap", fmt.Sprintf("%s total, %s used", humanBytes(float64(ni.SwapTotal)), humanBytes(float64(ni.SwapTotal-ni.SwapFree)))))
+		add(kv("uptime", humanDur(ni.Uptime)) + "  " + kv("load", fmt.Sprintf("%.2f %.2f %.2f on %d cpus", ni.Load1, ni.Load5, ni.Load15, ni.CPUs)))
+		add(kv("cpu   ", gauge(ni.CPUPct, 20, a.cfg.Thresholds.CPUWarnPct, 95)) + "  " + sparkStyled(a.values("node.cpu:"+name), 30, 100, a.cfg.Thresholds.CPUWarnPct, 95))
+		add(kv("memory", gauge(ni.MemPct, 20, a.cfg.Thresholds.MemWarnPct, a.cfg.Thresholds.MemCritPct)) + "  " + sparkStyled(a.values("node.mem:"+name), 30, 100, a.cfg.Thresholds.MemWarnPct, a.cfg.Thresholds.MemCritPct) + "  " + styleDim.Render(fmt.Sprintf("%s total, %s available", humanBytes(float64(ni.MemTotal)), humanBytes(float64(ni.MemAvail)))))
+		loadPct := nan()
+		if ni.CPUs > 0 {
+			loadPct = ni.Load1 / float64(ni.CPUs) * 100
+		}
+		add(kv("load/cpu", gauge(loadPct, 20, int(a.cfg.Thresholds.LoadPerCPUWarn*100), 300)) + "  " + sparkStyled(a.values("node.load:"+name), 30, 0, int(a.cfg.Thresholds.LoadPerCPUWarn*100), 300) + "  " + kv("swap", fmt.Sprintf("%s total, %s used", humanBytes(float64(ni.SwapTotal)), humanBytes(float64(ni.SwapTotal-ni.SwapFree)))))
 		ntp := "unknown"
 		if ni.NTPSynced != nil {
 			ntp = okText(*ni.NTPSynced, "synchronised", "NOT synchronised")
@@ -647,9 +838,9 @@ func (a *App) nodeDetail(name string) (string, []string) {
 		add("", styleTitle.Render("Filesystems"))
 		var rows [][]string
 		for _, m := range ni.Mounts {
-			rows = append(rows, []string{m.Mountpoint, m.Filesystem, m.Type, humanKB(m.SizeKB), humanKB(m.UsedKB), humanKB(m.AvailKB), pctText(float64(m.UsePct), a.cfg.Thresholds.DiskWarnPct, a.cfg.Thresholds.DiskCritPct), pctText(float64(m.InodePct), a.cfg.Thresholds.InodeWarnPct, 95)})
+			rows = append(rows, []string{m.Mountpoint, m.Filesystem, m.Type, humanKB(m.SizeKB), humanKB(m.UsedKB), humanKB(m.AvailKB), gauge(float64(m.UsePct), 14, a.cfg.Thresholds.DiskWarnPct, a.cfg.Thresholds.DiskCritPct), gauge(float64(m.InodePct), 8, a.cfg.Thresholds.InodeWarnPct, 95)})
 		}
-		h, lines := renderTable(w, []column{{title: "MOUNT", max: 36}, {title: "DEVICE", max: 30}, {title: "TYPE"}, {title: "SIZE", right: true}, {title: "USED", right: true}, {title: "AVAIL", right: true}, {title: "USE%", right: true}, {title: "INODE%", right: true}}, rows)
+		h, lines := renderTable(w, []column{{title: "MOUNT", max: 36}, {title: "DEVICE", max: 30}, {title: "TYPE"}, {title: "SIZE", right: true}, {title: "USED", right: true}, {title: "AVAIL", right: true}, {title: "USE"}, {title: "INODES"}}, rows)
 		add(h)
 		add(lines...)
 		if len(ni.Certs) > 0 {

@@ -28,10 +28,11 @@ type Runner struct {
 	hostKey ssh.HostKeyCallback
 	notes   []string
 
-	mu      sync.Mutex
-	clients map[string]*ssh.Client
-	bastion *ssh.Client
-	sem     chan struct{}
+	mu       sync.Mutex
+	clients  map[string]*ssh.Client
+	bastion  *ssh.Client
+	sem      chan struct{}
+	sudoPass bool // sudo needed a password on at least one host; use sudo -S from now on
 }
 
 // Result is the outcome of running a script on a node.
@@ -128,9 +129,17 @@ func buildAuth(cfg config.SSH) ([]ssh.AuthMethod, []string) {
 		methods = append(methods, ssh.PublicKeys(signer))
 		notes = append(notes, "key "+kp)
 	}
-	if pw := os.Getenv("KHT_SSH_PASSWORD"); pw != "" {
+	if pw := cfg.Password; pw != "" {
+		// password auth is tried after agent/key methods fail
 		methods = append(methods, ssh.Password(pw))
-		notes = append(notes, "password (env)")
+		methods = append(methods, ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
+			answers := make([]string, len(questions))
+			for i := range questions {
+				answers[i] = pw
+			}
+			return answers, nil
+		}))
+		notes = append(notes, "password fallback")
 	}
 	return methods, notes
 }
@@ -278,6 +287,14 @@ func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
 	cmd := "/bin/sh -s"
 	if r.cfg.Sudo && r.cfg.User != "root" {
 		cmd = "sudo -n /bin/sh -s"
+		r.mu.Lock()
+		usePass := r.sudoPass
+		r.mu.Unlock()
+		if usePass {
+			// sudo needs a password on this host: feed it on stdin ahead of the script
+			cmd = "sudo -S -p '' /bin/sh -s"
+			sess.Stdin = strings.NewReader(r.cfg.Password + "\n" + script)
+		}
 	}
 	res.Started = time.Now()
 	done := make(chan error, 1)
@@ -294,7 +311,17 @@ func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
 	res.Stderr = stderr.String()
 	if err != nil {
 		if strings.Contains(res.Stderr, "sudo") && strings.Contains(res.Stderr, "password") {
-			err = fmt.Errorf("sudo requires a password (configure NOPASSWD or ssh.sudo: false)")
+			r.mu.Lock()
+			retry := r.cfg.Password != "" && !r.sudoPass
+			if retry {
+				r.sudoPass = true
+			}
+			r.mu.Unlock()
+			if retry {
+				// retry once with the SSH password fed to sudo -S
+				return r.runOnce(ctx, host, script)
+			}
+			err = fmt.Errorf("sudo requires a password (configure NOPASSWD, use --ask-pass, or ssh.sudo: false)")
 		}
 		res.Err = err
 	}

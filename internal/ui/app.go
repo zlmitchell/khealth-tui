@@ -93,6 +93,7 @@ type App struct {
 	stigRes    []stig.Result
 	helmLatest map[string]helmcheck.Latest
 	findings   []checks.Finding
+	hist       map[string]*series
 
 	seq         int
 	cycle       int
@@ -311,6 +312,114 @@ func (a *App) recompute() {
 	})
 }
 
+// recordSnapshot appends cluster-level series points after an API refresh.
+func (a *App) recordSnapshot() {
+	s := a.snap
+	if s == nil {
+		return
+	}
+	running, pending, failed, unhealthy := 0, 0, 0, 0
+	for i := range s.Pods {
+		switch s.Pods[i].Status.Phase {
+		case corev1.PodRunning:
+			running++
+		case corev1.PodPending:
+			pending++
+		case corev1.PodFailed:
+			failed++
+		}
+		if !k8s.PodHealthy(&s.Pods[i]) && s.Pods[i].Status.Phase != corev1.PodSucceeded {
+			unhealthy++
+		}
+	}
+	ready := 0
+	for i := range s.Nodes {
+		if k8s.NodeReady(&s.Nodes[i]) {
+			ready++
+		}
+	}
+	a.record("pods.running", float64(running))
+	a.record("pods.pending", float64(pending))
+	a.record("pods.failed", float64(failed))
+	a.record("pods.unhealthy", float64(unhealthy))
+	a.record("nodes.ready", float64(ready))
+	a.record("nodes.total", float64(len(s.Nodes)))
+	a.record("events.warn", float64(len(s.Events)))
+	crit, warn := 0, 0
+	for _, f := range a.findings {
+		switch f.Severity {
+		case checks.SevCrit:
+			crit++
+		case checks.SevWarn:
+			warn++
+		}
+	}
+	a.record("findings.crit", float64(crit))
+	a.record("findings.warn", float64(warn))
+	cpu, mem, disk := a.clusterUsage()
+	a.record("cluster.cpu", cpu)
+	a.record("cluster.mem", mem)
+	a.record("cluster.disk", disk)
+}
+
+// clusterUsage averages CPU/memory (SSH first, metrics-server fallback) and
+// returns the worst filesystem usage across nodes. NaN when unknown.
+func (a *App) clusterUsage() (cpu, mem, disk float64) {
+	var cpus, mems, disks []float64
+	for i := range a.snap.Nodes {
+		n := &a.snap.Nodes[i]
+		if ni, ok := a.nodes[n.Name]; ok && ni.Err == nil {
+			if ni.CPUPct >= 0 {
+				cpus = append(cpus, ni.CPUPct)
+			}
+			mems = append(mems, ni.MemPct)
+			for _, m := range ni.Mounts {
+				disks = append(disks, float64(m.UsePct))
+			}
+			continue
+		}
+		if m, ok := a.snap.NodeMetrics[n.Name]; ok {
+			if alloc := k8s.QuantityMilli(n.Status.Allocatable, corev1.ResourceCPU); alloc > 0 {
+				cpus = append(cpus, float64(m.CPUMilli)*100/float64(alloc))
+			}
+			if alloc := k8s.QuantityValue(n.Status.Allocatable, corev1.ResourceMemory); alloc > 0 {
+				mems = append(mems, float64(m.MemBytes)*100/float64(alloc))
+			}
+		}
+	}
+	return avg(cpus), avg(mems), maxOf(disks)
+}
+
+func (a *App) recordNode(ni *nodeinfo.Info) {
+	if ni == nil || ni.Err != nil {
+		return
+	}
+	a.record("node.cpu:"+ni.Node, ni.CPUPct)
+	a.record("node.mem:"+ni.Node, ni.MemPct)
+	if ni.CPUs > 0 {
+		a.record("node.load:"+ni.Node, ni.Load1/float64(ni.CPUs)*100)
+	}
+	if m := ni.MountFor("/"); m != nil {
+		a.record("node.root:"+ni.Node, float64(m.UsePct))
+	}
+}
+
+func (a *App) recordEtcd(p *etcd.Probe) {
+	if p == nil || p.Err != nil || p.Metrics == nil {
+		return
+	}
+	m := p.Metrics
+	if m.Quota > 0 {
+		a.record("etcd.db:"+p.Node, m.DBSize/m.Quota*100)
+	}
+	a.record("etcd.dbsize:"+p.Node, m.DBSize)
+	a.record("etcd.fsync:"+p.Node, m.WalFsyncAvgMs)
+	a.record("etcd.commit:"+p.Node, m.BackendCommitAvgMs)
+	if m.DBSize > 0 {
+		a.record("etcd.frag:"+p.Node, (m.DBSize-m.DBSizeInUse)/m.DBSize*100)
+	}
+}
+
 func (a *App) setStatus(s string) {
 	a.status = s
 	a.statusAt = time.Now()
@@ -352,6 +461,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.recompute()
+		a.recordSnapshot()
 		return a, tea.Batch(a.collectCmds(a.snap), a.helmCmd(a.snap), a.tickCmd())
 	case nodeMsg:
 		if m.seq != a.seq {
@@ -361,6 +471,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.nodes[m.info.Node] = m.info
 		delete(a.pending, m.info.Node)
 		a.recompute()
+		a.recordNode(m.info)
 		return a, nil
 	case etcdMsg:
 		if m.seq != a.seq {
@@ -369,6 +480,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.etcd[m.probe.Node] = m.probe
 		delete(a.etcdPend, m.probe.Node)
 		a.recompute()
+		a.recordEtcd(m.probe)
 		if name := m.probe.RKE2Config["etcd-s3-config-secret"]; name != "" && (a.s3 == nil || a.s3.Name != name) {
 			return a, a.s3Cmd(name)
 		}

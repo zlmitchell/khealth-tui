@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"k8s-health-tui/internal/logs"
 	"k8s-health-tui/internal/stig"
 )
+
+var _ = math.NaN
 
 // ---------- etcd ----------
 
@@ -27,6 +30,7 @@ func (a *App) etcdContent() content {
 		}
 	}
 	add(styleTitle.Render("etcd") + "  " + kv("distribution", s.Distribution) + "  " + kv("etcd nodes", fmt.Sprint(etcdNodes)) + "  " + kv("probes", fmt.Sprintf("%d done, %d pending", len(a.etcd), len(a.etcdPend))) + styleDim.Render("   enter = full config dumps"))
+	add(a.etcdTiles()...)
 	if !a.sshEnabled {
 		add(styleWarn.Render("SSH collection is off - etcd internals need SSH to the control-plane nodes. API-side view only."))
 	}
@@ -106,15 +110,15 @@ func (a *App) etcdContent() content {
 			leader = okText(m.HasLeader, map[bool]string{true: "yes*", false: "yes"}[m.IsLeader], "NO LEADER")
 			if m.Quota > 0 {
 				pct := m.DBSize / m.Quota * 100
-				db = pctStyle(pct, thr.EtcdDBWarnPct, 95).Render(fmt.Sprintf("%s/%s (%.0f%%)", humanBytes(m.DBSize), humanBytes(m.Quota), pct))
+				db = gauge(pct, 8, thr.EtcdDBWarnPct, 95) + styleDim.Render(" "+humanBytes(m.DBSize)+"/"+humanBytes(m.Quota))
 			} else {
 				db = humanBytes(m.DBSize)
 			}
 			if m.DBSize > 0 && m.DBSizeInUse > 0 {
 				f := (m.DBSize - m.DBSizeInUse) / m.DBSize * 100
-				frag = pctStyle(f, thr.EtcdFragWarnPct, 80).Render(fmt.Sprintf("%.0f%%", f))
+				frag = gauge(f, 6, thr.EtcdFragWarnPct, 80)
 			}
-			fsync = pctStyle(m.WalFsyncAvgMs, int(thr.EtcdFsyncWarnMs), int(thr.EtcdFsyncWarnMs*3)).Render(fmt.Sprintf("%.1fms", m.WalFsyncAvgMs))
+			fsync = pctStyle(m.WalFsyncAvgMs, int(thr.EtcdFsyncWarnMs), int(thr.EtcdFsyncWarnMs*3)).Render(fmt.Sprintf("%.1fms", m.WalFsyncAvgMs)) + " " + sparkStyled(a.values("etcd.fsync:"+n), 8, 0, int(thr.EtcdFsyncWarnMs), int(thr.EtcdFsyncWarnMs*3))
 			commit = pctStyle(m.BackendCommitAvgMs, 25, 100).Render(fmt.Sprintf("%.1fms", m.BackendCommitAvgMs))
 			changes = fmt.Sprintf("%.0f", m.LeaderChanges)
 			pend = fmt.Sprintf("%.0f/%.0f", m.ProposalsPending, m.ProposalsFailed)
@@ -136,7 +140,7 @@ func (a *App) etcdContent() content {
 	if len(rows) == 0 {
 		add(styleDim.Render("  no probes yet"))
 	} else {
-		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "DIST"}, {title: "HEALTH"}, {title: "LEADER"}, {title: "DB / QUOTA"}, {title: "FRAG", right: true}, {title: "FSYNC", right: true}, {title: "COMMIT", right: true}, {title: "LDR CHG", right: true}, {title: "PEND/FAIL", right: true}, {title: "VERSION"}, {title: "DATA DIR FS"}}, rows)
+		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "DIST"}, {title: "HEALTH"}, {title: "LEADER"}, {title: "DB / QUOTA"}, {title: "FRAG"}, {title: "FSYNC + TREND"}, {title: "COMMIT", right: true}, {title: "LDR CHG", right: true}, {title: "PEND/FAIL", right: true}, {title: "VERSION"}, {title: "DATA DIR FS"}}, rows)
 		add(h)
 		add(lines...)
 		add(styleDim.Render("  yes* = this member is the leader; FRAG = allocated but unused db space (defrag reclaims); FSYNC/COMMIT = average disk latency since start"))
@@ -270,6 +274,98 @@ func (a *App) etcdContent() content {
 		add(styleDim.Render("  extra dirs scanned: " + strings.Join(a.cfg.Etcd.BackupDirs, " ")))
 	}
 	return linesContent(out)
+}
+
+// etcdTiles renders the summary tiles at the top of the etcd tab.
+func (a *App) etcdTiles() []string {
+	thr := a.cfg.Thresholds
+	var leaderName, memberInfo string
+	var dbPct, dbSize, frag, fsync float64 = nan(), nan(), nan(), nan()
+	var dbNode string
+	healthy, probed := 0, 0
+	for _, n := range sortedKeys(a.etcd) {
+		p := a.etcd[n]
+		if p.Err != nil {
+			continue
+		}
+		if p.Health != nil {
+			probed++
+			if p.Health.Healthy {
+				healthy++
+			}
+		}
+		if m := p.Metrics; m != nil {
+			if m.Quota > 0 && (math.IsNaN(dbPct) || m.DBSize/m.Quota*100 > dbPct) {
+				dbPct, dbSize, dbNode = m.DBSize/m.Quota*100, m.DBSize, n
+				if m.DBSize > 0 {
+					frag = (m.DBSize - m.DBSizeInUse) / m.DBSize * 100
+				}
+			}
+			if math.IsNaN(fsync) || m.WalFsyncAvgMs > fsync {
+				fsync = m.WalFsyncAvgMs
+			}
+		}
+		if memberInfo == "" && len(p.Members) > 0 {
+			learners := 0
+			for _, m := range p.Members {
+				if m.IsLearner {
+					learners++
+				}
+			}
+			memberInfo = fmt.Sprintf("%d members", len(p.Members))
+			if learners > 0 {
+				memberInfo += fmt.Sprintf(", %d learner", learners)
+			}
+			for _, st := range p.Statuses {
+				if st.Leader == st.MemberID {
+					for _, m := range p.Members {
+						if m.ID == st.MemberID {
+							leaderName = m.Name
+						}
+					}
+				}
+			}
+		}
+	}
+	var latest time.Time
+	for _, r := range a.snap.RKE2Snapshots {
+		if r.Status != "failed" && r.Created.After(latest) {
+			latest = r.Created
+		}
+	}
+	for _, p := range a.etcd {
+		if f, _, ok := p.LatestSnapshot(); ok && f.ModTime.After(latest) {
+			latest = f.ModTime
+		}
+	}
+	backup := styleDim.Render("none found")
+	if !latest.IsZero() {
+		backup = okText(time.Since(latest) <= a.cfg.Etcd.MaxBackupAge, age(latest)+" ago", age(latest)+" ago")
+	}
+	tw, n := tileWidths(a.width, 5)
+	gw := tw - 9
+	sw := tw - 4
+	if memberInfo == "" {
+		memberInfo = styleDim.Render("no member list")
+	}
+	if leaderName == "" {
+		leaderName = "-"
+	}
+	tiles := []string{
+		tile(tw, "Cluster", memberInfo, kv("leader", leaderName), kv("healthy", okText(healthy == probed && probed > 0, fmt.Sprintf("%d/%d", healthy, probed), fmt.Sprintf("%d/%d", healthy, probed)))),
+		tile(tw, "DB size / quota", gauge(dbPct, gw, thr.EtcdDBWarnPct, 95), sparkStyled(a.values("etcd.db:"+dbNode), sw, 100, thr.EtcdDBWarnPct, 95), styleDim.Render(humanBytes(dbSize)+" on "+dbNode)),
+		tile(tw, "Fragmentation", gauge(frag, gw, thr.EtcdFragWarnPct, 80), sparkStyled(a.values("etcd.frag:"+dbNode), sw, 100, thr.EtcdFragWarnPct, 80), styleDim.Render("defrag reclaims")),
+		tile(tw, "WAL fsync (worst)", pctStyle(fsync, int(thr.EtcdFsyncWarnMs), int(thr.EtcdFsyncWarnMs*3)).Render(fmtMs(fsync)), sparkStyled(a.values("etcd.fsync:"+dbNode), sw, 0, int(thr.EtcdFsyncWarnMs), int(thr.EtcdFsyncWarnMs*3)), styleDim.Render(fmt.Sprintf("warn > %.0fms", thr.EtcdFsyncWarnMs))),
+		tile(tw, "Latest backup", backup, styleDim.Render(fmt.Sprintf("%d cluster records", len(a.snap.RKE2Snapshots))), styleDim.Render("max age "+humanDur(a.cfg.Etcd.MaxBackupAge))),
+	}
+	return tileRow(tiles[:n])
+}
+
+func fmtMs(v float64) string {
+	if math.IsNaN(v) {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f ms", v)
 }
 
 func (a *App) etcdDetail() (string, []string) {
@@ -649,7 +745,21 @@ func (a *App) helmContent() content {
 		ids = append(ids, r.Namespace+"/"+r.Name)
 	}
 	h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "RELEASE", max: 36}, {title: "CHART", max: 36}, {title: "VERSION"}, {title: "APP"}, {title: "REV", right: true}, {title: "STATUS"}, {title: "UPDATED", right: true}, {title: "VALUES"}, {title: "LATEST"}}, rows)
-	hdr := []string{styleTitle.Render("Helm releases") + styleDim.Render(fmt.Sprintf("  %d in scope; enter shows the values applied. Update check: ", len(rows)))}
+	hsegs := []seg{{0, styleOK, "deployed"}, {0, styleCrit, "failed"}, {0, styleWarn, "other"}, {0, styleInfo, "outdated"}}
+	for _, r := range s.HelmReleases {
+		switch strings.ToLower(r.Status) {
+		case "deployed":
+			hsegs[0].n++
+		case "failed":
+			hsegs[1].n++
+		default:
+			hsegs[2].n++
+		}
+		if l, ok := a.helmLatest[r.Chart]; ok && l.Version != "" && helmcheck.CompareVersions(l.Version, r.Version) > 0 {
+			hsegs[3].n++
+		}
+	}
+	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope; enter shows the values applied. Update check: ", len(rows)))}
 	if a.helm != nil {
 		hdr[0] += styleOK.Render("on")
 	} else {
@@ -757,6 +867,9 @@ func (a *App) imagesContent() content {
 		if float64(ub)/1e9 >= a.cfg.Thresholds.UnusedImagesGB {
 			unusedTxt = styleWarn.Render(unusedTxt)
 		}
+		if total > 0 {
+			unusedTxt = bar(float64(ub)/float64(total), 8, styleWarn) + " " + unusedTxt
+		}
 		rows = append(rows, []string{n, fmt.Sprint(len(ni.Images)), humanBytes(float64(total)), fmt.Sprint(len(ni.Containers)), unusedTxt, tarTxt, fmt.Sprint(notInTar)})
 		ids = append(ids, n)
 	}
@@ -843,8 +956,13 @@ func (a *App) imagesDetail(node string) (string, []string) {
 
 func (a *App) securityContent() content {
 	counts := stig.Counts(a.stigRes)
+	ssegs := []seg{{float64(counts[stig.Pass]), styleOK, "pass"}, {float64(counts[stig.Fail]), styleCrit, "fail"}, {float64(counts[stig.Manual]), styleWarn, "manual"}, {float64(counts[stig.NA] + counts[stig.Unknown]), styleDim, "n/a"}}
+	score := nan()
+	if d := counts[stig.Pass] + counts[stig.Fail]; d > 0 {
+		score = float64(counts[stig.Pass]) * 100 / float64(d)
+	}
 	hdr := []string{
-		styleTitle.Render("STIG / CIS checks") + "  " + styleCrit.Render(fmt.Sprintf("%d fail", counts[stig.Fail])) + "  " + styleWarn.Render(fmt.Sprintf("%d manual", counts[stig.Manual])) + "  " + styleOK.Render(fmt.Sprintf("%d pass", counts[stig.Pass])) + "  " + styleDim.Render(fmt.Sprintf("%d n/a  %d unknown", counts[stig.NA], counts[stig.Unknown])),
+		styleTitle.Render("STIG / CIS checks") + "  " + stacked(40, ssegs) + "  " + legend(ssegs) + "  " + kv("automated pass rate", gauge(score, 10, 200, 200)),
 		styleDim.Render("IDs reference the DISA Kubernetes STIG (V-...) and CIS benchmarks; confirm the mapping against your STIG release. 'a' hides passing rules; enter shows detail + fix."),
 	}
 	var rows [][]string
@@ -915,18 +1033,36 @@ func (a *App) logsContent() content {
 		}
 		errs := colorCount(ls.Counts[logs.ClassError], "err", styleCrit)
 		warns := colorCount(ls.Counts[logs.ClassWarn], "warn", styleWarn)
-		startup := fmt.Sprintf("%d startup", ls.Counts[logs.ClassStartup])
+		mix := stacked(12, []seg{{float64(ls.Counts[logs.ClassError]), styleCrit, ""}, {float64(ls.Counts[logs.ClassWarn]), styleWarn, ""}, {float64(ls.Counts[logs.ClassStartup]), styleInfo, ""}, {float64(ls.Counts[logs.ClassInfo]), styleDim, ""}})
+		hist := styleCrit.Render(sparkline(errorsPerHour(ls, 24), 24, 0))
 		top := strings.Join(append(ls.TopPatterns(logs.ClassError, 2), ls.TopPatterns(logs.ClassWarn, 2)...), ", ")
-		rows = append(rows, []string{n, unit, fmt.Sprint(ls.Total), errs, warns, startup, up, top})
+		rows = append(rows, []string{n, unit, fmt.Sprint(ls.Total), mix, errs, warns, hist, up, top})
 		ids = append(ids, n)
 	}
-	h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "UNIT"}, {title: "LINES", right: true}, {title: "ERRORS"}, {title: "WARNINGS"}, {title: "STARTUP"}, {title: "STARTUP MARKER"}, {title: "TOP PATTERNS"}}, rows)
+	h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "UNIT"}, {title: "LINES", right: true}, {title: "MIX"}, {title: "ERRORS"}, {title: "WARNINGS"}, {title: "ERR/HOUR (24h)"}, {title: "STARTUP MARKER"}, {title: "TOP PATTERNS"}}, rows)
 	hdr = append(hdr, h)
 	c := content{header: hdr, selectable: true, empty: "no SSH data"}
 	for i, l := range lines {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
 	return c
+}
+
+// errorsPerHour buckets error-class matches into the last n hours.
+func errorsPerHour(ls *logs.Summary, n int) []float64 {
+	out := make([]float64, n)
+	now := time.Now()
+	for _, m := range ls.Matches {
+		if m.Class != logs.ClassError || m.Time.IsZero() {
+			continue
+		}
+		h := int(now.Sub(m.Time).Hours())
+		if h < 0 || h >= n {
+			continue
+		}
+		out[n-1-h]++
+	}
+	return out
 }
 
 func (a *App) logsDetail(node string) (string, []string) {
