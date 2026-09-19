@@ -1,0 +1,5 @@
+/khealth
+/khealth.exe
+/dist/
+*.log
+config.yaml

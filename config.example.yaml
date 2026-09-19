@@ -1,0 +1,62 @@
+# khealth configuration. Copy to ~/.config/k8s-health-tui/config.yaml
+# (or ./k8s-health-tui.yaml) - every key is optional, flags override the file.
+
+kubeconfig: ~/.kube/config        # default: $KUBECONFIG / ~/.kube/config
+context: ""                       # kubeconfig context (default: current-context)
+namespace: ""                     # initial namespace filter ("" = all); 'n' changes it live
+refresh: 30s                      # API refresh + light SSH collection interval
+heavy_every: 6                    # every Nth refresh also collects journal logs, image lists, tarball manifests (R forces it)
+
+ssh:
+  enabled: true
+  user: ubuntu                    # default: $USER
+  key: ~/.ssh/id_ed25519          # default: ssh-agent, then ~/.ssh/id_{ed25519,ecdsa,rsa}
+                                  # encrypted key: export KHT_SSH_PASSPHRASE; password auth: export KHT_SSH_PASSWORD
+  port: 22
+  sudo: true                      # runs the collection script with `sudo -n` (needs NOPASSWD)
+  timeout: 20s
+  address: InternalIP             # InternalIP | ExternalIP | Hostname (from the Node object)
+  hosts:                          # per-node address overrides (node name -> host[:port])
+    # cp-1: 192.168.1.10
+  bastion: ""                     # jump host: user@host[:port]
+  strict_host_key: true           # verify against known_hosts (false = accept anything)
+  known_hosts: ~/.ssh/known_hosts
+  concurrency: 8
+
+etcd:
+  backup_dirs: []                 # extra directories scanned for snapshot files on control-plane nodes (upstream clusters)
+    # - /var/backups/etcd
+  max_backup_age: 24h             # warn when the newest snapshot is older than this
+  endpoint: ""                    # override https://127.0.0.1:2379
+  ca_cert: ""                     # override certificate paths (external etcd / custom layouts)
+  client_cert: ""
+  client_key: ""
+
+helm:
+  check_updates: false            # look up newer chart versions (needs outbound HTTP)
+  artifacthub: true               # fall back to artifacthub.io search for charts not found in repos
+  repos:                          # name -> Helm repo URL; index.yaml is fetched hourly
+    # bitnami: https://charts.bitnami.com/bitnami
+    # rancher-stable: https://releases.rancher.com/server-charts/stable
+  timeout: 15s
+
+logs:
+  lines: 400                      # journalctl -n per node
+  since: "-24h"                   # journalctl --since
+
+thresholds:
+  disk_warn_pct: 80
+  disk_crit_pct: 90
+  inode_warn_pct: 80
+  mem_warn_pct: 85
+  mem_crit_pct: 95
+  cpu_warn_pct: 85
+  load_per_cpu_warn: 2.0
+  restart_warn: 5                 # pod restarts (within 24h) that raise a warning
+  pending_pod_age: 5m
+  cert_expiry_warn: 720h          # 30 days
+  clock_skew_warn: 5s
+  etcd_db_warn_pct: 80            # db size as % of quota-backend-bytes
+  etcd_fsync_warn_ms: 10
+  etcd_frag_warn_pct: 50          # (db size - in use) / db size
+  unused_images_gb: 5
