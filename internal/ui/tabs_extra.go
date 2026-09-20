@@ -785,6 +785,9 @@ func (a *App) addonsContent() content {
 			add("  " + kv("provisioning", kind))
 		}
 	}
+	// upgrade plans / provisioned clusters
+	a.upgradeSection(s, add, addRow)
+
 	// join topology: config.yaml server + rancher-system-agent are rke2/k3s
 	// concepts; the kubeadm tab shows the API endpoint the kubelets use
 	var rows [][]string
@@ -974,6 +977,16 @@ func (a *App) addonsDetail(id string) (string, []string) {
 		}
 		dump(ni.ConfigFiles)
 		return "Node configuration on " + name, out
+	case "plan":
+		if l := a.planDetail(a.snap, name); l != nil {
+			return "Upgrade plan " + name, l
+		}
+		return "", nil
+	case "provcluster":
+		if l := a.provClusterDetail(a.snap, name); l != nil {
+			return "Provisioned cluster " + name, l
+		}
+		return "", nil
 	case "helmchart":
 		for _, hc := range a.snap.HelmCharts {
 			if hc.Namespace+"/"+hc.Name != name {

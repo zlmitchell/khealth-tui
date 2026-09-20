@@ -87,6 +87,7 @@ type Snapshot struct {
 	VSphereConf     *VSphereConf
 	HelmReleases    []HelmRelease
 	Rancher         *RancherInfo
+	Upgrade         *UpgradeInfo // system-upgrade-controller plans; v2prov clusters on a management cluster (upgrade.go)
 
 	Errors []string
 
@@ -576,6 +577,14 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		u := c.upgradeInfo(ctx)
+		mu.Lock()
+		s.Upgrade = u
+		mu.Unlock()
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		res, err := c.cachedResources(ctx)
 		mu.Lock()
 		if err == nil {
@@ -584,6 +593,7 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		mu.Unlock()
 	}()
 	wg.Wait()
+	s.AttachUpgradeJobs()
 
 	// Helm release payloads (every revision of every release, gzipped and
 	// base64'd) are the largest secrets in most clusters. Re-read them only

@@ -197,6 +197,7 @@ func Evaluate(in Input) []Finding {
 
 	// ---- cloud provider / CSI (API) ----
 	evalCloud(in, add)
+	evalUpgrade(in, add)
 	evalNetwork(in, add)
 
 	// ---- nodes (SSH) ----
