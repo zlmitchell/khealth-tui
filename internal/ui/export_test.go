@@ -15,7 +15,7 @@ func TestExportKey(t *testing.T) {
 	a.cfg.Export.Dir = filepath.Join(t.TempDir(), "reports")
 	a.cfg.Context = "test-ctx"
 	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if !strings.HasPrefix(a.status, "exported khealth-test-ctx-") || !strings.Contains(a.status, ".xlsx") {
+	if !strings.HasPrefix(a.status, "exported khealth-test") || !strings.Contains(a.status, ".xlsx") {
 		t.Fatalf("status: %q", a.status)
 	}
 	entries, err := os.ReadDir(a.cfg.Export.Dir)

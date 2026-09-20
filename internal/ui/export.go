@@ -17,7 +17,7 @@ func (a *App) exportInput() export.Input {
 		Context: a.cfg.Context, Version: config.Version, Now: time.Now(),
 	}
 	if a.client != nil {
-		in.Server = a.client.Host
+		in.Server, in.Context = a.client.Host, a.client.Context
 	}
 	for _, r := range a.resolved {
 		in.Resolved = append(in.Resolved, export.ResolvedFinding{Finding: r.Finding, First: r.First, Resolved: r.Resolved})

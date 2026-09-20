@@ -26,6 +26,8 @@ import (
 	"k8s-health-tui/internal/bootstrap"
 	"k8s-health-tui/internal/config"
 	"k8s-health-tui/internal/etcd"
+	"k8s-health-tui/internal/export"
+	"k8s-health-tui/internal/headless"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/sshrun"
 	"k8s-health-tui/internal/ui"
@@ -86,6 +88,13 @@ func main() {
 	// top of the alt-screen; silence it while the TUI owns the terminal.
 	klog.SetOutput(io.Discard)
 	klog.LogToStderr(false)
+	if cfg.Export.Out != "" {
+		if err := exportOnce(cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if cfg.Perf.Pprof != "" {
 		// go tool pprof http://<addr>/debug/pprof/profile?seconds=30
 		go func() { _ = http.ListenAndServe(cfg.Perf.Pprof, nil) }()
@@ -100,6 +109,71 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// exportOnce is --export: one collection cycle (with the security scan and
+// the heavy tiers when asked), the report written where --export points,
+// no TUI. The same files `e` writes from inside the app.
+func exportOnce(cfg config.Config) error {
+	what := "findings"
+	if cfg.Export.Scan {
+		what += " + security scan"
+	}
+	if cfg.Export.Heavy {
+		what += " + heavy tiers"
+	}
+	fmt.Fprintf(os.Stderr, "collecting %s ...\n", what)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	res, err := headless.Run(ctx, cfg, headless.Options{Heavy: cfg.Export.Heavy, Scan: cfg.Export.Scan, Log: os.Stderr})
+	if err != nil {
+		return err
+	}
+	rep := export.Build(export.Input{Snap: res.Snap, Nodes: res.Input.Nodes, Findings: res.Findings, Stig: res.Stig, StigRun: cfg.Export.Scan, Context: res.Client.Context, Server: res.Client.Host, Version: config.Version, Now: time.Now()})
+	out := cfg.Export.Out
+	switch strings.ToLower(filepath.Ext(out)) {
+	case ".json":
+		f, err := os.Create(out)
+		if err != nil {
+			return err
+		}
+		if err := export.WriteJSON(f, rep); err != nil {
+			f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		fmt.Println("wrote", out)
+	case ".xlsx":
+		if err := export.WriteXLSX(out, rep); err != nil {
+			return err
+		}
+		fmt.Println("wrote", out)
+	default:
+		jsonPath, xlsxPath, err := export.WriteFiles(out, rep)
+		if err != nil {
+			return err
+		}
+		fmt.Println("wrote", jsonPath)
+		fmt.Println("wrote", xlsxPath)
+	}
+	fmt.Printf("%d nodes, %d findings (%d crit, %d warn, %d info)", rep.Cluster.Nodes, len(rep.Findings), rep.Summary.Crit, rep.Summary.Warn, rep.Summary.Info)
+	if rep.Security != nil {
+		fmt.Printf(", %d benchmarks: ", len(rep.Security.Benchmarks))
+		for i, b := range rep.Security.Benchmarks {
+			if i > 0 {
+				fmt.Print(", ")
+			}
+			score := "n/a"
+			if b.Score != nil {
+				score = fmt.Sprintf("%.1f%%", *b.Score)
+			}
+			fmt.Printf("%s %s (%d rules)", b.Sheet, score, len(b.Rules))
+		}
+	}
+	fmt.Println()
+	return nil
 }
 
 // bootstrapKubeconfig builds a kubeconfig over SSH when asked to

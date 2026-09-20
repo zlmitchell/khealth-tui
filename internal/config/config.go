@@ -53,9 +53,21 @@ type Config struct {
 	Bootstrap Bootstrap `yaml:"-"`
 }
 
-// Export configures the report files `e` writes (internal/export).
+// Export configures the report files `e` writes (internal/export) and the
+// one-shot --export mode.
 type Export struct {
 	Dir string `yaml:"dir"` // directory for khealth-<context>-<timestamp>.json/.xlsx (default: current directory)
+
+	// Out (--export): run one collection cycle without the TUI, write the
+	// report and exit. A directory gets both files under the standard name;
+	// a path ending in .json or .xlsx gets that one file.
+	Out string `yaml:"-"`
+	// Scan (--export-scan) includes the security scan in the one-shot export:
+	// the STIG/CIS rules from the API data and the OS STIG facts over SSH.
+	Scan bool `yaml:"-"`
+	// Heavy (--export-heavy) includes the heavy node tiers (journal, images,
+	// registry pull dry run) so their findings are in the report.
+	Heavy bool `yaml:"-"`
 }
 
 // Bootstrap holds the --bootstrap-* flags.
@@ -277,6 +289,9 @@ func Load(args []string) (Config, error) {
 		diag         = fs.Bool("diag", false, "run API/permission diagnostics (nodes/proxy, stats/summary, pods/exec, ...) and exit")
 		perfLog      = fs.String("perf-log", "", "append one JSON line per refresh cycle with the tool's own footprint (remote CPU, API bytes, local CPU) to this file")
 		exportDir    = fs.String("export-dir", "", "directory where 'e' writes the findings report as khealth-<context>-<timestamp>.json and .xlsx (default: current directory)")
+		exportOut    = fs.String("export", "", "no TUI: run one collection cycle, write the findings report and exit; a directory gets khealth-<context>-<timestamp>.json + .xlsx, a path ending in .json or .xlsx that one file")
+		exportScan   = fs.Bool("export-scan", false, "with --export: run the security scan too (STIG/CIS rules, OS STIG facts over SSH; one sheet per benchmark)")
+		exportHeavy  = fs.Bool("export-heavy", false, "with --export: collect the heavy node tiers too (journal, images, registry pull dry run)")
 		pprofAddr    = fs.String("pprof", "", "serve net/http/pprof on this address (e.g. 127.0.0.1:6060)")
 		noNice       = fs.Bool("no-nice", false, "do not renice/ionice the probe scripts on the nodes")
 		noBackoff    = fs.Bool("no-backoff", false, "do not skip cycles for nodes whose probes are slow or still running")
@@ -400,6 +415,12 @@ func Load(args []string) (Config, error) {
 			cfg.Perf.Log = *perfLog
 		case "export-dir":
 			cfg.Export.Dir = *exportDir
+		case "export":
+			cfg.Export.Out = *exportOut
+		case "export-scan":
+			cfg.Export.Scan = *exportScan
+		case "export-heavy":
+			cfg.Export.Heavy = *exportHeavy
 		case "pprof":
 			cfg.Perf.Pprof = *pprofAddr
 		case "no-nice":
