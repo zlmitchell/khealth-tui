@@ -1263,7 +1263,10 @@ func (a *App) imagesContent() content {
 			running[c.Image] = true
 		}
 	}
-	hdr = append(hdr, styleTitle.Render("Images")+"  "+kv("distinct images in pod specs", fmt.Sprint(len(running)))+styleDim.Render("  per-node inventory needs full SSH collection (R); enter for details"))
+	hdr = append(hdr, styleTitle.Render("Images")+"  "+kv("distinct images in pod specs", fmt.Sprint(len(running)))+styleDim.Render("  per-node inventory over SSH, collected while this tab is open; enter for details"))
+	if st := a.tierStatus(tierImages); st != "" {
+		hdr = append(hdr, styleDim.Render("  "+st))
+	}
 	var rows [][]string
 	var ids []string
 	for _, n := range sortedKeys(a.nodes) {
@@ -1273,8 +1276,8 @@ func (a *App) imagesContent() content {
 			ids = append(ids, n)
 			continue
 		}
-		if !ni.Heavy && len(ni.Images) == 0 {
-			rows = append(rows, []string{n, styleDim.Render("pending full collection")})
+		if ni.ImagesAt.IsZero() && len(ni.Images) == 0 {
+			rows = append(rows, []string{n, styleDim.Render("collecting the inventory (opens on this tab)")})
 			ids = append(ids, n)
 			continue
 		}
@@ -1552,6 +1555,9 @@ func (a *App) sshOffLine(what string) string {
 // hardeningContent shows per-node OS security facts (runtime vs boot config).
 func (a *App) hardeningContent() content {
 	hdr := []string{styleTitle.Render("Node OS hardening") + styleDim.Render("  each cell = runtime state / boot configuration; ") + styleWarn.Render("≠") + styleDim.Render(" marks a mismatch (a reboot changes the effective state). enter = node dashboard; the OS STIG sub-tab lists the rules.")}
+	if st := a.tierStatus(tierConfig); st != "" {
+		hdr = append(hdr, styleDim.Render("  "+st))
+	}
 	if l := a.sshOffLine("this view"); l != "" {
 		hdr = append(hdr, l)
 	}
@@ -1892,7 +1898,10 @@ func (a *App) logsContent() content {
 	if a.logsNode != "" {
 		return a.logLinesContent(a.logsNode)
 	}
-	hdr := []string{styleTitle.Render("Node logs") + styleDim.Render("  journal of the rke2/k3s supervisor or kubelet, containerd, rancher-system-agent plus rke2's kubelet.log and containerd.log, classified with the pattern knowledge base. R refreshes; enter opens a node's lines.")}
+	hdr := []string{styleTitle.Render("Node logs") + styleDim.Render("  journal of the rke2/k3s supervisor or kubelet, containerd, rancher-system-agent plus rke2's kubelet.log and containerd.log, classified with the pattern knowledge base. Collected while this tab is open (and hourly for the findings); R refreshes; enter opens a node's lines.")}
+	if st := a.tierStatus(tierJournal); st != "" {
+		hdr = append(hdr, styleDim.Render("  "+st))
+	}
 	var rows [][]string
 	var ids []string
 	for _, n := range sortedKeys(a.nodes) {

@@ -15,15 +15,21 @@ import (
 
 // Options controls what the node script collects.
 type Options struct {
-	Heavy         bool     // include images, tarball manifests and journal
+	// The demand tiers (docs/ARCHITECTURE.md §7): each is a guarded block
+	// of heavy.sh / preflight.sh that a tab asks for, R forces, or the
+	// background floor runs; Info.Merge* carries the previous result
+	// forward when a probe leaves one out.
+	Journal       bool     // journal + rke2 log files (Logs tab, log findings) and the fapolicyd denials
+	Images        bool     // crictl images/ps, tarball manifests, registry pull dry run (Images tab)
+	PVs           bool     // du of hostPath/local PV directories (Storage tab)
 	KubeletPID    int      // kubelet pid seen by the previous probe (skips the /proc scan while it is still the kubelet)
 	CPUSample     bool     // sample /proc/stat twice with a 1 s sleep (first contact only; later probes diff against the previous one)
-	Config        bool     // include the config tier of the base script: certs, sysctls, file modes, slow hardening commands, rke2/k3s config, manifests, registries (heavy cycles / first contact / R; carried forward otherwise by Info.MergeConfig)
+	Config        bool     // include the config tier of the base script: certs, sysctls, file modes, slow hardening commands, rke2/k3s config, manifests, registries (first contact / R / RKE2 and Security tabs; carried forward otherwise by Info.MergeConfig)
 	OSStig        bool     // include the OS STIG facts (sysctl -a, packages, units, mounts, sshd -T, audit rules, stat/find scans, config dumps)
 	LogLines      int      // journalctl -n
 	LogSince      string   // journalctl --since
 	KnownTarballs []string // "path|size|mtime" entries whose manifests are already known
-	PVPaths       []string // hostPath/local PV directories to measure with du (heavy)
+	PVPaths       []string // hostPath/local PV directories to measure with du (PVs tier)
 	VCenters      []string // vCenter host[:port]s from the vSphere CPI config, probed from the node (config tier)
 	// network probe targets (config tier): one "node=podIP" per node for the
 	// overlay ping, the CoreDNS pod IPs, the DNS and kubernetes service IPs
@@ -31,6 +37,30 @@ type Options struct {
 	DNSPods    []string
 	DNSIP      string
 	APISvcIP   string
+}
+
+// Heavy reports whether any demand tier is on (the heavy.sh part runs).
+func (o Options) Heavy() bool { return o.Journal || o.Images || o.PVs }
+
+// Tiers names the tiers on, for the perf log ("journal+images").
+func (o Options) Tiers() string {
+	var t []string
+	if o.Journal {
+		t = append(t, "journal")
+	}
+	if o.Images {
+		t = append(t, "images")
+	}
+	if o.PVs {
+		t = append(t, "pv")
+	}
+	if o.Config {
+		t = append(t, "config")
+	}
+	if o.OSStig {
+		t = append(t, "stig")
+	}
+	return strings.Join(t, "+")
 }
 
 var safeHost = regexp.MustCompile(`^[A-Za-z0-9._-]{1,253}(:[0-9]{1,5})?$`)
@@ -67,7 +97,8 @@ func Script(o Options) string {
 	base = strings.ReplaceAll(base, "__APISVC__", ipOrEmpty(o.APISvcIP))
 	b.WriteString(base)
 	pf := strings.ReplaceAll(preflightScript, "__CONFIG__", map[bool]string{true: "1", false: "0"}[o.Config])
-	pf = strings.ReplaceAll(pf, "__HEAVY__", map[bool]string{true: "1", false: "0"}[o.Heavy])
+	pf = strings.ReplaceAll(pf, "__IMAGES__", map[bool]string{true: "1", false: "0"}[o.Images])
+	pf = strings.ReplaceAll(pf, "__JOURNAL__", map[bool]string{true: "1", false: "0"}[o.Journal])
 	var vcs []string
 	for _, h := range o.VCenters {
 		if safeHost.MatchString(h) {
@@ -80,11 +111,14 @@ func Script(o Options) string {
 			b.WriteString(st.script())
 		}
 	}
-	if o.Heavy {
+	if o.Heavy() {
 		h := strings.ReplaceAll(heavyScript, "__LINES__", fmt.Sprint(lines))
 		h = strings.ReplaceAll(h, "__SINCE__", since)
 		h = strings.ReplaceAll(h, "__KNOWN__", known)
 		h = strings.ReplaceAll(h, "__PVPATHS__", strings.Join(paths, " "))
+		h = strings.ReplaceAll(h, "__IMAGES__", map[bool]string{true: "1", false: "0"}[o.Images])
+		h = strings.ReplaceAll(h, "__PVS__", map[bool]string{true: "1", false: "0"}[o.PVs])
+		h = strings.ReplaceAll(h, "__JOURNAL__", map[bool]string{true: "1", false: "0"}[o.Journal])
 		b.WriteString(h)
 	}
 	b.WriteString(perf.Footer)

@@ -78,7 +78,7 @@ func main() {
 		defer runner.Close()
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, Config: true, Heavy: *heavy, CPUSample: true}
+		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, Config: true, Journal: *heavy, Images: *heavy, PVs: *heavy, CPUSample: true}
 		setNet := func(o nodeinfo.Options, node string) nodeinfo.Options {
 			for _, t := range snap.PodTargetList() {
 				if !strings.HasPrefix(t, node+"=") {

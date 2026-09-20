@@ -613,7 +613,7 @@ func parseFapDeny(p *Preflight, s string) {
 }
 
 // mergePreflight carries the config tier of the preflight facts forward from
-// the previous probe (MergeConfig) and the heavy denials (MergeHeavy).
+// the previous probe (MergeConfig) and the tier facts (MergeTiers).
 func (p *Preflight) mergeConfig(prev *Preflight) {
 	if p.Probed || prev == nil || !prev.Probed {
 		return
@@ -627,7 +627,7 @@ func (p *Preflight) mergeConfig(prev *Preflight) {
 	p.Pulls, p.PullsProbed, p.CrictlMissing = pulls, pp, cm
 }
 
-func (p *Preflight) mergeHeavy(prev *Preflight) {
+func (p *Preflight) mergeTiers(prev *Preflight) {
 	if prev == nil {
 		return
 	}

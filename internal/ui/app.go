@@ -116,6 +116,7 @@ type App struct {
 	snapErr    string
 	nodes      map[string]*nodeinfo.Info
 	pending    map[string]bool
+	collecting map[string]string // node -> tiers of the probe in flight (perf log, tab status lines)
 	etcd       map[string]*etcd.Probe
 	etcdPend   map[string]bool
 	knownNodes []corev1.Node // last node list the API returned; used when the apiserver is down
@@ -147,6 +148,11 @@ type App struct {
 	// secScanned: the Security tab is opt-in. Nothing is evaluated or shown
 	// there until Shift+S runs a scan; after that the rules stay live.
 	secScanned bool
+	// stigDirty: an input of stig.Evaluate changed since it last ran (the
+	// snapshot, a node's config or OS STIG facts, an etcd probe). A light
+	// node probe answering does not set it, so the ~1,300 rules are not
+	// re-evaluated for data they never read (ARCHITECTURE.md §7.4).
+	stigDirty bool
 	// scan is the current (or last) Shift+S security scan: the checklist the
 	// tab shows until every node has answered
 	scan *secScan
@@ -364,6 +370,7 @@ func New(cfg config.Config) (*App, error) {
 		namespace:  cfg.Namespace,
 		nodes:      map[string]*nodeinfo.Info{},
 		pending:    map[string]bool{},
+		collecting: map[string]string{},
 		etcd:       map[string]*etcd.Probe{},
 		etcdPend:   map[string]bool{},
 		s3Reach:    map[string]etcd.S3Check{},
@@ -435,38 +442,29 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 	if !a.sshEnabled || a.runner == nil || snap == nil {
 		return nil
 	}
-	heavy := a.heavyNext || a.cycle%a.cfg.HeavyEvery == 0
+	// R, SSH re-enabled and the first cycle force every tier; otherwise the
+	// tiers the visible tab (or collect.always) wants and the background
+	// floor decide per node (collect.go)
+	force := a.heavyNext
 	a.heavyNext = false
+	full := force || a.cycle%a.cfg.HeavyEvery == 0 // the etcd probe's own slow sections
+	want := a.wanted()
 	var cmds []tea.Cmd
 	gen := a.gen
 	runner := a.runner
 	timeout := 3 * a.cfg.SSH.Timeout
-	if heavy {
-		timeout = 6 * a.cfg.SSH.Timeout
-	}
 	only := map[string]bool{}
 	for _, n := range a.cfg.SSH.Nodes {
 		only[n] = true
 	}
-	// hostPath/local PV directories (local-path-provisioner etc.) measured with du
-	var pvPaths []string
-	for i := range snap.PVs {
-		pv := &snap.PVs[i]
-		if pv.Spec.HostPath != nil {
-			pvPaths = append(pvPaths, pv.Spec.HostPath.Path)
-		} else if pv.Spec.Local != nil {
-			pvPaths = append(pvPaths, pv.Spec.Local.Path)
-		}
-	}
+	pvPaths := pvPathsOf(snap)
 	// apiserver down (power outage, quorum lost): keep probing the nodes we
 	// knew, or the ssh.hosts map, and run the etcd probe on all of them
 	nodes, offline := a.sshTargets(snap)
-	if a.fp.cur != nil {
-		a.fp.cur.Heavy = heavy
-	}
+	anyTier := false
 	// etcdctl over SSH is the fallback for the kubectl-exec probe: skip the
 	// three crictl execs per cycle while that probe answers and the API is up
-	etcdScript := etcd.Script(a.cfg.Etcd, heavy, offline || a.etcdExec == nil || a.etcdExec.Err != nil)
+	etcdScript := etcd.Script(a.cfg.Etcd, full, offline || a.etcdExec == nil || a.etcdExec.Err != nil)
 	for i := range nodes {
 		n := &nodes[i]
 		if len(only) > 0 && !only[n.Name] {
@@ -477,26 +475,18 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 		if a.skipProbe(name) != "" {
 			continue
 		}
-		opts := nodeinfo.Options{Heavy: heavy, LogLines: a.cfg.Logs.Lines, LogSince: a.cfg.Logs.Since, PVPaths: pvPaths}
-		if snap.VSphereConf != nil {
-			opts.VCenters = snap.VSphereConf.VCenters
-		}
-		setNetTargets(&opts, snap, name)
 		// The OS STIG facts (sysctl -a, package lists, find scans, config
 		// dumps) are the most expensive part and never ride on a refresh: they
-		// are the Shift+S scan's own staged probes (stigStageCmd). The config
-		// tier (certs, sysctls, config files, slow hardening commands) rides
-		// on the heavy cycles for the same reason.
-		prev := a.nodes[name]
-		opts.Config = heavy || prev == nil || !prev.ConfigProbed
-		opts.CPUSample = prev == nil || prev.Err != nil || prev.CPUStat.Total == 0
-		if prev != nil && prev.Err == nil {
-			opts.KubeletPID = prev.KubeletPID
+		// are the Shift+S scan's own staged probes (stigStageCmd).
+		journal, images, pvs, config := a.nodeTiers(a.nodes[name], want, force)
+		opts := a.nodeOptions(snap, name, pvPaths, journal, images, pvs, config)
+		t := timeout
+		if opts.Heavy() {
+			t = 6 * a.cfg.SSH.Timeout
+			anyTier = true
 		}
-		if prev != nil {
-			opts.KnownTarballs = prev.TarballKeys()
-		}
-		cmds = append(cmds, a.nodeProbeCmd(name, host, opts, timeout))
+		a.collecting[name] = opts.Tiers()
+		cmds = append(cmds, a.nodeProbeCmd(name, host, opts, t))
 		if offline || k8s.IsEtcdNode(nodes, n) {
 			a.etcdPend[name] = true
 			script := etcdScript
@@ -514,6 +504,9 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 				return etcdMsg{gen: gen, probe: p}
 			})
 		}
+	}
+	if a.fp.cur != nil {
+		a.fp.cur.Heavy = anyTier
 	}
 	return tea.Batch(cmds...)
 }
@@ -618,6 +611,7 @@ type stigStageMsg struct {
 // collection stage on every target node.
 func (a *App) startScan() tea.Cmd {
 	a.secScanned = true
+	a.stigDirty = true
 	if a.runner == nil || !a.sshEnabled {
 		a.scan = nil
 		a.recompute() // no node facts to wait for: the rules show at once
@@ -728,6 +722,7 @@ func (a *App) adoptSTIG(name string) {
 		return
 	}
 	ni.AdoptSTIG(sc.facts[name], sc.doneAt[name])
+	a.stigDirty = true
 }
 
 // sshTargetNames is sshTargets filtered by ssh.nodes, names only.
@@ -1008,9 +1003,11 @@ func (a *App) s3CheckCmd(node string) tea.Cmd {
 // that fetched it (classifyLogs), because it costs ~0.5 ms per line and
 // only changes when a heavy probe lands.
 func (a *App) recompute() {
-	a.stigRes = nil
-	if a.secScanned {
+	if !a.secScanned {
+		a.stigRes = nil
+	} else if a.stigDirty || a.stigRes == nil {
 		a.stigRes = stig.Evaluate(stig.Input{Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec})
+		a.stigDirty = false
 	}
 	a.findings = checks.Evaluate(checks.Input{
 		Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec, S3: a.s3, S3Reach: a.s3Reach, Logs: a.logSum, Stig: a.stigRes,
@@ -1173,8 +1170,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.snap = m.snap
 		a.refreshing = false
 		a.lastRefresh = time.Now()
+		a.stigDirty = true
 		a.cycle++
-		a.beginCycle(a.heavyNext || a.cycle%a.cfg.HeavyEvery == 0)
+		a.beginCycle(a.heavyNext)
 		// drop nodes that no longer exist - only when the API actually
 		// answered; an empty list during an outage must not erase what we know
 		if len(a.snap.Nodes) > 0 {
@@ -1203,11 +1201,14 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.setStatus(s)
 			}
 		}
-		var crdCmd tea.Cmd
+		var crdCmd, execCmd tea.Cmd
 		if a.onCRDs() {
 			crdCmd = a.crdCountCmd()
 		}
-		return a, tea.Batch(a.collectCmds(a.snap), a.helmCmd(a.snap), a.etcdExecCmd(a.snap), crdCmd, a.apiFailoverCmd(), a.tickCmd())
+		if a.etcdExecWanted(a.snap) {
+			execCmd = a.etcdExecCmd(a.snap)
+		}
+		return a, tea.Batch(a.collectCmds(a.snap), a.helmCmd(a.snap), execCmd, crdCmd, a.apiFailoverCmd(), a.tickCmd())
 	case apiFailoverMsg:
 		a.apiTrying = false
 		if m.seq != a.seq {
@@ -1238,7 +1239,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		m.info.CPUFromPrev(a.nodes[m.info.Node])
-		m.info.MergeHeavy(a.nodes[m.info.Node])
+		m.info.MergeTiers(a.nodes[m.info.Node])
 		m.info.MergeSTIG(a.nodes[m.info.Node])
 		m.info.MergeConfig(a.nodes[m.info.Node])
 		a.nodes[m.info.Node] = m.info
@@ -1246,6 +1247,10 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.logSum[m.info.Node] = m.logSum
 		}
 		delete(a.pending, m.info.Node)
+		delete(a.collecting, m.info.Node)
+		if m.opts.Config || m.opts.OSStig || m.info.Err != nil {
+			a.stigDirty = true
+		}
 		a.adoptSTIG(m.info.Node)
 		a.recordNodeProbe(m.info, m.opts)
 		a.noteProbeDuration(m.info.Node, m.info.Duration)
@@ -1262,6 +1267,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.probe.Merge(a.etcd[m.probe.Node])
 		a.etcd[m.probe.Node] = m.probe
+		a.stigDirty = true
 		delete(a.etcdPend, m.probe.Node)
 		a.rescueRefresh()
 		a.recordEtcdProbe(m.probe)
@@ -1301,6 +1307,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.etcdExec = m.probe
+		a.stigDirty = true
 		return a, a.scheduleRecompute()
 	case recomputeMsg:
 		a.fp.recomputeTimer = false
@@ -1382,10 +1389,7 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	for i, k := range tabKeys {
 		if key == k {
 			a.tab = tab(i)
-			if a.onCRDs() {
-				return a, a.crdCountCmd()
-			}
-			return a, nil
+			return a, a.onEnter()
 		}
 	}
 	if a.inInspect() {
@@ -1463,24 +1467,16 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.setDetail("Footprint: what khealth costs the cluster and this host", a.perfLines())
 	case "tab", "]":
 		a.tab = (a.tab + 1) % tabCount
-		if a.onCRDs() {
-			return a, a.crdCountCmd()
-		}
+		return a, a.onEnter()
 	case "shift+tab", "[":
 		a.tab = (a.tab + tabCount - 1) % tabCount
-		if a.onCRDs() {
-			return a, a.crdCountCmd()
-		}
+		return a, a.onEnter()
 	case "l", "right":
 		a.setSub(1)
-		if a.onCRDs() {
-			return a, a.crdCountCmd()
-		}
+		return a, a.onEnter()
 	case "h", "left":
 		a.setSub(-1)
-		if a.onCRDs() {
-			return a, a.crdCountCmd()
-		}
+		return a, a.onEnter()
 	case "n":
 		a.overlay = ovNamespace
 		a.nsInput.SetValue("")
@@ -1500,7 +1496,7 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.heavyNext = true
 		a.client.ResetDenied() // retry the API calls that were refused
 		if !a.refreshing {
-			a.setStatus("full refresh (logs, images, tarballs)")
+			a.setStatus("full refresh (every tier: journal, images, PV usage, config, tarballs)")
 			return a, a.refreshCmd()
 		}
 	case "S":

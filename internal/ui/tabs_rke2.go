@@ -28,6 +28,9 @@ func (a *App) rke2Content() content {
 		keys = driftKeysUpstream
 	}
 	hdr := []string{styleTitle.Render(a.tabName(tabRKE2)+" configuration") + "  " + kv("distribution", dist) + "  " + kv("version", s.Version) + styleDim.Render("   enter = full "+voc.ConfigName+", manifests and static pod dumps for the node")}
+	if st := a.tierStatus(tierConfig); st != "" {
+		hdr = append(hdr, styleDim.Render("  "+st))
+	}
 	if !rancher {
 		// upstream: the kubelet's KubeletConfiguration replaces config.yaml and
 		// kubeadm-config carries the cluster-wide settings (certSANs, subnets)

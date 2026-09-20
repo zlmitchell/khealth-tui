@@ -23,14 +23,14 @@ func TestFootprintCycleAccounting(t *testing.T) {
 	a.cycle = 1
 	a.beginCycle(true)
 	info := &nodeinfo.Info{Node: "cp-1", Duration: 2 * time.Second, OutBytes: 40000, Cost: perf.RemoteCost{User: 0.4, Sys: 0.1, Load1: 0.5, Parsed: true}}
-	a.recordNodeProbe(info, nodeinfo.Options{Heavy: true})
+	a.recordNodeProbe(info, nodeinfo.Options{Journal: true, Images: true, PVs: true})
 	a.recordEtcdProbe(&etcd.Probe{Node: "cp-1", Duration: time.Second, Cost: perf.RemoteCost{User: 0.2, Parsed: true}})
 	a.timedRecompute()
 	if a.fp.cur == nil || len(a.fp.cur.Probes) != 2 || a.fp.cur.Recomputes != 1 || !a.fp.cur.Heavy {
 		t.Fatalf("cycle record %+v", a.fp.cur)
 	}
 	lines := strings.Join(a.perfLines(), "\n")
-	for _, want := range []string{"27 requests", "3.0 MB in", "node+heavy", "0.50s", "etcd", "cp-1"} {
+	for _, want := range []string{"27 requests", "3.0 MB in", "node+journal+images+pv", "0.50s", "etcd", "cp-1"} {
 		if !strings.Contains(lines, want) {
 			t.Errorf("overlay missing %q:\n%s", want, lines)
 		}

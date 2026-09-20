@@ -8,9 +8,10 @@
 # findings in checks/preflight.go.
 #
 # The SWAPS and PFUNITS sections run every refresh (reads of /proc and /run);
-# everything inside __CONFIG__ runs with the config tier (heavy cycles, first
-# contact, R) and is carried forward by Info.MergeConfig; FAPDENY (ausearch)
-# and REGPULL (crictl pull dry run) run with the heavy tier. The registry
+# everything inside __CONFIG__ runs with the config tier (first contact, R,
+# the RKE2/Security tabs) and is carried forward by Info.MergeConfig;
+# REGPULL (crictl pull dry run) rides on the images tier and FAPDENY
+# (ausearch) on the journal tier (docs/ARCHITECTURE.md §7). The registry
 # probe and the pull dry run are the only network activity: parallel curls
 # capped at 6 s each, parallel pulls capped at 20 s each.
 #
@@ -250,7 +251,7 @@ EOF
 done
 fi
 fi
-if [ "__HEAVY__" = 1 ]; then
+if [ "__IMAGES__" = 1 ]; then
 sec REGPULL
 # crictl pull dry run: for every registry registries.yaml names (a mirrors:
 # key, or a configs: key images reference directly), one image the node
@@ -306,12 +307,17 @@ if [ -z "$CRICTL" ]; then echo "crictl=missing"; elif [ -n "$R" ]; then
     wait
   }
 fi
+fi
+if [ "__JOURNAL__" = 1 ]; then
 sec FAPDENY
 # fapolicyd denials land in the audit log as FANOTIFY records (resp=2); the
 # SYSCALL/PATH records of the same event name the program and the file.
 # count|last_epoch|exe|path, most frequent first.
 if { [ -L /run/systemd/units/invocation:fapolicyd.service ] || [ -e /run/systemd/units/invocation:fapolicyd.service ]; } && command -v ausearch >/dev/null 2>&1; then
-  timeout 20 ausearch -m FANOTIFY -ts today --raw 2>/dev/null | awk '
+  # --input-logs and </dev/null: ausearch reads events from stdin when stdin
+  # is a pipe, and this script arrives on stdin (sh -s) - it would swallow
+  # the rest of the probe
+  timeout 20 ausearch -m FANOTIFY -ts today --raw --input-logs </dev/null 2>/dev/null | awk '
     { if (match($0,/audit\([0-9.]+:[0-9]+\)/)) { id=substr($0,RSTART+6,RLENGTH-7); split(id,tt,":"); ts=tt[1]; sn=tt[2] } else next }
     /^type=FANOTIFY/ { if (match($0,/resp=[0-9]+/) && substr($0,RSTART+5,RLENGTH-5)=="2") { deny[sn]=1; when[sn]=ts } }
     /^type=SYSCALL/ { if (match($0,/exe="[^"]*"/)) exe[sn]=substr($0,RSTART+5,RLENGTH-6) }

@@ -245,9 +245,9 @@ func main() {
 		if cyc > 1 && *interval > 0 {
 			time.Sleep(*interval)
 		}
-		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, PVPaths: pvPaths, Heavy: cyc == 1 && *heavy, OSStig: cyc == 1 && *stig, Config: cyc == 1, CPUSample: cyc == 1}
+		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, PVPaths: pvPaths, Journal: cyc == 1 && *heavy, Images: cyc == 1 && *heavy, PVs: cyc == 1 && *heavy, OSStig: cyc == 1 && *stig, Config: cyc == 1, CPUSample: cyc == 1}
 		kind := "node"
-		if o.Heavy {
+		if o.Heavy() {
 			kind += "+heavy"
 		} else if o.Config {
 			kind += "+config"
@@ -256,7 +256,7 @@ func main() {
 			kind += "+stig"
 		}
 		timeout := 3 * cfg.SSH.Timeout
-		if o.Heavy {
+		if o.Heavy() {
 			timeout = 6 * cfg.SSH.Timeout
 		}
 		var wg sync.WaitGroup
@@ -289,7 +289,7 @@ func main() {
 					defer wg.Done()
 					c, cancel := context.WithTimeout(ctx, timeout)
 					defer cancel()
-					res := runner.Run(c, t.host, etcd.Script(cfg.Etcd, o.Heavy, o.Heavy))
+					res := runner.Run(c, t.host, etcd.Script(cfg.Etcd, o.Heavy(), o.Heavy()))
 					p := etcd.Parse(t.name, res.Stdout)
 					pr := probeResult{Node: t.name, Kind: "etcd", Cycle: cyc, Wall: res.Finished.Sub(res.Started), Cost: p.Cost, Out: len(res.Stdout), Script: res.ScriptSize}
 					if res.Err != nil && !strings.Contains(res.Stdout, "===END") {

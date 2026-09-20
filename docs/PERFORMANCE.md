@@ -117,11 +117,17 @@ is spread over 2.5 minutes.
   - **live** (every refresh, ~0.2 s wall / 0.2 s CPU): `/proc` reads, `df`,
     one `systemctl show` for every unit of interest, kubelet cmdline, cheap
     hardening facts;
-  - **config** (`heavy_every` cycles, first contact, `R`; ~1 s): certificates
-    (`openssl` per file), sysctls, file modes, rke2/k3s config and manifests,
-    registries, and the hardening commands that spawn real tools
-    (`needs-restarting` alone is 0.3 s of python);
-  - **heavy** (same cadence): journal, `crictl images/ps`, tarball manifests
+  - **config** (first contact, `R`, the RKE2 / Security tabs; ~1 s):
+    certificates (`openssl` per file), sysctls, file modes, rke2/k3s config
+    and manifests, registries, and the hardening commands that spawn real
+    tools (`needs-restarting` alone is 0.3 s of python);
+  - **journal / images / pv** (each while the tab that shows it is open, at
+    the `heavy_every` cadence, or `R`; the journal also hourly in the
+    background): journal, `crictl images/ps`, tarball manifests, `du` of
+    hostPath PVs. Parked on the Overview the steady state is the light and
+    etcd probes alone: on the 3-node RHEL 9 lab a light cycle is 9 KB /
+    0.4 s CPU per node against 373 KB / 3.9 s for every tier (which is what
+    every 6th cycle used to cost on every tab)
     (cached by path/size/mtime), `du` of hostPath PVs, the registry pull
     dry run (`crictl pull` by digest, ~1 s wall in parallel per registry,
     0.03 s CPU);
@@ -274,7 +280,10 @@ directories, awk instead of `stat` per file).
 
 ```yaml
 refresh: 30s        # everything scales with this
-heavy_every: 6      # config + heavy tiers every N refreshes
+heavy_every: 6      # cadence of a demand tier while its tab is open
+collect:
+  always: []        # pin tiers to every tab (journal | images | pv | config | etcd-exec)
+  journal_background: 1h
 ssh:
   nice: true        # renice/ionice the probes (--no-nice)
   backoff: true     # skip cycles for slow / still-running nodes (--no-backoff)

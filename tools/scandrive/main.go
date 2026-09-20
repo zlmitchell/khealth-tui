@@ -43,6 +43,7 @@ func main() {
 	timeout := bf.Duration("timeout", 6*time.Minute, "give up (and print the current view) after this long")
 	final := bf.String("final", "", "keys to press before the final dump instead of the OS STIG sub-tab (e.g. 7 for Addons)")
 	dump := bf.Duration("dump", 0, "instead of waiting for the scan: press -final this long after start, print the view and exit")
+	finalAt := bf.Duration("final-at", 0, "with -dump: press -final this long after start instead of at the dump (lets on-enter probes land before the view is printed)")
 	bf.Usage = func() {
 		fmt.Fprintf(bf.Output(), "Usage: scandrive [-press D] [-timeout D] -- [khealth flags]\n\n")
 		bf.PrintDefaults()
@@ -105,14 +106,23 @@ func main() {
 	pressed := false
 	last := ""
 	deadline := time.After(*timeout)
-	var dumpAt <-chan time.Time
+	var dumpAt, pressAt <-chan time.Time
 	if *dump > 0 {
 		dumpAt = time.After(*dump)
+		if *finalAt > 0 && *finalAt < *dump {
+			pressAt = time.After(*finalAt)
+		}
 	}
 	for {
 		select {
-		case <-dumpAt:
+		case <-pressAt:
+			pressAt = nil
 			pressFinal(update, *final)
+			fmt.Printf("%6.1fs pressed %q\n", time.Since(start).Seconds(), *final)
+		case <-dumpAt:
+			if pressAt != nil || *finalAt == 0 {
+				pressFinal(update, *final)
+			}
 			for len(msgs) > 0 {
 				update(<-msgs)
 			}

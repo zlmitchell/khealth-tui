@@ -313,7 +313,7 @@ func TestPreflightMerge(t *testing.T) {
 }
 
 func TestScriptIncludesPreflight(t *testing.T) {
-	s := Script(Options{Config: true, Heavy: true, VCenters: []string{"vc.corp:443", "bad host;rm", "vc2.corp"}})
+	s := Script(Options{Config: true, Journal: true, Images: true, PVs: true, VCenters: []string{"vc.corp:443", "bad host;rm", "vc2.corp"}})
 	if !strings.Contains(s, "for vc in vc.corp:443 vc2.corp; do") {
 		t.Errorf("vcenter list not substituted/sanitized")
 	}

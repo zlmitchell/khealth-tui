@@ -288,11 +288,11 @@ func TestMergeHeavy(t *testing.T) {
 }
 
 func TestScriptOptions(t *testing.T) {
-	s := Script(Options{Heavy: true, LogLines: 100, LogSince: "-2h", KnownTarballs: []string{"/a|1|2"}})
+	s := Script(Options{Journal: true, Images: true, PVs: true, LogLines: 100, LogSince: "-2h", KnownTarballs: []string{"/a|1|2"}})
 	if !strings.Contains(s, "-n 100") || !strings.Contains(s, "--since '-2h'") || !strings.Contains(s, "KNOWN='|/a|1|2|'") {
 		t.Errorf("script substitution failed")
 	}
-	s = Script(Options{Heavy: true, LogSince: "'; rm -rf /"})
+	s = Script(Options{Journal: true, LogSince: "'; rm -rf /"})
 	if !strings.Contains(s, "--since '-24h'") {
 		t.Errorf("unsafe since not sanitized")
 	}

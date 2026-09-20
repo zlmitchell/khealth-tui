@@ -192,10 +192,17 @@ not a host.
   `dzdo -S` when NOPASSWD is not granted. Encrypted keys: `KHT_SSH_PASSPHRASE`.
 
 Light collection runs every refresh (default 30s, ~0.2s wall / 0.2s CPU per
-node, parallel); the config tier (certificates, sysctls, file modes, rke2/k3s
-config, manifests, registries, slow hardening commands) and the heavy
-collection (journal, `crictl images`, tarball manifests) run every
-`heavy_every` refreshes or on `R` and are carried forward in between.
+node, parallel). The expensive tiers follow the visible tab
+([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §7): the journal is collected
+while the Logs tab is open (and hourly in the background for the log
+findings), the image inventories and registry pull dry run while Images or
+Addons is open, the `du` of hostPath PVs while Storage is open, the config
+tier (certificates, sysctls, file modes, rke2/k3s config, manifests,
+registries, slow hardening commands) on first contact and while RKE2 or
+Security is open - each refreshed every `heavy_every` refreshes while its
+tab stays open, fired at once when the tab is opened with stale facts,
+carried forward in between, and always shown with its age. `R` runs every
+tier on every node; `collect.always` pins tiers to every tab.
 Tarball manifests are cached by path/size/mtime so large `.tar.zst` files
 are only read once. The Security tab is opt-in: the STIG/CIS rules are not
 evaluated and the OS STIG facts (`sysctl -a`, package lists, `find` scans,
@@ -203,7 +210,7 @@ config dumps) are not collected until you press `Shift+S` there; later cycles
 reuse the facts until the next `Shift+S`.
 [docs/REFRESH.md](docs/REFRESH.md) lists every remote call and its cadence;
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the update loop, the
-tick, what a screen costs and the design for tab-driven collection.
+tick, what a screen costs and the tab-driven collection (§7).
 
 The tool is meant to be run against clusters that are already in trouble,
 so it measures and minimizes its own footprint: probes run under
@@ -446,5 +453,4 @@ Open:
 * image signature/SBOM presence
 * Helm: drift between HelmChartConfig and rendered values, charts pinned to deprecated APIs
 * export findings as JSON / Prometheus metrics for alerting (`tools/findings` prints them headlessly; no machine format yet)
-* tab-driven collection: demand tiers, `collect.always`, on-enter fetch, dirty-flag recompute ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §7)
 

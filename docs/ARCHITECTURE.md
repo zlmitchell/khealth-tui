@@ -191,6 +191,18 @@ background - are made of them, and they are cheap by design (REFRESH.md).
 
 ## 7. Design: collection follows the visible tab
 
+*Implemented 2026-09-20 (`internal/ui/collect.go`): tiers `journal`,
+`images`, `pv`, `config`, `etcd-exec`; `tabNeeds` / `collect.always` /
+the journal floor decide per node in `collectCmds`; `onEnter` fires stale
+tiers when a tab opens; every tier-showing tab prints its age; `stigRes`
+recomputes under a dirty flag. Two departures from the text below: the
+Addons tab also wants `images` (its registries table shows the pull dry
+run), and the config tier keeps the `heavy_every` cadence while RKE2 or
+Security stays open rather than "never again". While validating it a
+pre-existing bug surfaced: `ausearch` reads events from stdin when stdin
+is a pipe, so the FAPDENY section had been swallowing the rest of every
+heavy probe fed over `sh -s` (`--input-logs </dev/null` now).*
+
 ### 7.1 Tiers and who needs them
 
 Split collection into tiers a tab can declare a need for. The light tiers

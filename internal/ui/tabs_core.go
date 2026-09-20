@@ -291,7 +291,7 @@ func (a *App) nodesContent() content {
 			}
 			uptime = humanDur(ni.Uptime)
 			ssh = styleOK.Render("ok")
-			if ni.Heavy {
+			if !ni.JournalAt.IsZero() || !ni.ImagesAt.IsZero() {
 				ssh = styleOK.Render("ok+")
 			}
 		} else if ok && ni.Err != nil {
@@ -315,7 +315,7 @@ func (a *App) nodesContent() content {
 	h, lines := renderTable(a.width, []column{{title: "NAME"}, {title: "IP"}, {title: "ROLES", max: 20}, {title: "STATUS"}, {title: "AGE", right: true}, {title: "VERSION"}, {title: "CPU"}, {title: "CPU TREND"}, {title: "MEM"}, {title: "LOAD", right: true}, {title: "ROOT"}, {title: "DATA DISK"}, {title: "KUBELET"}, {title: "UPTIME"}, {title: "SSH"}}, rows)
 	cpuAvg, memAvg, _ := a.clusterUsage()
 	summary := styleTitle.Render("Nodes") + "  " + kv("cpu avg", gauge(cpuAvg, 12, thr.CPUWarnPct, 95)) + "  " + kv("mem avg", gauge(memAvg, 12, thr.MemWarnPct, thr.MemCritPct)) + "  " + kv("cpu trend", sparkStyled(a.values("cluster.cpu"), 20, 100, thr.CPUWarnPct, 95)) + "  " + kv("mem trend", sparkStyled(a.values("cluster.mem"), 20, 100, thr.MemWarnPct, thr.MemCritPct))
-	c := content{header: []string{summary, styleDim.Render("m = metrics-server value, ok+ = full collection done; trend = last refreshes; enter for details"), h}, selectable: true, empty: "no nodes"}
+	c := content{header: []string{summary, styleDim.Render("m = metrics-server value, ok+ = journal or image tiers collected; trend = last refreshes; enter for details"), h}, selectable: true, empty: "no nodes"}
 	for i, l := range lines {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
@@ -492,7 +492,7 @@ func (a *App) storageContent() content {
 	usage := checks.MergePVCUsage(s, a.nodes)
 	usedNote := "used = kubelet stats/summary, or over SSH: df of the mount / du of hostPath dirs (local-path: request not enforced)"
 	if len(usage) == 0 {
-		usedNote = "no usage data yet: kubelet reports only CSI/block volumes; hostPath/local-path dirs are measured with du on the full SSH cycle (R)"
+		usedNote = "no usage data yet: kubelet reports only CSI/block volumes; hostPath/local-path dirs are measured with du while this tab is open (R forces it)"
 		if s.PVCUsageErr != "" {
 			usedNote += "; stats/summary error: " + firstLine(s.PVCUsageErr)
 		}
@@ -569,11 +569,11 @@ func (a *App) storageContent() content {
 			case p.Status.Phase != corev1.ClaimBound:
 				used = styleDim.Render("not bound")
 			case mountedBy[key] == "" && (kind == "hostPath" || kind == "local"):
-				used = styleDim.Render("du on next full cycle (R)")
+				used = styleDim.Render("du runs while this tab is open")
 			case mountedBy[key] == "":
 				used = styleDim.Render("not mounted by a running pod")
 			case kind == "hostPath" || kind == "local":
-				used = styleDim.Render("du on next full cycle (R)")
+				used = styleDim.Render("du runs while this tab is open")
 			case strings.HasPrefix(kind, "csi:"):
 				used = styleDim.Render("mounted on " + mountedBy[key] + ", driver reported no stats yet")
 			default:
@@ -639,7 +639,11 @@ func (a *App) storageContent() content {
 		}
 	}
 
-	add("", styleTitle.Render("Node filesystems")+styleDim.Render("  (SSH; enter = node detail)"))
+	fsNote := "  (SSH; enter = node detail)"
+	if st := a.tierStatus(tierPV); st != "" && len(pvPathsOf(s)) > 0 {
+		fsNote += styleDim.Render("  hostPath/local " + st)
+	}
+	add("", styleTitle.Render("Node filesystems")+styleDim.Render(fsNote))
 	rows, rowIDs = nil, nil
 	for _, name := range sortedKeys(a.nodes) {
 		ni := a.nodes[name]

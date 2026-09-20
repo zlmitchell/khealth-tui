@@ -90,14 +90,8 @@ func (a *App) addProbe(p perf.ProbeRecord) {
 
 func (a *App) recordNodeProbe(info *nodeinfo.Info, opts nodeinfo.Options) {
 	kind := "node"
-	if opts.Heavy {
-		kind += "+heavy"
-	}
-	if opts.OSStig {
-		kind += "+stig"
-	}
-	if opts.Config && !opts.Heavy {
-		kind += "+config"
+	if t := opts.Tiers(); t != "" {
+		kind += "+" + t
 	}
 	p := perf.ProbeRecord{Node: info.Node, Kind: kind, WallMS: info.Duration.Milliseconds(), RemoteCPU: info.Cost.CPU(),
 		RemoteUser: info.Cost.User, RemoteSys: info.Cost.Sys, Load1: info.Cost.Load1, OutBytes: info.OutBytes, ScriptSize: info.ScriptSize}

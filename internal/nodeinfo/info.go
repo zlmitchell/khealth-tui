@@ -18,7 +18,14 @@ type Info struct {
 	Collected time.Time
 	Duration  time.Duration
 	Err       error
+	// Heavy: this probe carried at least one demand tier (cost accounting).
+	// JournalAt / ImagesAt / PVsAt say when each tier's facts were
+	// collected - by this probe or an earlier one they were carried forward
+	// from (MergeTiers); zero means never.
 	Heavy     bool
+	JournalAt time.Time
+	ImagesAt  time.Time
+	PVsAt     time.Time
 	STIGRun   bool // this probe included the OS STIG sections (cost accounting)
 	// ConfigProbed: the config tier (certs, sysctls, perms, slow hardening
 	// facts, rke2/k3s config, manifests, registries) is present, from this
@@ -554,11 +561,14 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	}
 
 	if _, ok := secs["CRICTL"]; ok {
-		info.Heavy = true
+		info.Heavy, info.ImagesAt = true, info.Collected
 		info.CrictlInfo = strings.TrimSpace(secs["CRICTL"])
 		info.Images = parseImages(secs["IMAGES"])
 		info.Containers = parseContainers(secs["CONTAINERS"])
 		info.Tarballs = parseTarballs(secs["TARBALLS"])
+	}
+	if _, ok := secs["PVDU"]; ok {
+		info.Heavy, info.PVsAt = true, info.Collected
 		info.PVDirs = map[string]int64{}
 		for _, l := range nonEmpty(secs["PVDU"]) {
 			if kb, path, ok := strings.Cut(l, "|"); ok {
@@ -567,6 +577,9 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 				}
 			}
 		}
+	}
+	if _, ok := secs["JOURNAL"]; ok {
+		info.Heavy, info.JournalAt = true, info.Collected
 		info.Journal = nonEmpty(secs["JOURNAL"])
 		info.LogFiles = parseDumps(secs["LOGFILES"])
 	}
@@ -1495,35 +1508,66 @@ func (i *Info) MergeConfig(prev *Info) {
 	}
 }
 
-// MergeHeavy copies heavy-mode results from a previous collection when the
-// current one did not include them.
-func (i *Info) MergeHeavy(prev *Info) {
-	if prev == nil || i.Heavy {
-		if prev != nil && i.Heavy {
-			// keep cached tarball manifests
-			byPath := map[string]Tarball{}
-			for _, t := range prev.Tarballs {
-				byPath[t.Path] = t
-			}
-			for idx := range i.Tarballs {
-				if i.Tarballs[idx].Cached {
-					if p, ok := byPath[i.Tarballs[idx].Path]; ok {
-						i.Tarballs[idx].Images = p.Images
-						i.Tarballs[idx].Parsed = p.Parsed
-					}
+// MergeTiers carries each demand tier's facts forward from the previous
+// collection when this probe did not include that tier: the images tier
+// (crictl inventories, tarballs, registry pull dry run), the pv tier (du of
+// hostPath PVs) and the journal tier (journal, log files, fapolicyd
+// denials) each keep their own age.
+func (i *Info) MergeTiers(prev *Info) {
+	if prev == nil {
+		return
+	}
+	if i.ImagesAt.IsZero() {
+		i.Images, i.Containers, i.Tarballs, i.CrictlInfo, i.ImagesAt = prev.Images, prev.Containers, prev.Tarballs, prev.CrictlInfo, prev.ImagesAt
+	} else {
+		// keep cached tarball manifests
+		byPath := map[string]Tarball{}
+		for _, t := range prev.Tarballs {
+			byPath[t.Path] = t
+		}
+		for idx := range i.Tarballs {
+			if i.Tarballs[idx].Cached {
+				if p, ok := byPath[i.Tarballs[idx].Path]; ok {
+					i.Tarballs[idx].Images = p.Images
+					i.Tarballs[idx].Parsed = p.Parsed
 				}
 			}
 		}
-		return
 	}
-	i.Images = prev.Images
-	i.PVDirs = prev.PVDirs
-	i.Containers = prev.Containers
-	i.Tarballs = prev.Tarballs
-	i.Journal = prev.Journal
-	i.LogFiles = prev.LogFiles
-	i.CrictlInfo = prev.CrictlInfo
-	i.Preflight.mergeHeavy(&prev.Preflight)
+	if i.PVsAt.IsZero() {
+		i.PVDirs, i.PVsAt = prev.PVDirs, prev.PVsAt
+	}
+	if i.JournalAt.IsZero() {
+		i.Journal, i.LogFiles, i.JournalAt = prev.Journal, prev.LogFiles, prev.JournalAt
+	}
+	if !i.ImagesAt.IsZero() || !i.PVsAt.IsZero() || !i.JournalAt.IsZero() {
+		i.Heavy = i.Heavy || prev.Heavy
+	}
+	i.Preflight.mergeTiers(&prev.Preflight)
+}
+
+// MergeHeavy is MergeTiers under its former name.
+func (i *Info) MergeHeavy(prev *Info) { i.MergeTiers(prev) }
+
+// TierAge returns when a demand tier ("journal", "images", "pv") was last
+// collected for this node; zero when never.
+func (i *Info) TierAge(tier string) time.Time {
+	if i == nil {
+		return time.Time{}
+	}
+	switch tier {
+	case "journal":
+		return i.JournalAt
+	case "images":
+		return i.ImagesAt
+	case "pv":
+		return i.PVsAt
+	case "config":
+		if i.ConfigProbed {
+			return i.ConfigCollected
+		}
+	}
+	return time.Time{}
 }
 
 // parseNetwork reads the NETLINK section (every probe) and the NETPROBE

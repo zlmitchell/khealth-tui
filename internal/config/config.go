@@ -27,9 +27,11 @@ type Config struct {
 	Context    string        `yaml:"context"`
 	Namespace  string        `yaml:"namespace"`
 	Refresh    time.Duration `yaml:"refresh"`
-	// HeavyEvery controls how often (in refresh cycles) the expensive SSH
-	// collection (journal logs, image inventories, tarball manifests) runs.
+	// HeavyEvery is the cadence (in refresh cycles) of a demand tier while
+	// a tab shows it or collect.always pins it: journal, image inventories,
+	// PV du, config facts (docs/ARCHITECTURE.md §7).
 	HeavyEvery int        `yaml:"heavy_every"`
+	Collect    Collect    `yaml:"collect"`
 	SSH        SSH        `yaml:"ssh"`
 	Etcd       Etcd       `yaml:"etcd"`
 	Helm       Helm       `yaml:"helm"`
@@ -158,6 +160,23 @@ type Logs struct {
 	Since string `yaml:"since"` // journalctl --since value, e.g. "-24h"
 }
 
+// Collect controls the demand tiers of the SSH collection. By default a
+// tier is gathered only while the tab that shows it is open (at the
+// heavy_every cadence), on R, and - for the journal - on a slow
+// background floor so the log findings stay honest on the Overview.
+type Collect struct {
+	// Always pins tiers to every tab: journal | images | pv | config |
+	// etcd-exec. [journal, images, pv, config, etcd-exec] is the pre-tab-driven
+	// behaviour (every tier every heavy_every cycles on every tab).
+	Always []string `yaml:"always"`
+	// JournalBackground is the floor for the journal tier when no tab shows
+	// it and it is not pinned; 0 disables the floor.
+	JournalBackground time.Duration `yaml:"journal_background"`
+}
+
+// CollectTiers are the tier names collect.always accepts.
+var CollectTiers = []string{"journal", "images", "pv", "config", "etcd-exec"}
+
 // Thresholds hold the numeric limits used by the health checks.
 type Thresholds struct {
 	DiskWarnPct     int           `yaml:"disk_warn_pct"`
@@ -182,6 +201,7 @@ func Default() Config {
 	return Config{
 		Refresh:    30 * time.Second,
 		HeavyEvery: 6,
+		Collect:    Collect{JournalBackground: time.Hour},
 		SSH: SSH{
 			Enabled:       true,
 			Port:          22,
@@ -427,6 +447,19 @@ func Load(args []string) (Config, error) {
 	}
 	if cfg.HeavyEvery < 1 {
 		cfg.HeavyEvery = 1
+	}
+	for i, t := range cfg.Collect.Always {
+		t = strings.ToLower(strings.TrimSpace(t))
+		known := false
+		for _, k := range CollectTiers {
+			if t == k {
+				known = true
+			}
+		}
+		if !known {
+			return cfg, fmt.Errorf("collect.always: unknown tier %q (one of %s)", cfg.Collect.Always[i], strings.Join(CollectTiers, ", "))
+		}
+		cfg.Collect.Always[i] = t
 	}
 	cfg.SSH.Become = strings.ToLower(strings.TrimSpace(cfg.SSH.Become))
 	switch cfg.SSH.Become {
