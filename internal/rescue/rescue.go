@@ -94,6 +94,7 @@ type Facts struct {
 	EtcdUser    bool
 	// kubeadm
 	Manifest       string
+	APIEndpoint    string // server: of admin.conf (the controlPlaneEndpoint, or this node)
 	MemberName     string
 	PeerURL        string
 	Image          string
@@ -240,7 +241,7 @@ func (p *Plan) render(name string, n Node, vars map[string]string) string {
 	body, _ := scripts.ReadFile("scripts/" + name + ".sh")
 	s := string(common) + string(body)
 	all := map[string]string{
-		"KIND": string(p.Kind), "DD": p.DD, "DATADIR": p.dataDir(n), "STAMP": p.Stamp, "RESCUE": n.Facts.Rescue,
+		"KIND": string(p.Kind), "DD": p.DD, "DATADIR": p.dataDir(n), "STAMP": p.Stamp, "RESCUE": n.Facts.Rescue, "IP": n.IP,
 		"ROLE": "other", "SNAP": "", "S3": "0", "API": "0", "PROMOTE": "0", "JOIN": "", "OWNER": "",
 		"NAME": "", "PEER": "", "IMAGE": "", "INITIAL_CLUSTER": "", "LOG": "", "EXIT": "", "DIR": "", "FORCE": "0", "SINCE": "0", "NODE": "",
 	}
@@ -437,6 +438,8 @@ func parseFacts(out string) Facts {
 			f.EtcdUser = v != "none" && v != ""
 		case "manifest":
 			f.Manifest = v
+		case "api_endpoint":
+			f.APIEndpoint = v
 		case "name":
 			f.MemberName = v
 		case "peer":
@@ -484,6 +487,15 @@ func (p *Plan) assess() []string {
 		}
 		if len(t.Tools) == 0 {
 			w = append(w, "no etcdutl/etcdctl/ctr/podman on "+p.Target.Name+": nothing can run 'snapshot restore' there (install etcdutl)")
+		}
+		if ep := peerHost(t.APIEndpoint, ""); ep != "" && ep != p.Target.IP && ep != "127.0.0.1" && ep != "localhost" {
+			who := "an address outside the control plane (a VIP or load balancer: it must route to " + p.Target.Name + " once its apiserver is back, or the target cannot reach the API until the endpoint node has rejoined)"
+			for _, o := range p.Others {
+				if o.IP == ep || peerHost(o.Facts.PeerURL, "") == ep {
+					who = o.Name + ", a follower that stays stopped until it rejoins"
+				}
+			}
+			w = append(w, fmt.Sprintf("the API endpoint of %s is %s: %s. kubectl, kube-proxy and the CNI pods on %s use it, so the CNI agent is restarted only after every follower is back, and left alone if the endpoint still does not answer", p.Target.Name, t.APIEndpoint, who, p.Target.Name))
 		}
 		for _, o := range p.Others {
 			if o.Facts.MemberName == "" || o.Facts.PeerURL == "" {
@@ -865,13 +877,23 @@ func (p *Plan) buildKubeadm() {
 		}
 		return p.waitStatus(ctx, s, t, 1, true, false, "")
 	})
-	p.add("Restart the CNI agent (it drops the local pod routes while the apiserver comes up)", t, func(ctx context.Context, s *Step) error {
-		_, err := p.exec(ctx, s, t, "cni_restart", map[string]string{"NODE": t.Name}, 4*time.Minute, "cni=ok")
-		return err
-	})
 	for i, o := range p.Others {
 		p.rejoinSteps(t, o, i+2, 1+len(p.Others))
 	}
+	// only once every apiserver is back: the CNI pod reaches the API through
+	// the service VIP, and kube-proxy on the target still maps it to every
+	// apiserver (its own kubeconfig is pinned to the controlPlaneEndpoint,
+	// which may be a follower that is still stopped) - a fresh calico
+	// installer fails on the first refused connection and backs off
+	p.add("Restart the CNI agent (it drops the local pod routes while the apiserver comes up)", t, func(ctx context.Context, s *Step) error {
+		out, err := p.exec(ctx, s, t, "cni_restart", map[string]string{"NODE": t.Name}, 4*time.Minute, "cni=ok")
+		for _, l := range strings.Split(out, "\n") {
+			if strings.HasPrefix(l, "cni_skipped=") {
+				p.note("the CNI agent on " + t.Name + " was NOT restarted: " + strings.TrimPrefix(l, "cni_skipped="))
+			}
+		}
+		return err
+	})
 }
 
 func (p *Plan) confDir() string { return "/etc/rancher/" + string(p.Kind) }

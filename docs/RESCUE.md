@@ -88,7 +88,10 @@ absent (a previous cluster-reset never followed by a normal start), the
 config's `server:`, `cluster-init`, `profile`, `etcd-s3` keys, the `etcd`
 user. kubeadm: the etcd manifest's `--name`, `--initial-advertise-peer-urls`,
 image and `--initial-cluster`, a kube-apiserver manifest, `crictl` and a CRI
-socket, which of `etcdutl` / `etcdctl` / `ctr` / `podman` exist. The restore
+socket, which of `etcdutl` / `etcdctl` / `ctr` / `podman` exist, and the
+API endpoint `admin.conf` uses (the `controlPlaneEndpoint`): when it is not
+the target itself the confirmation warns which follower or external address
+it is, since kubectl, kube-proxy and the CNI pods on the target depend on it. The restore
 target also checks the snapshot file exists and is readable. Rejoin also
 runs `status.sh` on the healthy member and refuses when it does not see
 quorum and a leader.
@@ -122,21 +125,21 @@ Servers: T = the restore source, F1..Fn = the others, in name order.
 
 | # | node | step | what runs | checked |
 |---|---|---|---|---|
-| 1-2 | F1..Fn, T | Stop | `stop.sh`: `etcd.yaml` and `kube-apiserver.yaml` moved out of `/etc/kubernetes/manifests` to `/etc/kubernetes/*.yaml.off`, containers waited for / stopped | no etcd or apiserver container |
+| 1-2 | F1..Fn, T | Stop | `stop.sh`: `etcd.yaml`, `kube-apiserver.yaml`, `kube-controller-manager.yaml` and `kube-scheduler.yaml` moved out of `/etc/kubernetes/manifests` to `/etc/kubernetes/*.yaml.off`, containers waited for / stopped (the controllers too: left running on a follower they would reconnect to the restored apiserver with caches and watches from resource versions newer than the restored data) | no etcd, apiserver or controller container |
 | 3 | all | Move etcd data | `backup.sh`: `mv /var/lib/etcd <rescue>/etcd` (contents only when it is a mount point) | |
 | 4 | T | Restore as a one-member cluster | `restore_kubeadm.sh`: `etcdutl snapshot restore <snapshot> --data-dir /var/lib/etcd --name <name> --initial-cluster <name>=<peer> --initial-advertise-peer-urls <peer>` - host `etcdutl`, else `etcdctl`, else the pod's etcd image through `ctr -n k8s.io run` (containerd) or `podman run` with the data dir's parent and the snapshot's directory bind-mounted; under `systemd-run --wait` | `member/snap` and `member/wal` present |
 | 5 | T | Set data dir owner/mode | `perms.sh` | |
 | 6 | T | Start etcd | `start.sh`: `etcd.yaml` back into the manifests dir | |
 | 7 | T | Wait for etcd | `status.sh` | one member, healthy, leader |
-| 8 | T | Start kube-apiserver, restart controllers and kubelet | `unpark_api.sh`: `kube-apiserver.yaml` back; kube-controller-manager and kube-scheduler containers stopped (kubelet recreates them); `systemctl restart kubelet` - none may keep working from resource versions newer than the restored data | `/readyz` |
-| 9 | T | Restart the CNI agent | `cni_restart.sh` | |
-| 10 | T | Register Fi as a learner member | `member_add.sh`: a stale member with Fi's name or peer URL removed, `etcdctl member add <name> --peer-urls=<peer> --learner`; the printed `ETCD_INITIAL_CLUSTER` kept | |
-| 11 | Fi | Patch the etcd manifest | `patch_manifest.sh`: `--initial-cluster=<that list>`, `--initial-cluster-state=existing` in the parked manifest (copy kept in the rescue dir) | |
-| 12 | Fi | Start etcd | `start.sh` | |
-| 13 | T | Wait until Fi has synced and is promoted | `status.sh` polled with promotion: `etcdctl member promote` retried every poll until etcd accepts it | member count = i+1, no learner, all healthy, one leader |
-| 14 | Fi | Start kube-apiserver, restart controllers and kubelet | `unpark_api.sh` | `/readyz` on Fi |
-| 15 | T | Check etcd status | `status.sh` | |
-| | | steps 10-15 repeat for every follower | | |
+| 8 | T | Start kube-apiserver, restart controllers and kubelet | `unpark_api.sh`: `kube-apiserver.yaml`, `kube-controller-manager.yaml` and `kube-scheduler.yaml` back (a controller manifest that was never parked has its container stopped instead, kubelet recreates it); `systemctl restart kubelet` - none may keep working from resource versions newer than the restored data | `/readyz` |
+| 9 | T | Register Fi as a learner member | `member_add.sh`: a stale member with Fi's name or peer URL removed, `etcdctl member add <name> --peer-urls=<peer> --learner`; the printed `ETCD_INITIAL_CLUSTER` kept | |
+| 10 | Fi | Patch the etcd manifest | `patch_manifest.sh`: `--initial-cluster=<that list>`, `--initial-cluster-state=existing` in the parked manifest (copy kept in the rescue dir) | |
+| 11 | Fi | Start etcd | `start.sh` | |
+| 12 | T | Wait until Fi has synced and is promoted | `status.sh` polled with promotion: `etcdctl member promote` retried every poll until etcd accepts it | member count = i+1, no learner, all healthy, one leader |
+| 13 | Fi | Start kube-apiserver, restart controllers and kubelet | `unpark_api.sh` | `/readyz` on Fi |
+| 14 | T | Check etcd status | `status.sh` | |
+| | | steps 9-14 repeat for every follower | | |
+| 15 | T | Restart the CNI agent | `cni_restart.sh`, only now: a fresh CNI pod reaches the API through the service VIP, which kube-proxy on T still maps to every apiserver it last saw - kube-proxy itself follows the kubeconfig's `controlPlaneEndpoint`, which may be a follower (this cluster: 224) and is down until that follower is back. `kubectl` with `admin.conf`, falling back to T's own apiserver `https://<T ip>:6443` when the endpoint does not answer; the endpoint is probed (`/readyz`) before the pod is deleted and the pod is left alone (with a note) when it does not answer - a restart then would strand the node without CNI | |
 | 16 | T | Verify the cluster | `status.sh` | |
 | 17 | T | Take a fresh snapshot | `etcdctl snapshot save` into the directory the restored snapshot came from (through the etcd container's etcdctl when the host has none, via the data dir) | |
 
@@ -150,7 +153,7 @@ leader when there is one).
 | 1 | N | Stop | `stop.sh` | |
 | 2 | N | Move etcd data | `backup.sh` | |
 | 3 | A | Remove the stale member entry for N (rke2/k3s) | `member_remove.sh`: `etcdctl member remove` of every member whose peer URL is N's address - rke2 refuses a join while a member of that name exists ("duplicate node name found") | |
-| 4.. | | the rejoin steps of the restore (rke2/k3s 9-12, kubeadm 10-15) with A as T | | member count back to what A saw before |
+| 4.. | | the rejoin steps of the restore (rke2/k3s 9-12, kubeadm 9-14) with A as T | | member count back to what A saw before |
 | last | A | Verify the cluster | `status.sh` | all healthy, one leader, apiserver up |
 
 ## What is left behind
@@ -193,8 +196,20 @@ leader when there is one).
   cis`): single node; three servers restoring from each of the three
   (cluster-init node and joined nodes), rejoin of a stopped cluster-init
   node through a follower.
-- kubeadm v1.35.8, Ubuntu 24.04 STIG: single node (restore through `ctr`
-  and the etcd image). Multi-node kubeadm: unit-tested against a simulated
-  cluster, not yet run live.
+- kubeadm v1.35.8, Ubuntu 24.04 STIG (etcd 3.6.6, canal, no host
+  etcdutl: restore through `ctr` and the pod's etcd image): single node;
+  three stacked control-plane nodes with `controlPlaneEndpoint` set to the
+  init node's address (`hardening/ubuntu2404/README.md`, *Adding
+  control-plane nodes*) restoring from the endpoint node (184 s) and from a
+  follower (104 s), and a rejoin of a node whose etcd data was removed under
+  the running static pod (41 s). Found and fixed on those runs: the CNI
+  restart on a target that is not the endpoint node stranded it (Calico's
+  installer dies on the first refused connection through the service VIP,
+  which kube-proxy - pinned to the stopped endpoint - still maps to every
+  apiserver), hence the step's new position and endpoint check; kubelet
+  recreates a moved-aside `/var/lib/etcd` as 0755 before etcd starts
+  (`start.sh` creates it 0700 first); the followers' controller-manager and
+  scheduler are parked with the apiserver instead of being left running
+  against the restored data.
 - Every scenario proven by objects created after the snapshot being gone
   (restore) or still present (rejoin), all nodes Ready, all pods Running.

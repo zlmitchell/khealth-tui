@@ -94,6 +94,7 @@ func (c *fakeCluster) handle(n *fakeNode) sshtest.Handler {
 				say("peer=https://%s:2380", n.ip)
 				say("image=registry.k8s.io/etcd:3.5.15-0")
 				say("tool=ctr")
+				say("api_endpoint=https://10.0.0.1:6443") // the controlPlaneEndpoint is cp-1
 			} else {
 				say("rescue_dir=/var/lib/rancher/rke2/server/etcd-rescue-x")
 				say("bin=/usr/local/bin/rke2")
@@ -247,6 +248,7 @@ func (c *fakeCluster) handle(n *fakeNode) sshtest.Handler {
 			say("started=ok")
 		case strings.Contains(stdin, `say "unpark=ok"`):
 			n.apiUp = true
+			c.note("%s unpark", n.name)
 			say("unpark=ok")
 		case strings.Contains(stdin, `say "cleanup=ok"`):
 			n.dropIn = false
@@ -472,6 +474,9 @@ func TestKubeadmRestore(t *testing.T) {
 			t.Errorf("missing step %q in\n%s", w, strings.Join(titles, "\n"))
 		}
 	}
+	if w := strings.Join(p.Warnings, " "); !strings.Contains(w, "the API endpoint of cp-2 is https://10.0.0.1:6443: cp-1, a follower that stays stopped until it rejoins") {
+		t.Errorf("no endpoint warning in %q", w)
+	}
 	last, _ := run(t, p)
 	if last.Err != nil {
 		t.Fatalf("rescue failed: %v\n%s", last.Err, strings.Join(c.log, "\n"))
@@ -485,6 +490,15 @@ func TestKubeadmRestore(t *testing.T) {
 	for _, n := range []string{"cp-1", "cp-2", "cp-3"} {
 		if !c.nodes[n].apiUp {
 			t.Errorf("%s apiserver not brought back", n)
+		}
+	}
+	// the CNI restart on the target waits for every apiserver: kube-proxy
+	// there is pinned to the controlPlaneEndpoint and still maps the service
+	// VIP to the stopped followers until they are back
+	order := strings.Join(c.log, "\n")
+	for _, seq := range [][2]string{{"cp-3 unpark", "cp-2 cni restart"}, {"cp-2 cni restart", "cp-2 snapshot"}} {
+		if strings.Index(order, seq[0]) > strings.Index(order, seq[1]) {
+			t.Errorf("%q should precede %q:\n%s", seq[0], seq[1], order)
 		}
 	}
 }

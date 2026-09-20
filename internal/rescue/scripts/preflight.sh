@@ -48,6 +48,9 @@ case "$KIND" in
     say "image=$(grep -E '^[[:space:]]*image:' "$M" 2>/dev/null | head -1 | awk '{print $2}')"
     say "initial_cluster=$(grep -o -- '--initial-cluster=[^ "]*' "$M" 2>/dev/null | head -1 | cut -d= -f2-)"
     [ -f $MANIFESTS/kube-apiserver.yaml ] || [ -f $PARKED/kube-apiserver.yaml.off ] || die "no kube-apiserver manifest: not a control-plane node"
+    # where kubectl, kube-proxy and the CNI pods reach the API: the
+    # controlPlaneEndpoint (another node, a VIP, a load balancer) or this node
+    say "api_endpoint=$(grep -m1 -E '^[[:space:]]*server:' /etc/kubernetes/admin.conf 2>/dev/null | awk '{print $2}')"
     for t in etcdutl etcdctl ctr podman; do command -v $t >/dev/null 2>&1 && say "tool=$t"; done
     [ -n "$CRICTL" ] || die "crictl not found"
     [ -n "$CRI_EP" ] || die "no CRI socket found (containerd, cri-o, cri-dockerd)"

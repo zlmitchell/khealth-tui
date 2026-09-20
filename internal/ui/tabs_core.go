@@ -296,10 +296,10 @@ func (a *App) nodesContent() content {
 				}
 			}
 		}
-		rows = append(rows, []string{n.Name, roles, status, n.Status.NodeInfo.KubeletVersion, cpu, trend, mem, load, root, data, kubelet, uptime, ssh})
+		rows = append(rows, []string{n.Name, a.nodeAddress(n), roles, status, age(n.CreationTimestamp.Time), n.Status.NodeInfo.KubeletVersion, cpu, trend, mem, load, root, data, kubelet, uptime, ssh})
 		ids = append(ids, n.Name)
 	}
-	h, lines := renderTable(a.width, []column{{title: "NAME"}, {title: "ROLES", max: 20}, {title: "STATUS"}, {title: "VERSION"}, {title: "CPU"}, {title: "CPU TREND"}, {title: "MEM"}, {title: "LOAD", right: true}, {title: "ROOT"}, {title: "DATA DISK"}, {title: "KUBELET"}, {title: "UPTIME"}, {title: "SSH"}}, rows)
+	h, lines := renderTable(a.width, []column{{title: "NAME"}, {title: "IP"}, {title: "ROLES", max: 20}, {title: "STATUS"}, {title: "AGE", right: true}, {title: "VERSION"}, {title: "CPU"}, {title: "CPU TREND"}, {title: "MEM"}, {title: "LOAD", right: true}, {title: "ROOT"}, {title: "DATA DISK"}, {title: "KUBELET"}, {title: "UPTIME"}, {title: "SSH"}}, rows)
 	cpuAvg, memAvg, _ := a.clusterUsage()
 	summary := styleTitle.Render("Nodes") + "  " + kv("cpu avg", gauge(cpuAvg, 12, thr.CPUWarnPct, 95)) + "  " + kv("mem avg", gauge(memAvg, 12, thr.MemWarnPct, thr.MemCritPct)) + "  " + kv("cpu trend", sparkStyled(a.values("cluster.cpu"), 20, 100, thr.CPUWarnPct, 95)) + "  " + kv("mem trend", sparkStyled(a.values("cluster.mem"), 20, 100, thr.MemWarnPct, thr.MemCritPct))
 	c := content{header: []string{summary, styleDim.Render("m = metrics-server value, ok+ = full collection done; trend = last refreshes; enter for details"), h}, selectable: true, empty: "no nodes"}

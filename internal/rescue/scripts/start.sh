@@ -28,6 +28,11 @@ case "$KIND" in
     systemctl start --no-block $SVC 2>&1 || die "systemctl start $SVC failed"
     ;;
   *)
+    # kubelet creates a missing data dir (hostPath DirectoryOrCreate) as
+    # 0755; etcd and the CIS/STIG rules expect 0700, so create it first
+    if [ ! -d "$DATADIR" ]; then
+      mkdir -p "$DATADIR" && chmod 700 "$DATADIR" && say "created $DATADIR (0700)" || die "cannot create $DATADIR"
+    fi
     if [ -f $PARKED/etcd.yaml.off ]; then
       mv $PARKED/etcd.yaml.off $MANIFESTS/etcd.yaml || die "cannot restore the etcd manifest"
       say "restored $MANIFESTS/etcd.yaml"

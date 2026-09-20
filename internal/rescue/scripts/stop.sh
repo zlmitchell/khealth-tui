@@ -1,8 +1,11 @@
 # Stop the control-plane on this node so nothing serves or writes etcd while
 # the cluster is rebuilt. rke2/k3s: stop the server unit (the documented
-# procedure); kubeadm: park the etcd and kube-apiserver static pod manifests
-# so kubelet stops the pods and does not bring them back. Any etcd container
-# that lingers afterwards is stopped explicitly.
+# procedure); kubeadm: park the etcd, kube-apiserver, kube-controller-manager
+# and kube-scheduler static pod manifests so kubelet stops the pods and does
+# not bring them back (the controllers too: left running they would reconnect
+# to the restored apiserver with caches and watches from resource versions
+# newer than the restored data). Any etcd container that lingers afterwards
+# is stopped explicitly.
 case "$KIND" in
   rke2|k3s)
     say "systemctl stop $SVC"
@@ -12,7 +15,7 @@ case "$KIND" in
     case "$st" in active|activating|deactivating|reloading) die "$SVC is still $st";; esac
     ;;
   *)
-    for m in etcd kube-apiserver; do
+    for m in etcd kube-apiserver kube-controller-manager kube-scheduler; do
       if [ -f $MANIFESTS/$m.yaml ]; then
         mv $MANIFESTS/$m.yaml $PARKED/$m.yaml.off || die "cannot park $m.yaml"
         say "parked $MANIFESTS/$m.yaml -> $PARKED/$m.yaml.off"
@@ -22,14 +25,14 @@ case "$KIND" in
     done
     i=0
     while [ $i -lt 30 ]; do
-      c=$("$CRICTL" -r "$CRI_EP" ps -q --name '^(etcd|kube-apiserver)$' 2>/dev/null)
+      c=$("$CRICTL" -r "$CRI_EP" ps -q --name '^(etcd|kube-apiserver|kube-controller-manager|kube-scheduler)$' 2>/dev/null)
       [ -z "$c" ] && break
       sleep 2; i=$((i+1))
     done
     ;;
 esac
 if [ -n "$CRICTL" ] && [ -n "$CRI_EP" ]; then
-  for c in $("$CRICTL" -r "$CRI_EP" ps -q --name '^(etcd|kube-apiserver)$' 2>/dev/null); do
+  for c in $("$CRICTL" -r "$CRI_EP" ps -q --name '^(etcd|kube-apiserver|kube-controller-manager|kube-scheduler)$' 2>/dev/null); do
     "$CRICTL" -r "$CRI_EP" stop "$c" >/dev/null 2>&1 && say "stopped lingering container $c"
   done
 fi
