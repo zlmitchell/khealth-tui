@@ -4,6 +4,8 @@ package sshrun
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -26,13 +28,21 @@ type Runner struct {
 	cfg     config.SSH
 	auth    []ssh.AuthMethod
 	hostKey ssh.HostKeyCallback
-	notes   []string
+	// knownKey is a throwaway key used to ask known_hosts which key types
+	// it holds for a host (see hostKeyAlgorithms); nil without strict checking
+	knownKey ssh.PublicKey
+	notes    []string
 
 	mu      sync.Mutex
 	clients map[string]*ssh.Client
 	bastion *ssh.Client
 	sem     chan struct{}
 	become  map[string]becomeMethod // per host: how to run as root (see become.go)
+
+	// hostKeys is written from inside the handshake, which bastionClient
+	// runs with mu held, so it has its own lock.
+	hkMu     sync.Mutex
+	hostKeys map[string]string // per addr: SHA256 fingerprint of the host key seen (see HostKey)
 }
 
 // Result is the outcome of running a script on a node.
@@ -42,7 +52,8 @@ type Result struct {
 	Err        error
 	Started    time.Time
 	Finished   time.Time
-	ScriptSize int // bytes sent on stdin (prologue included)
+	ScriptSize int    // bytes sent on stdin (prologue included)
+	HostKey    string // SHA256 fingerprint of the node's SSH host key ("" when the dial failed)
 }
 
 // Prologue is prepended to every script when ssh.nice is on: the probe and
@@ -57,7 +68,7 @@ const Prologue = "command -v renice >/dev/null 2>&1 && renice -n 19 -p $$ >/dev/
 
 // New prepares authentication and host key verification. It does not connect.
 func New(cfg config.SSH) (*Runner, error) {
-	r := &Runner{cfg: cfg, clients: map[string]*ssh.Client{}, become: map[string]becomeMethod{}, sem: make(chan struct{}, cfg.Concurrency)}
+	r := &Runner{cfg: cfg, clients: map[string]*ssh.Client{}, hostKeys: map[string]string{}, become: map[string]becomeMethod{}, sem: make(chan struct{}, cfg.Concurrency)}
 	if cfg.User == "" {
 		return nil, errors.New("ssh user is not set (ssh.user / --ssh-user)")
 	}
@@ -82,13 +93,56 @@ func New(cfg config.SSH) (*Runner, error) {
 		r.hostKey = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			err := cb(hostname, remote, key)
 			var ke *knownhosts.KeyError
-			if errors.As(err, &ke) && len(ke.Want) == 0 {
-				return fmt.Errorf("host key for %s not in known_hosts (ssh to it once, or --insecure-host-key)", hostname)
+			if errors.As(err, &ke) {
+				h := hostname
+				if hp, _, err := net.SplitHostPort(hostname); err == nil {
+					h = hp
+				}
+				if len(ke.Want) == 0 {
+					return fmt.Errorf("host key for %s not in known_hosts (ssh to it once, or --insecure-host-key)", h)
+				}
+				// wrapped, not replaced: hostKeyAlgorithms reads ke.Want through it
+				return fmt.Errorf("host key for %s changed since known_hosts recorded it: ssh-keygen -R %s, then ssh to it once (or --insecure-host-key): %w", h, h, err)
 			}
 			return err
 		}
+		if _, priv, err := ed25519.GenerateKey(rand.Reader); err == nil {
+			r.knownKey, _ = ssh.NewPublicKey(priv.Public())
+		}
 	}
 	return r, nil
+}
+
+// hostKeyAlgorithms returns the host key algorithms to offer for addr: the
+// types known_hosts already holds for it. Without this the client negotiates
+// its own preferred type (ecdsa/rsa) and a host recorded only with, say, an
+// ed25519 key fails as "key mismatch" even though that key is right - the
+// usual case for a host first reached with ssh, which stores one key type.
+// Nil (any algorithm) for unknown hosts and without strict checking.
+func (r *Runner) hostKeyAlgorithms(addr string) []string {
+	if r.knownKey == nil {
+		return nil
+	}
+	err := r.hostKey(addr, &net.TCPAddr{}, r.knownKey)
+	var ke *knownhosts.KeyError
+	if !errors.As(err, &ke) || len(ke.Want) == 0 {
+		return nil
+	}
+	var algos []string
+	seen := map[string]bool{}
+	for _, k := range ke.Want {
+		t := k.Key.Type()
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		if t == ssh.KeyAlgoRSA {
+			// an ssh-rsa known_hosts entry is used with the SHA-2 signature algorithms
+			algos = append(algos, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256)
+		}
+		algos = append(algos, t)
+	}
+	return algos
 }
 
 // Notes describes the auth methods that were set up.
@@ -155,17 +209,38 @@ func buildAuth(cfg config.SSH) ([]ssh.AuthMethod, []string) {
 	return methods, notes
 }
 
-func (r *Runner) clientConfig(user string) *ssh.ClientConfig {
+func (r *Runner) clientConfig(addr, user string) *ssh.ClientConfig {
 	return &ssh.ClientConfig{
-		User:            user,
-		Auth:            r.auth,
-		HostKeyCallback: r.hostKey,
-		Timeout:         r.cfg.Timeout,
+		User:              user,
+		Auth:              r.auth,
+		HostKeyCallback:   r.recordHostKey(addr),
+		HostKeyAlgorithms: r.hostKeyAlgorithms(addr),
+		Timeout:           r.cfg.Timeout,
 	}
 }
 
+// recordHostKey wraps the verification callback to remember the fingerprint
+// of the key addr presented, verified or not: the checks compare them across
+// nodes to spot cloned machines that still share one host key.
+func (r *Runner) recordHostKey(addr string) ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		r.hkMu.Lock()
+		r.hostKeys[addr] = ssh.FingerprintSHA256(key)
+		r.hkMu.Unlock()
+		return r.hostKey(hostname, remote, key)
+	}
+}
+
+// HostKey is the SHA256 fingerprint of the host key seen at host, or ""
+// before any dial reached the key exchange.
+func (r *Runner) HostKey(host string) string {
+	r.hkMu.Lock()
+	defer r.hkMu.Unlock()
+	return r.hostKeys[r.addr(host)]
+}
+
 func (r *Runner) dial(addr, user string) (*ssh.Client, error) {
-	cfg := r.clientConfig(user)
+	cfg := r.clientConfig(addr, user)
 	var conn net.Conn
 	var err error
 	if r.cfg.Bastion != "" {
@@ -211,7 +286,7 @@ func (r *Runner) bastionClient() (*ssh.Client, error) {
 		return nil, err
 	}
 	_ = conn.SetDeadline(time.Now().Add(r.cfg.Timeout))
-	c, chans, reqs, err := ssh.NewClientConn(conn, host, r.clientConfig(user))
+	c, chans, reqs, err := ssh.NewClientConn(conn, host, r.clientConfig(host, user))
 	if err != nil {
 		conn.Close()
 		return nil, err
@@ -222,10 +297,7 @@ func (r *Runner) bastionClient() (*ssh.Client, error) {
 }
 
 func (r *Runner) client(host string) (*ssh.Client, error) {
-	addr := host
-	if _, _, err := net.SplitHostPort(host); err != nil {
-		addr = net.JoinHostPort(host, strconv.Itoa(r.cfg.Port))
-	}
+	addr := r.addr(host)
 	r.mu.Lock()
 	c, ok := r.clients[addr]
 	r.mu.Unlock()
@@ -243,10 +315,7 @@ func (r *Runner) client(host string) (*ssh.Client, error) {
 }
 
 func (r *Runner) drop(host string) {
-	addr := host
-	if _, _, err := net.SplitHostPort(host); err != nil {
-		addr = net.JoinHostPort(host, strconv.Itoa(r.cfg.Port))
-	}
+	addr := r.addr(host)
 	r.mu.Lock()
 	if c, ok := r.clients[addr]; ok {
 		c.Close()
@@ -300,6 +369,7 @@ func (r *Runner) Run(ctx context.Context, host, script string) Result {
 func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
 	res := Result{Started: time.Now(), ScriptSize: len(script)}
 	c, err := r.client(host)
+	res.HostKey = r.HostKey(host)
 	if err != nil {
 		res.Err = err
 		res.Finished = time.Now()

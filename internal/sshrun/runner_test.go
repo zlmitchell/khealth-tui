@@ -393,13 +393,65 @@ func TestKnownHosts(t *testing.T) {
 	other := sshtest.New(t, nil)
 	_ = os.WriteFile(kh, []byte(knownhosts.Line([]string{srv.Addr}, other.HostKey)+"\n"), 0o600)
 	r = newRunner(t, cfg)
-	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err == nil || strings.Contains(res.Err.Error(), "not in known_hosts") {
+	host, _, _ := net.SplitHostPort(srv.Addr)
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err == nil || !strings.Contains(res.Err.Error(), "changed since known_hosts recorded it: ssh-keygen -R "+host) {
 		t.Errorf("mismatch: %v", res.Err)
 	}
 	_ = os.WriteFile(kh, []byte(srv.KnownHostsLine()+"\n"), 0o600)
 	r = newRunner(t, cfg)
-	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err != nil {
+	res := r.Run(context.Background(), srv.Addr, "s\n")
+	if res.Err != nil {
 		t.Errorf("known host: %v", res.Err)
+	}
+	// the fingerprint of the key the server presented rides on the result
+	if want := ssh.FingerprintSHA256(srv.HostKey); res.HostKey != want {
+		t.Errorf("HostKey = %q, want %q", res.HostKey, want)
+	}
+}
+
+// A host recorded in known_hosts with one key type (what a first ssh login
+// stores) must connect to a server that also has other key types: the
+// client offers only the recorded types instead of its own preference.
+func TestKnownHostsSingleKeyType(t *testing.T) {
+	srv := sshtest.New(t, hostHandler{uid: "0"}.handle)
+	srv.AddRSAHostKey(t)
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	cfg := testCfg(srv)
+	cfg.StrictHostKey, cfg.KnownHosts = true, kh
+
+	// only the ed25519 key is known
+	_ = os.WriteFile(kh, []byte(srv.KnownHostsLine()+"\n"), 0o600)
+	r := newRunner(t, cfg)
+	if got := r.hostKeyAlgorithms(srv.Addr); len(got) != 1 || got[0] != ssh.KeyAlgoED25519 {
+		t.Errorf("algorithms for ed25519-only host: %v", got)
+	}
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err != nil {
+		t.Errorf("ed25519-only known host: %v", res.Err)
+	}
+
+	// only the RSA key is known: ssh-rsa entries are used with the SHA-2 signatures
+	_ = os.WriteFile(kh, []byte(knownhosts.Line([]string{srv.Addr}, srv.RSAKey)+"\n"), 0o600)
+	r = newRunner(t, cfg)
+	if got := strings.Join(r.hostKeyAlgorithms(srv.Addr), ","); got != "rsa-sha2-512,rsa-sha2-256,ssh-rsa" {
+		t.Errorf("algorithms for rsa-only host: %v", got)
+	}
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err != nil {
+		t.Errorf("rsa-only known host: %v", res.Err)
+	}
+
+	// unknown host: no restriction, and still refused
+	_ = os.WriteFile(kh, []byte("# empty\n"), 0o600)
+	r = newRunner(t, cfg)
+	if got := r.hostKeyAlgorithms(srv.Addr); got != nil {
+		t.Errorf("algorithms for unknown host: %v", got)
+	}
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err == nil || !strings.Contains(res.Err.Error(), "not in known_hosts") {
+		t.Errorf("unknown host: %v", res.Err)
+	}
+	// without strict checking nothing is restricted
+	cfg.StrictHostKey = false
+	if got := newRunner(t, cfg).hostKeyAlgorithms(srv.Addr); got != nil {
+		t.Errorf("algorithms without strict checking: %v", got)
 	}
 }
 

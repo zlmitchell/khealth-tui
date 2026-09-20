@@ -118,6 +118,8 @@ type App struct {
 	stigRes    []stig.Result
 	helmLatest map[string]helmcheck.Latest
 	findings   []checks.Finding
+	findingAge map[string]findingTrack // first/last seen per finding key (see findings.go)
+	resolved   []resolvedFinding       // findings that went away, shown for resolvedKeep
 	hist       map[string]*series
 
 	seq         int
@@ -438,6 +440,7 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 			defer cancel()
 			res := runner.Run(ctx, host, nodeinfo.Script(opts))
 			info := nodeinfo.Parse(name, host, res.Stdout, res.Started)
+			info.HostKey = res.HostKey
 			info.Duration = res.Finished.Sub(res.Started)
 			info.ScriptSize = res.ScriptSize
 			info.STIGRun = opts.OSStig
@@ -635,6 +638,12 @@ func (a *App) etcdExecCmd(snap *k8s.Snapshot) tea.Cmd {
 	seq := a.seq
 	client := a.client
 	dist := snap.Distribution
+	// encryption-at-rest sample: once, then only on R (heavyNext)
+	var prevEnc *etcd.Encryption
+	if a.etcdExec != nil {
+		prevEnc = a.etcdExec.Encryption
+	}
+	sampleEnc := prevEnc == nil || prevEnc.SamplePrefix == "" || a.heavyNext
 	names := sortedKeys(pods)
 	podNames := map[string]string{}
 	for _, n := range names {
@@ -649,7 +658,7 @@ func (a *App) etcdExecCmd(snap *k8s.Snapshot) tea.Cmd {
 			return etcdExecMsg{seq: seq, probe: &etcd.Probe{Node: names[0], Collected: time.Now(), Dist: dist, Err: err, EtcdctlDiag: err.Error()}}
 		}
 		for _, n := range names {
-			p := etcd.ExecProbe(ctx, client, n, podNames[n], dist)
+			p := etcd.ExecProbeOpts(ctx, client, n, podNames[n], dist, sampleEnc)
 			last = p
 			if p.Err == nil && len(p.Members) > 0 {
 				break
@@ -657,6 +666,9 @@ func (a *App) etcdExecCmd(snap *k8s.Snapshot) tea.Cmd {
 			if client.NoteDenied("pods/exec", p.Err, false) {
 				break
 			}
+		}
+		if last != nil && last.Encryption == nil && prevEnc != nil {
+			last.Encryption = prevEnc // sampled earlier; the value does not change
 		}
 		return etcdExecMsg{seq: seq, probe: last}
 	}
@@ -751,6 +763,7 @@ func (a *App) recompute() {
 		Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec, S3: a.s3, S3Reach: a.s3Reach, Logs: a.logSum, Stig: a.stigRes,
 		HelmLatest: a.helmLatest, SSHEnabled: a.sshEnabled, SSHErr: a.sshErr, Cfg: a.cfg, Now: time.Now(), APIServer: a.apiServer(),
 	})
+	a.trackFindings(time.Now())
 }
 
 // apiServer is the kubeconfig server URL ("" without a client, as in tests).
@@ -1521,6 +1534,7 @@ func (a *App) switchContext(c k8s.ContextInfo) tea.Cmd {
 	a.etcd, a.etcdPend, a.etcdExec = map[string]*etcd.Probe{}, map[string]bool{}, nil
 	a.s3, a.s3Reach = nil, map[string]etcd.S3Check{}
 	a.logSum, a.stigRes, a.helmLatest, a.findings = map[string]*logs.Summary{}, nil, map[string]helmcheck.Latest{}, nil
+	a.findingAge, a.resolved = nil, nil
 	a.hist, a.crdCounts, a.inspect = nil, nil, nil
 	a.logsNode, a.namespace = "", ""
 	for t := range a.cursor {
@@ -2156,7 +2170,7 @@ func helpLines() []string {
 		"             JSON, logfmt (key=value) and klog lines are colour-coded automatically: keys dim, level by severity, messages bold",
 		"",
 		styleBold.Render("Tabs"),
-		"  Overview   cluster summary, API health, ranked findings",
+		"  Overview   cluster summary, API health, ranked findings with first-seen age; findings that went away stay listed as resolved for 15m",
 		"  Nodes      conditions + live CPU/mem/disk/load from SSH (or metrics-server), certs, services",
 		"  Inspect    controllers (deploy/ds/sts/job/cronjob) then pods not owned by one; p = all pods; t = rollout restart;",
 		"             enter opens the Object sub-tab: owner/child/secret/configmap/PVC/SA references, enter again drills down, esc back",
@@ -2169,7 +2183,8 @@ func helpLines() []string {
 		"                 rejoin the other servers one at a time with an etcd member/health/leader check after each, take a fresh snapshot",
 		"  Storage    StorageClasses, CSI drivers, PVs/PVCs and node filesystems",
 		"  Events     warning events",
-		"  Addons     CNI, CSI, DNS/ingress/metrics, Rancher management, registries.yaml, rke2 HelmCharts",
+		"  Addons     CNI, CSI, DNS/ingress/metrics, registry mirrors (registries.yaml on rke2/k3s, containerd certs.d elsewhere),",
+		"             Rancher management + join topology (rke2/k3s, or a cluster registered in Rancher), rke2 HelmCharts",
 		"  Helm       releases (enter = values applied), optional update check;",
 		"             u = helm upgrade to the newest known chart version, b = helm rollback to a chosen revision (both confirm first;",
 		"             need the helm CLI; --read-only disables them; rke2-bundled charts are refused)",

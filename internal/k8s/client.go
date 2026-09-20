@@ -226,6 +226,15 @@ func (c *Client) Stats() Stats {
 	return Stats{Requests: c.stats.requests.Load(), BytesIn: c.stats.bytesIn.Load(), BytesOut: c.stats.bytesOut.Load(), Errors: c.stats.errors.Load()}
 }
 
+// getOpts returns the GetOptions for a snapshot get: with the watch cache
+// on, resourceVersion=0 is served from the apiserver cache like the lists.
+func (c *Client) getOpts() metav1.GetOptions {
+	if c.Opts.WatchCache {
+		return metav1.GetOptions{ResourceVersion: "0"}
+	}
+	return metav1.GetOptions{}
+}
+
 // listOpts returns the ListOptions for a snapshot list.
 func (c *Client) listOpts() metav1.ListOptions {
 	if c.Opts.WatchCache {

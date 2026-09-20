@@ -14,6 +14,7 @@ import (
 type Info struct {
 	Node      string
 	Host      string
+	HostKey   string // SHA256 fingerprint of the SSH host key the node presented (sshrun.Result.HostKey)
 	Collected time.Time
 	Duration  time.Duration
 	Err       error
@@ -987,6 +988,28 @@ func parseCNI(cf ConfigFile) CNIConf {
 		}
 	}
 	return c
+}
+
+// ContainerdSetting returns the quoted value of a `key = "value"` line in the
+// node's containerd config.toml dump ("config_path", "sandbox_image", ...),
+// "" when unset. The dump is grep -n output, so lines carry a "NN:" prefix.
+func (i *Info) ContainerdSetting(key string) string {
+	for _, cf := range i.ContainerdConfig {
+		if !strings.HasSuffix(cf.Path, "config.toml") {
+			continue
+		}
+		for _, l := range strings.Split(cf.Content, "\n") {
+			if num, rest, ok := strings.Cut(l, ":"); ok && num != "" && strings.Trim(num, "0123456789") == "" {
+				l = rest
+			}
+			k, v, ok := strings.Cut(l, "=")
+			if !ok || strings.TrimSpace(k) != key {
+				continue
+			}
+			return strings.Trim(strings.TrimSpace(v), `"'`)
+		}
+	}
+	return ""
 }
 
 func parseRegistryMirrors(files []ConfigFile) []string {

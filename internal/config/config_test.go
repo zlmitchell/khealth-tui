@@ -57,11 +57,24 @@ func TestPositionalBootstrapHost(t *testing.T) {
 	if cfg.SSH.User != "root" || len(cfg.Bootstrap.Hosts) != 2 || cfg.Bootstrap.Hosts[0] != "10.0.0.143" || cfg.Bootstrap.Hosts[1] != "10.0.0.144" || cfg.SSH.Enabled || cfg.Bootstrap.Out != "/tmp/x.yaml" {
 		t.Errorf("user=%q hosts=%v ssh=%v out=%q", cfg.SSH.User, cfg.Bootstrap.Hosts, cfg.SSH.Enabled, cfg.Bootstrap.Out)
 	}
+	// user@host is an explicit user: it must win over the one remembered in
+	// a reused context (see applySSHHint in cmd/khealth)
+	if !cfg.Flags["ssh-user"] {
+		t.Error("user@host did not mark ssh-user as given")
+	}
 	cfg, err = Load([]string{"--config", empty, "--bootstrap-kubeconfig", "ubuntu@cp-1,cp-2"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SSH.User != "ubuntu" || len(cfg.Bootstrap.Hosts) != 2 || cfg.Bootstrap.Hosts[0] != "cp-1" {
-		t.Errorf("user=%q hosts=%v", cfg.SSH.User, cfg.Bootstrap.Hosts)
+	if cfg.SSH.User != "ubuntu" || len(cfg.Bootstrap.Hosts) != 2 || cfg.Bootstrap.Hosts[0] != "cp-1" || !cfg.Flags["ssh-user"] {
+		t.Errorf("user=%q hosts=%v flags=%v", cfg.SSH.User, cfg.Bootstrap.Hosts, cfg.Flags)
+	}
+	// a bare host keeps the default (local login) user and does not claim it was chosen
+	cfg, err = Load([]string{"--config", empty, "10.0.0.143"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Flags["ssh-user"] {
+		t.Error("bare host marked ssh-user as given")
 	}
 }

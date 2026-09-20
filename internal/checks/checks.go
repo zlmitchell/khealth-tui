@@ -199,6 +199,26 @@ func Evaluate(in Input) []Finding {
 	evalCloud(in, add)
 
 	// ---- nodes (SSH) ----
+	// Nodes presenting the same SSH host key are clones that were never
+	// re-keyed: the key was copied with the image, so one node's key
+	// authenticates every one of them, and known_hosts cannot tell them
+	// apart. The same image usually carries one /etc/machine-id too.
+	byKey := map[string][]string{}
+	for name, ni := range in.Nodes {
+		if ni != nil && ni.HostKey != "" {
+			byKey[ni.HostKey] = append(byKey[ni.HostKey], name)
+		}
+	}
+	for _, names := range byKey {
+		if len(names) < 2 {
+			continue
+		}
+		sort.Strings(names)
+		for i, name := range names {
+			others := append(append([]string{}, names[:i]...), names[i+1:]...)
+			add(SevWarn, "node", name, "SSH host key is shared with "+strings.Join(others, ", ")+" (cloned image not re-keyed)", "rm /etc/ssh/ssh_host_*; ssh-keygen -A; restart sshd; ssh-keygen -R <addr> on clients; check /etc/machine-id is unique too")
+		}
+	}
 	for name, ni := range in.Nodes {
 		if ni == nil {
 			continue
@@ -275,6 +295,10 @@ func Evaluate(in Input) []Finding {
 		// registries.yaml present but containerd has no mirror hosts -> not applied
 		if len(ni.RegistryMirrors) > 0 && len(ni.ContainerdHosts) == 0 {
 			add(SevWarn, "addons", name, "registries.yaml defines mirrors but containerd has no certs.d hosts configured", nv.RegistryReload+", or check the YAML")
+		}
+		// upstream: certs.d/hosts.toml is only read when config.toml names the directory
+		if !distro.IsRancher(nv.Name) && len(ni.ContainerdHosts) > 0 && ni.ContainerdSetting("config_path") == "" {
+			add(SevWarn, "addons", name, fmt.Sprintf("containerd certs.d has hosts.toml for %s but config.toml sets no config_path: the mirrors are not applied", strings.Join(ni.ContainerdHosts, ", ")), `[plugins."io.containerd.cri.v1.images".registry] config_path = "/etc/containerd/certs.d" (containerd 2.x; io.containerd.grpc.v1.cri on 1.x), then `+nv.RegistryReload)
 		}
 		if ni.Heavy {
 			unused, bytes := ni.UnusedImages()

@@ -121,18 +121,31 @@ func (a *App) overviewContent() content {
 
 	fsegs := []seg{{float64(crit), styleCrit, "critical"}, {float64(warn), styleWarn, "warning"}, {float64(info), styleInfo, "info"}}
 	trend := sparkStyled(a.values("findings.crit"), 12, 0, 1, 1)
-	hdr = append(hdr, styleTitle.Render("Findings")+"  "+stacked(30, fsegs)+"  "+legend(fsegs)+"  "+styleDim.Render("crit trend ")+trend+styleDim.Render("   (a toggles info, enter shows hint)"))
+	note := "   (a toggles info, enter shows hint; first seen = this khealth session)"
+	if len(a.resolved) > 0 {
+		note = fmt.Sprintf("   (a toggles info, enter shows hint; %d resolved kept %s)", len(a.resolved), humanDur(resolvedKeep))
+	}
+	hdr = append(hdr, styleTitle.Render("Findings")+"  "+stacked(30, fsegs)+"  "+legend(fsegs)+"  "+styleDim.Render("crit trend ")+trend+styleDim.Render(note))
 
+	// current findings ranked as evaluated, then the ones that went away
+	// since an earlier refresh, dimmed, so a fix (or a flap) is visible
 	var rows [][]string
 	var ids []string
 	for i, f := range a.findings {
 		if a.problemOnly && f.Severity == checks.SevInfo {
 			continue
 		}
-		rows = append(rows, []string{sevText(f.Severity), f.Area, f.Object, f.Message})
+		rows = append(rows, []string{sevText(f.Severity), "ongoing", age(a.firstSeen(f)) + " ago", f.Area, f.Object, f.Message})
 		ids = append(ids, fmt.Sprint(i))
 	}
-	h, lines := renderTable(a.width, []column{{title: "SEV"}, {title: "AREA"}, {title: "OBJECT", max: 48}, {title: "MESSAGE"}}, rows)
+	for i, r := range a.resolved {
+		if a.problemOnly && r.Severity == checks.SevInfo {
+			continue
+		}
+		rows = append(rows, []string{styleDim.Render(fmt.Sprintf("%-4s", r.Severity.String())), styleOK.Render("resolved ") + styleDim.Render(age(r.Resolved)+" ago"), styleDim.Render(age(r.First) + " ago"), styleDim.Render(r.Area), styleDim.Render(r.Object), styleDim.Render(r.Message)})
+		ids = append(ids, "r:"+fmt.Sprint(i))
+	}
+	h, lines := renderTable(a.width, []column{{title: "SEV"}, {title: "STATE"}, {title: "FIRST SEEN"}, {title: "AREA"}, {title: "OBJECT", max: 48}, {title: "MESSAGE"}}, rows)
 	hdr = append(hdr, h)
 	c := content{header: hdr, selectable: true, empty: styleOK.Render("no findings - cluster looks healthy")}
 	for i, l := range lines {
@@ -644,9 +657,22 @@ func (a *App) detailFor(t tab, id string) (string, []string) {
 	switch t {
 	case tabOverview:
 		var idx int
+		if rest, ok := strings.CutPrefix(id, "r:"); ok {
+			if _, err := fmt.Sscan(rest, &idx); err == nil && idx >= 0 && idx < len(a.resolved) {
+				r := a.resolved[idx]
+				lines := []string{sevText(r.Severity) + " " + r.Area + " " + styleBold.Render(r.Object), "",
+					styleOK.Render("resolved") + " " + age(r.Resolved) + " ago" + styleDim.Render("  (no longer reported by the checks; first seen "+age(r.First)+" ago, kept for "+humanDur(resolvedKeep)+")"), ""}
+				lines = append(lines, wrap(r.Message, a.width-6)...)
+				if r.Hint != "" {
+					lines = append(lines, "", styleDim.Render("hint was: ")+r.Hint)
+				}
+				return "Resolved finding", lines
+			}
+			break
+		}
 		if _, err := fmt.Sscan(id, &idx); err == nil && idx >= 0 && idx < len(a.findings) {
 			f := a.findings[idx]
-			lines := []string{sevText(f.Severity) + " " + f.Area + " " + styleBold.Render(f.Object), ""}
+			lines := []string{sevText(f.Severity) + " " + f.Area + " " + styleBold.Render(f.Object), "", kv("state", "ongoing") + "  " + kv("first seen", age(a.firstSeen(f))+" ago"), ""}
 			lines = append(lines, wrap(f.Message, a.width-6)...)
 			if f.Hint != "" {
 				lines = append(lines, "", styleDim.Render("hint: ")+f.Hint)

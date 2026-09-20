@@ -727,9 +727,18 @@ func (a *App) addonsContent() content {
 		}
 	}
 
-	// Rancher
-	add("", styleTitle.Render("Rancher management"))
-	if r := s.Rancher; r == nil {
+	// Rancher: always relevant on rke2/k3s; on other distributions only when
+	// the cluster is actually registered in Rancher (cattle-cluster-agent)
+	voc := distro.For(s.Distribution)
+	rancherDist := distro.IsRancher(voc.Name)
+	r := s.Rancher
+	showRancher := rancherDist || (r != nil && (r.Managed || r.Provisioning != ""))
+	if showRancher {
+		add("", styleTitle.Render("Rancher management"))
+	}
+	if !showRancher {
+		// a kubeadm/upstream cluster that is not registered in Rancher: nothing to say
+	} else if r == nil {
 		add(styleDim.Render("  could not query cattle-system"))
 	} else if !r.Managed {
 		if r.Provisioning != "" {
@@ -761,18 +770,26 @@ func (a *App) addonsContent() content {
 			}
 		}
 		if len(a.nodes) > 0 {
-			kind := "imported/custom (no 50-rancher.yaml on nodes)"
-			if prov == len(a.nodes) {
-				kind = "Rancher-provisioned (config.yaml.d/50-rancher.yaml on all nodes)"
-			} else if prov > 0 {
-				kind = fmt.Sprintf("mixed: %d/%d nodes have 50-rancher.yaml", prov, len(a.nodes))
+			kind := "imported (" + voc.Label + " cluster registered in Rancher; node configuration is not Rancher-managed)"
+			if rancherDist {
+				kind = "imported/custom (no 50-rancher.yaml on nodes)"
+				if prov == len(a.nodes) {
+					kind = "Rancher-provisioned (config.yaml.d/50-rancher.yaml on all nodes)"
+				} else if prov > 0 {
+					kind = fmt.Sprintf("mixed: %d/%d nodes have 50-rancher.yaml", prov, len(a.nodes))
+				}
 			}
 			add("  " + kv("provisioning", kind))
 		}
 	}
+	// join topology: config.yaml server + rancher-system-agent are rke2/k3s
+	// concepts; the kubeadm tab shows the API endpoint the kubelets use
 	var rows [][]string
 	var rowIDs []string
 	for _, n := range sortedKeys(a.nodes) {
+		if !rancherDist {
+			break
+		}
 		ni := a.nodes[n]
 		if ni.Err != nil {
 			continue
@@ -795,8 +812,14 @@ func (a *App) addonsContent() content {
 		}
 	}
 
-	// registries
-	add("", styleTitle.Render("Registries")+styleDim.Render("  (registries.yaml vs what containerd applied; enter on a node = its registries.yaml + containerd dump)"))
+	// registries: rke2/k3s write registries.yaml and generate containerd's
+	// config from it; everywhere else containerd's own certs.d/hosts.toml is
+	// the mirror configuration and config.toml's config_path must point at it
+	if rancherDist {
+		add("", styleTitle.Render("Registries")+styleDim.Render("  (registries.yaml vs what containerd applied; enter on a node = its registries.yaml + containerd dump)"))
+	} else {
+		add("", styleTitle.Render("Registries")+styleDim.Render("  (containerd certs.d/<registry>/hosts.toml mirrors vs config.toml config_path; enter on a node = its containerd dump)"))
+	}
 	regUse := map[string]int{}
 	for i := range s.Pods {
 		for _, c := range s.Pods[i].Spec.Containers {
@@ -814,12 +837,35 @@ func (a *App) addonsContent() content {
 		if ni.Err != nil {
 			continue
 		}
+		applied := strings.Join(ni.ContainerdHosts, ",")
+		if !rancherDist {
+			var cfg string
+			for _, f := range ni.ContainerdConfig {
+				if strings.HasSuffix(f.Path, "config.toml") {
+					cfg = shortPath(f.Path)
+				}
+			}
+			configPath := ni.ContainerdSetting("config_path")
+			state := styleDim.Render("no mirrors (pulls go to the registry itself)")
+			switch {
+			case cfg == "" && len(ni.ContainerdHosts) == 0:
+				state = styleDim.Render("no containerd config found")
+			case len(ni.ContainerdHosts) > 0 && configPath == "":
+				state = styleWarn.Render("hosts.toml NOT applied: config_path unset in config.toml")
+			case len(ni.ContainerdHosts) > 0:
+				state = styleOK.Render("applied")
+			case configPath != "":
+				state = styleDim.Render("config_path set, no hosts.toml")
+			}
+			rows = append(rows, []string{n, cfg, applied, configPath, ni.ContainerdSetting("sandbox_image"), state})
+			rowIDs = append(rowIDs, "registries:"+n)
+			continue
+		}
 		files := make([]string, 0, len(ni.Registries))
 		for _, f := range ni.Registries {
 			files = append(files, shortPath(f.Path))
 		}
 		mirrors := strings.Join(ni.RegistryMirrors, ",")
-		applied := strings.Join(ni.ContainerdHosts, ",")
 		state := styleDim.Render("no registries.yaml")
 		switch {
 		case len(ni.RegistryMirrors) > 0 && len(ni.ContainerdHosts) == 0:
@@ -832,7 +878,11 @@ func (a *App) addonsContent() content {
 		rowIDs = append(rowIDs, "registries:"+n)
 	}
 	if len(rows) > 0 {
-		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "FILE"}, {title: "MIRRORS", max: 40}, {title: "CONTAINERD HOSTS", max: 40}, {title: "SYSTEM-DEFAULT-REGISTRY"}, {title: "STATE"}}, rows)
+		cols := []column{{title: "NODE"}, {title: "FILE"}, {title: "MIRRORS", max: 40}, {title: "CONTAINERD HOSTS", max: 40}, {title: "SYSTEM-DEFAULT-REGISTRY"}, {title: "STATE"}}
+		if !rancherDist {
+			cols = []column{{title: "NODE"}, {title: "CONFIG"}, {title: "CERTS.D HOSTS", max: 40}, {title: "CONFIG_PATH", max: 30}, {title: "SANDBOX IMAGE", max: 36}, {title: "STATE"}}
+		}
+		h, lines := renderTable(a.width, cols, rows)
 		add(h)
 		for i, l := range lines {
 			addRow(rowIDs[i], l)
@@ -886,19 +936,28 @@ func (a *App) addonsDetail(id string) (string, []string) {
 		if ni == nil || ni.Err != nil {
 			return "", nil
 		}
-		out = append(out, kv("mirrors in registries.yaml", strings.Join(ni.RegistryMirrors, ", "))+"  "+kv("containerd certs.d hosts", strings.Join(ni.ContainerdHosts, ", "))+"  "+kv("system-default-registry", ni.Settings["system-default-registry"]))
 		voc := distro.For(ni.Dist)
-		if len(ni.Registries) == 0 {
-			out = append(out, styleDim.Render("no "+voc.Registries))
+		if ni.Dist == "" || ni.Dist == "unknown" {
+			voc = distro.For(a.snap.Distribution)
 		}
-		dump(ni.Registries)
+		if distro.IsRancher(voc.Name) {
+			out = append(out, kv("mirrors in registries.yaml", strings.Join(ni.RegistryMirrors, ", "))+"  "+kv("containerd certs.d hosts", strings.Join(ni.ContainerdHosts, ", "))+"  "+kv("system-default-registry", ni.Settings["system-default-registry"]))
+			if len(ni.Registries) == 0 {
+				out = append(out, styleDim.Render("no "+voc.Registries))
+			}
+			dump(ni.Registries)
+		} else {
+			out = append(out, kv("containerd certs.d hosts", strings.Join(ni.ContainerdHosts, ", "))+"  "+kv("config_path", ni.ContainerdSetting("config_path"))+"  "+kv("sandbox_image", ni.ContainerdSetting("sandbox_image")))
+		}
 		if len(ni.ContainerdConfig) > 0 {
-			title := "containerd configuration"
+			title := "containerd configuration (config.toml registry lines, certs.d/*/hosts.toml)"
 			if distro.IsRancher(voc.Name) {
 				title = "containerd (generated by " + voc.Name + " from registries.yaml)"
 			}
 			out = append(out, "", styleTitle.Render(title))
 			dump(ni.ContainerdConfig)
+		} else if !distro.IsRancher(voc.Name) {
+			out = append(out, styleDim.Render("no "+voc.Registries))
 		}
 		return "Registries on " + name, out
 	case "node":

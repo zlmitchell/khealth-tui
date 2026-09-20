@@ -8,7 +8,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -464,19 +463,23 @@ func (c *Client) tridentBackends(ctx context.Context) []TridentBackend {
 // (vsphere-cloud-config from the rancher-vsphere-cpi chart, or cloud-config
 // upstream). Only the vCenter hosts, datacenters, TLS flag and the secret
 // reference are kept.
-func (c *Client) vsphereConf(ctx context.Context) *VSphereConf {
+// The last error is returned so Fetch can remember a 403/404 (no vSphere
+// CPI on this cluster) instead of two GETs every cycle.
+func (c *Client) vsphereConf(ctx context.Context) (*VSphereConf, error) {
+	var last error
 	for _, name := range []string{"vsphere-cloud-config", "cloud-config"} {
-		cm, err := c.CS.CoreV1().ConfigMaps("kube-system").Get(ctx, name, metav1.GetOptions{})
+		cm, err := c.CS.CoreV1().ConfigMaps("kube-system").Get(ctx, name, c.getOpts())
 		if err != nil {
+			last = err
 			continue
 		}
 		text, ok := cm.Data["vsphere.conf"]
 		if !ok {
 			continue
 		}
-		return parseVSphereConf(text)
+		return parseVSphereConf(text), nil
 	}
-	return nil
+	return nil, last
 }
 
 var vcSection = regexp.MustCompile(`^\[VirtualCenter\s+"([^"]+)"\]`)

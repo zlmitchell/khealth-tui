@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -32,7 +33,8 @@ type Server struct {
 	KeyPath   string             // PEM file with the client private key the server accepts
 	ClientKey ed25519.PrivateKey // the same key, for ssh-agent tests
 	ClientPub ssh.PublicKey
-	HostKey   ssh.PublicKey
+	HostKey   ssh.PublicKey // ed25519
+	RSAKey    ssh.PublicKey // set by AddRSAHostKey
 
 	// User restricts logins to this name ("" = any); Password, when set, is
 	// accepted through both password and keyboard-interactive auth.
@@ -142,6 +144,23 @@ func (s *Server) Port() int {
 	_, p, _ := net.SplitHostPort(s.Addr)
 	n, _ := strconv.Atoi(p)
 	return n
+}
+
+// AddRSAHostKey gives the server a second, RSA host key, like a real sshd
+// that has one of each type: the client's algorithm preference then decides
+// which key it is shown.
+func (s *Server) AddRSAHostKey(t testing.TB) {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.RSAKey = signer.PublicKey()
+	s.config.AddHostKey(signer)
 }
 
 // KnownHostsLine is the known_hosts entry that accepts this server.

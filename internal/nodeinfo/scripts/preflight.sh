@@ -25,9 +25,10 @@ sec PFUNITS
 # /run/systemd/units/invocation:<unit> exists while a unit runs and the
 # *.wants symlinks say whether it starts at boot: no D-Bus round trip, so
 # this is cheap enough for every refresh
+WANTS=" $(ls /etc/systemd/system/*.wants/ 2>/dev/null | tr '\n' ' ') "
 for u in NetworkManager.service nm-cloud-setup.service nm-cloud-setup.timer vmtoolsd.service open-vm-tools.service cloud-init.service cloud-final.service multipathd.service fapolicyd.service auditd.service firewalld.service; do
   a=inactive; [ -e "/run/systemd/units/invocation:$u" ] && a=active
-  e=disabled; ls /etc/systemd/system/*.wants/"$u" >/dev/null 2>&1 && e=enabled
+  e=disabled; case "$WANTS" in *" $u "*) e=enabled;; esac
   echo "$u|$a|$e"
 done
 if [ "__CONFIG__" = 1 ]; then

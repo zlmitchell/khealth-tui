@@ -188,6 +188,33 @@ and the nodes, except three things:
 
 No DNS, package repository, vendor site or telemetry is contacted.
 
+## Where the remaining cost is: one SSH session per probe
+
+Every probe is its own SSH session on the cached connection: channel open,
+sshd's PAM session (faillock, lastlog, `pam_systemd` registering a logind
+session, audit records), `sudo`, `/bin/sh`. Measured with the same
+`x/crypto/ssh` code path the tool uses, running a trivial script:
+
+| node | new session per script | persistent shell, script on stdin |
+|---|---|---|
+| rke2 / Rocky 9 | 46 ms | 7 ms |
+| rke2 CIS profile / RHEL 9 STIG, FIPS, fapolicyd | 134 ms | 13 ms |
+| kubeadm / Ubuntu 24.04 STIG | 84 ms | 5 ms |
+
+A control-plane node gets two sessions per refresh (node + etcd probe), so
+on a hardened node ~250 ms of the ~1 s light cycle is session setup, and
+each session leaves a `session opened`/`closed` pair in `/var/log/secure`
+and the audit log (about 200 lines per hour of watching). A persistent
+root shell per node (one session for the life of the connection, scripts
+written to its stdin with an end marker, respawned on timeout) would
+remove both; it is the next structural change, not done yet.
+
+fork+exec itself is 2.7x slower on the FIPS + fapolicyd node (2.1 ms vs
+0.8 ms per process): the light probe's ~40 processes cost 0.1 s there
+before they do anything, which is why the scripts avoid per-item loops
+that spawn (`systemctl show` once for all units, one `ls` of the `.wants`
+directories, awk instead of `stat` per file).
+
 ## Reading the numbers when troubleshooting
 
 - `remote CPU / refresh` is the steady-state share of one core the tool takes

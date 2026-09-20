@@ -152,10 +152,12 @@ func bootstrapKubeconfig(cfg *config.Config) error {
 			}
 			if u, rest, ok := strings.Cut(h, "@"); ok {
 				cfg.SSH.User, h = u, rest
+				cfg.Flags["ssh-user"] = true
 			}
 			if cfg.SSH.User == "" {
 				fmt.Fprint(os.Stderr, "  ssh user: ")
 				cfg.SSH.User = readLine()
+				cfg.Flags["ssh-user"] = true
 			}
 			if _, err := os.Stat(cfg.SSH.Key); err != nil && cfg.SSH.Password == "" && os.Getenv("SSH_AUTH_SOCK") == "" {
 				fmt.Fprintf(os.Stderr, "  no key at %s and no agent; password for %s@%s: ", cfg.SSH.Key, cfg.SSH.User, h)
@@ -192,7 +194,25 @@ func bootstrapKubeconfig(cfg *config.Config) error {
 	fmt.Fprintf(os.Stderr, "next time just run: khealth   (the context picker lists it; ssh user %s is remembered in the context)\n", cfg.SSH.User)
 	cfg.Kubeconfig, cfg.Context = res.Path, res.Name
 	applySSHHint(cfg, res.SSH)
+	// a reused file carries the user from an earlier run; khealth root@host
+	// names a new one, so the context is updated to it
+	rememberSSH(cfg, res.Path, res.Name, res.SSH)
 	return nil
+}
+
+// rememberSSH stores the SSH user given on the command line (--ssh-user or
+// user@host) in the context when it differs from what the file remembers.
+// A user that merely defaulted to the local login is never stored: it is
+// as likely wrong as right, and once stored it would silently override
+// the next run's user@host.
+func rememberSSH(cfg *config.Config, file, ctxName string, stored k8s.SSHHint) {
+	if file == "" || !cfg.SSH.Enabled || !cfg.Flags["ssh-user"] || cfg.SSH.User == "" || cfg.SSH.User == stored.User {
+		return
+	}
+	h := k8s.SSHHint{User: cfg.SSH.User, Key: cfg.SSH.Key, Port: cfg.SSH.Port, Become: cfg.SSH.Become}
+	if err := bootstrap.RememberSSH(file, ctxName, h); err == nil {
+		fmt.Fprintf(os.Stderr, "remembered ssh user %s for %s in %s\n", cfg.SSH.User, ctxName, filepath.Base(file))
+	}
 }
 
 // chooseContext lists the contexts khealth knows (the kubeconfig in use plus
@@ -243,6 +263,7 @@ func chooseContext(cfg *config.Config, loadErr error) (bool, error) {
 		}
 		if u, rest, ok := strings.Cut(h, "@"); ok && u != "" {
 			cfg.SSH.User, h = u, rest
+			cfg.Flags["ssh-user"] = true
 		}
 		cfg.Bootstrap.Hosts = []string{h}
 		return false, nil
@@ -258,14 +279,8 @@ func chooseContext(cfg *config.Config, loadErr error) (bool, error) {
 	cfg.Context = c.Name
 	applySSHHint(cfg, c.SSH)
 	fmt.Fprintf(os.Stderr, "using context %s (%s)%s\n", c.Name, c.Server, sshNote(cfg, c.SSH))
-	// a file from before hints existed, or an ssh user typed for this run:
-	// remember it in the context for next time
-	if c.File != "" && cfg.SSH.Enabled && cfg.SSH.User != "" && (c.SSH.User == "" || (cfg.Flags["ssh-user"] && c.SSH.User != cfg.SSH.User)) {
-		h := k8s.SSHHint{User: cfg.SSH.User, Key: cfg.SSH.Key, Port: cfg.SSH.Port, Become: cfg.SSH.Become}
-		if err := bootstrap.RememberSSH(c.File, c.Name, h); err == nil {
-			fmt.Fprintf(os.Stderr, "remembered ssh user %s for %s in %s\n", cfg.SSH.User, c.Name, filepath.Base(c.File))
-		}
-	}
+	// an ssh user typed for this run: remember it in the context for next time
+	rememberSSH(cfg, c.File, c.Name, c.SSH)
 	return true, nil
 }
 

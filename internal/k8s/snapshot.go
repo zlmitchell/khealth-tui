@@ -509,18 +509,18 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		mu.Unlock()
 	}()
 	optional("kubeadm-config", func() error {
-		kc := c.kubeadmConfig(ctx)
+		kc, err := c.kubeadmConfig(ctx)
 		mu.Lock()
 		s.Kubeadm = kc
 		mu.Unlock()
-		return nil
+		return err
 	})
 	optional("vsphere-cloud-config", func() error {
-		vc := c.vsphereConf(ctx)
+		vc, err := c.vsphereConf(ctx)
 		mu.Lock()
 		s.VSphereConf = vc
 		mu.Unlock()
-		return nil
+		return err
 	})
 	if _, denied := c.Denied("rancher"); !denied {
 		wg.Add(1)

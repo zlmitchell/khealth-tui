@@ -291,11 +291,15 @@ func TestFetchKubeletProxyDenied(t *testing.T) {
 		t.Errorf("denied proxies: cfg=%q usage=%q", s.KubeletCfgErr, s.PVCUsageErr)
 	}
 	got := c.DeniedList()
-	if strings.Join(got, ",") != "nodes/proxy configz,nodes/proxy stats,tridentbackends.trident.netapp.io" {
+	if strings.Join(got, ",") != "kubeadm-config,nodes/proxy configz,nodes/proxy stats,tridentbackends.trident.netapp.io" {
 		t.Errorf("denied list: %v", got)
 	}
 	hits := f.hitCount("/api/v1/nodes/cp-1/proxy/configz") + f.hitCount("/api/v1/nodes/w-1/proxy/configz")
+	kaHits := f.hitCount("/api/v1/namespaces/kube-system/configmaps/kubeadm-config")
 	s = c.Fetch(ctx)
+	if h := f.hitCount("/api/v1/namespaces/kube-system/configmaps/kubeadm-config"); h != kaHits {
+		t.Errorf("kubeadm-config asked again while absent: %d -> %d", kaHits, h)
+	}
 	if h := f.hitCount("/api/v1/nodes/cp-1/proxy/configz") + f.hitCount("/api/v1/nodes/w-1/proxy/configz"); h != hits {
 		t.Errorf("nodes/proxy asked again while denied: %d -> %d", hits, h)
 	}
@@ -425,19 +429,19 @@ func TestS3SecretAndKubeadmConfig(t *testing.T) {
 		t.Errorf("s3 secret: %+v", info)
 	}
 
-	if kc := c.kubeadmConfig(ctx); kc != nil {
-		t.Errorf("no kubeadm-config: %+v", kc)
+	if kc, err := c.kubeadmConfig(ctx); kc != nil || err == nil {
+		t.Errorf("no kubeadm-config: %+v %v", kc, err)
 	}
 	f.set("/api/v1/namespaces/kube-system/configmaps/kubeadm-config", corev1.ConfigMap{TypeMeta: tm("ConfigMap"), Data: map[string]string{"ClusterStatus": "x"}})
-	if kc := c.kubeadmConfig(ctx); kc != nil {
+	if kc, _ := c.kubeadmConfig(ctx); kc != nil {
 		t.Errorf("no ClusterConfiguration key: %+v", kc)
 	}
 	f.set("/api/v1/namespaces/kube-system/configmaps/kubeadm-config", corev1.ConfigMap{TypeMeta: tm("ConfigMap"), Data: map[string]string{"ClusterConfiguration": ": : not yaml ["}})
-	if kc := c.kubeadmConfig(ctx); kc != nil {
+	if kc, _ := c.kubeadmConfig(ctx); kc != nil {
 		t.Errorf("bad yaml: %+v", kc)
 	}
 	f.set("/api/v1/namespaces/kube-system/configmaps/kubeadm-config", corev1.ConfigMap{TypeMeta: tm("ConfigMap"), Data: map[string]string{"ClusterConfiguration": "apiVersion: kubeadm.k8s.io/v1beta3\nkind: ClusterConfiguration\nclusterName: prod\ncontrolPlaneEndpoint: k8s.example.com:6443\nkubernetesVersion: v1.30.4\napiServer:\n  certSANs:\n  - k8s.example.com\n  - 10.0.0.100\nnetworking:\n  serviceSubnet: 10.96.0.0/12\n"}})
-	kc := c.kubeadmConfig(ctx)
+	kc, _ := c.kubeadmConfig(ctx)
 	if kc == nil || kc.ClusterName != "prod" || kc.ControlPlaneEndpoint != "k8s.example.com:6443" || kc.KubernetesVersion != "v1.30.4" || len(kc.CertSANs) != 2 || kc.ServiceSubnet != "10.96.0.0/12" {
 		t.Errorf("kubeadm config: %+v", kc)
 	}

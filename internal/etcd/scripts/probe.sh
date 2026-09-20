@@ -132,14 +132,17 @@ if command -v curl >/dev/null 2>&1; then
   [ -n "$METRICS_OUT" ] || METRICS_OUT=$($CURL "$EP/metrics" 2>/dev/null)
 fi
 [ -n "$METRICS_OUT" ] && echo "$METRICS_OUT" | grep -E '^(etcd_server_has_leader|etcd_server_is_leader|etcd_server_leader_changes_seen_total|etcd_mvcc_db_total_size_in_bytes|etcd_mvcc_db_total_size_in_use_in_bytes|etcd_server_quota_backend_bytes|etcd_disk_wal_fsync_duration_seconds_(sum|count)|etcd_disk_backend_commit_duration_seconds_(sum|count)|etcd_server_proposals_failed_total|etcd_server_proposals_pending|etcd_server_slow_apply_total|etcd_server_slow_read_indexes_total|etcd_server_version|etcd_cluster_version|etcd_debugging_mvcc_keys_total|etcd_server_snapshot_apply_in_progress_total|etcd_network_peer_round_trip_time_seconds_(sum|count)|etcd_server_health_failures|etcd_server_read_indexes_failed_total)'
+if [ "__FULL__" = 1 ]; then
 sec ENCCONFIG
 # Encryption at rest: which providers the running apiserver uses, in order,
 # and for which resources. Only the fixed token names are printed - never
-# the key material in the file.
+# the key material in the file. Full cycles only (ps over every process);
+# carried forward by Probe.Merge.
 f=$(ps -eo args 2>/dev/null | grep -o -- '--encryption-provider-config=[^ ]*' | head -1 | cut -d= -f2)
 if [ -n "$f" ]; then
   echo "file=$f"
   [ -r "$f" ] && echo "tokens=$(grep -oE '(aescbc|aesgcm|secretbox|kms|identity)|secrets|configmaps' "$f" 2>/dev/null | tr '\n' ' ')"
+fi
 fi
 sec ETCDCTL
 CID=; DIAG=

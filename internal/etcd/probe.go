@@ -560,6 +560,14 @@ func (p *Probe) Merge(prev *Probe) {
 	}
 	if p.FullSkipped && !prev.FullSkipped {
 		p.Sources, p.ConfigDump, p.SnapshotDirs, p.BackupHints = prev.Sources, prev.ConfigDump, prev.SnapshotDirs, prev.BackupHints
+		if prev.Encryption != nil {
+			if p.Encryption == nil {
+				p.Encryption = &Encryption{}
+			}
+			if p.Encryption.ConfigFile == "" {
+				p.Encryption.ConfigFile, p.Encryption.Tokens = prev.Encryption.ConfigFile, prev.Encryption.Tokens
+			}
+		}
 		if len(p.RKE2Config) == 0 {
 			p.RKE2Config = prev.RKE2Config
 		}

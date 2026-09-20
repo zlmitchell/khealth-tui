@@ -394,9 +394,12 @@ func Load(args []string) (Config, error) {
 			cfg.Bootstrap.Hosts = append(cfg.Bootstrap.Hosts, a)
 		}
 	}
+	// a user given as user@host is as explicit as --ssh-user: it wins over
+	// the user remembered in a reused kubeconfig context
 	for i, h := range cfg.Bootstrap.Hosts {
 		if u, host, ok := strings.Cut(h, "@"); ok && u != "" && host != "" {
 			cfg.SSH.User, cfg.Bootstrap.Hosts[i] = u, host
+			cfg.Flags["ssh-user"] = true
 		}
 	}
 	cfg.Bootstrap.Out = expand(cfg.Bootstrap.Out)

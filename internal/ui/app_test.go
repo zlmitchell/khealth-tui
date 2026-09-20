@@ -483,6 +483,68 @@ func TestAddonsRowSelection(t *testing.T) {
 	}
 }
 
+// On a kubeadm cluster the Addons tab must not talk about registries.yaml,
+// 50-rancher.yaml or the rke2 join topology: containerd's own certs.d is the
+// registry configuration and Rancher only appears when the cluster is
+// registered in one.
+func TestAddonsKubeadmWording(t *testing.T) {
+	a := testApp()
+	a.snap.Distribution, a.snap.Version, a.snap.Rancher = "kubeadm", "v1.35.8", nil
+	a.snap.HelmCharts = nil
+	const kubeadmNode = `===DIST
+/etc/kubernetes/manifests/kube-apiserver.yaml
+===SVC
+kubelet loaded active running
+===REGISTRIES
+===CONTAINERDREG
+--- /etc/containerd/certs.d/docker.io/hosts.toml
+server = "https://docker.io"
+[host."https://harbor.corp"]
+  capabilities = ["pull", "resolve"]
+--- /etc/containerd/config.toml
+12:      sandbox_image = "registry.k8s.io/pause:3.10.1"
+40:    [plugins."io.containerd.cri.v1.images".registry]
+41:      config_path = ""
+===END
+`
+	a.nodes = map[string]*nodeinfo.Info{"cp-1": nodeinfo.Parse("cp-1", "10.0.0.1", kubeadmNode, time.Now())}
+	ni := a.nodes["cp-1"]
+	if ni.Dist != "kubeadm" || ni.ContainerdSetting("sandbox_image") != "registry.k8s.io/pause:3.10.1" || ni.ContainerdSetting("config_path") != "" {
+		t.Fatalf("fixture: dist=%q sandbox=%q config_path=%q", ni.Dist, ni.ContainerdSetting("sandbox_image"), ni.ContainerdSetting("config_path"))
+	}
+	a.tab = tabAddons
+	got := ansi.Strip(strings.Join(rowsText(a.currentContent()), "\n"))
+	for _, bad := range []string{"registries.yaml", "50-rancher", "Rancher management", "rancher-system-agent", "join topology", "SYSTEM-DEFAULT-REGISTRY"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("kubeadm addons tab mentions %q:\n%s", bad, got)
+		}
+	}
+	for _, want := range []string{"CERTS.D HOSTS", "CONFIG_PATH", "docker.io", "registry.k8s.io/pause:3.10.1", "config_path unset"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("kubeadm addons tab lacks %q:\n%s", want, got)
+		}
+	}
+	title, lines := a.addonsDetail("registries:cp-1")
+	detail := ansi.Strip(strings.Join(lines, "\n"))
+	if title != "Registries on cp-1" || strings.Contains(detail, "registries.yaml") || !strings.Contains(detail, "certs.d/docker.io/hosts.toml") {
+		t.Errorf("kubeadm registries detail: %q\n%s", title, detail)
+	}
+	// a registered kubeadm cluster still gets the Rancher section, without the rke2 provisioning wording
+	a.snap.Rancher = &k8s.RancherInfo{Managed: true, Server: "https://rancher.corp", ClusterAgent: "ready", ClusterAgentOK: true}
+	got = ansi.Strip(strings.Join(rowsText(a.currentContent()), "\n"))
+	if !strings.Contains(got, "Rancher management") || !strings.Contains(got, "imported (kubeadm cluster registered in Rancher") || strings.Contains(got, "50-rancher") {
+		t.Errorf("registered kubeadm cluster: Rancher section wrong:\n%s", got)
+	}
+}
+
+func rowsText(c content) []string {
+	out := make([]string, 0, len(c.rows))
+	for _, r := range c.rows {
+		out = append(out, r.text)
+	}
+	return out
+}
+
 func TestInspectArrowsScrollYAML(t *testing.T) {
 	a := testApp()
 	a.tab = tabWorkloads

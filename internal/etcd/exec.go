@@ -37,6 +37,13 @@ func CertPaths(dist string) (ca, cert, key string) {
 // etcd static pod: member list first, then endpoint health/status against
 // every member's client URL, then alarms.
 func ExecProbe(ctx context.Context, ex Execer, node, pod, dist string) *Probe {
+	return ExecProbeOpts(ctx, ex, node, pod, dist, true)
+}
+
+// ExecProbeOpts is ExecProbe with the encryption-at-rest sample optional:
+// it costs two extra exec round trips (apiserver -> kubelet -> containerd)
+// and the answer does not change, so the app takes it once and on R.
+func ExecProbeOpts(ctx context.Context, ex Execer, node, pod, dist string, sampleEncryption bool) *Probe {
 	p := &Probe{Node: node, Collected: time.Now(), Dist: dist, EtcdctlVia: "kubectl exec " + pod, RKE2Config: map[string]string{}}
 	start := time.Now()
 	defer func() { p.Duration = time.Since(start) }()
@@ -97,6 +104,9 @@ func ExecProbe(ctx context.Context, ex Execer, node, pod, dist string) *Probe {
 	}
 	out = "---MEMBERS\n(see above)\n---STATUS\n" + statusRaw + "\n---ALARMS\n" + alarmRaw + "\n"
 	parseEtcdctl(p, "---STATUS\n"+statusRaw+"\n---ALARMS\n"+alarmRaw+"\n")
+	if !sampleEncryption {
+		return p
+	}
 	// encryption at rest: sample one stored Secret (first 24 bytes only)
 	if keys, kerr := run("get", "/registry/secrets/", "--prefix", "--keys-only", "--limit=1"); kerr == nil {
 		for _, l := range strings.Split(keys, "\n") {

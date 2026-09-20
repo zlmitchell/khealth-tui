@@ -3,7 +3,6 @@ package k8s
 import (
 	"context"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -23,15 +22,17 @@ type KubeadmConfig struct {
 	KubeletRaw           string // kube-system/kubelet-config KubeletConfiguration (cluster-wide kubelet defaults)
 }
 
-// kubeadmConfig reads kube-system/kubeadm-config; nil when absent.
-func (c *Client) kubeadmConfig(ctx context.Context) *KubeadmConfig {
-	cm, err := c.CS.CoreV1().ConfigMaps("kube-system").Get(ctx, "kubeadm-config", metav1.GetOptions{})
+// kubeadmConfig reads kube-system/kubeadm-config; nil when absent. The
+// error is returned so Fetch can remember a 403/404 (rke2, k3s, managed
+// clusters have no kubeadm-config) instead of asking every cycle.
+func (c *Client) kubeadmConfig(ctx context.Context) (*KubeadmConfig, error) {
+	cm, err := c.CS.CoreV1().ConfigMaps("kube-system").Get(ctx, "kubeadm-config", c.getOpts())
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	raw, ok := cm.Data["ClusterConfiguration"]
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	var cc struct {
 		ClusterName          string `json:"clusterName"`
@@ -45,11 +46,11 @@ func (c *Client) kubeadmConfig(ctx context.Context) *KubeadmConfig {
 		} `json:"networking"`
 	}
 	if err := yaml.Unmarshal([]byte(raw), &cc); err != nil {
-		return nil
+		return nil, nil
 	}
 	kc := &KubeadmConfig{ClusterName: cc.ClusterName, ControlPlaneEndpoint: cc.ControlPlaneEndpoint, CertSANs: cc.APIServer.CertSANs, ServiceSubnet: cc.Networking.ServiceSubnet, KubernetesVersion: cc.KubernetesVersion, Raw: raw}
-	if kl, err := c.CS.CoreV1().ConfigMaps("kube-system").Get(ctx, "kubelet-config", metav1.GetOptions{}); err == nil {
+	if kl, err := c.CS.CoreV1().ConfigMaps("kube-system").Get(ctx, "kubelet-config", c.getOpts()); err == nil {
 		kc.KubeletRaw = kl.Data["kubelet"]
 	}
-	return kc
+	return kc, nil
 }
