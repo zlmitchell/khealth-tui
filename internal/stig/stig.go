@@ -178,7 +178,7 @@ func (e *evaluator) perNode(id, title, cat, group, fix string, nodes []string, c
 		return
 	}
 	sort.Strings(nodes)
-	var fails, manual, nas []string
+	var fails, manual []string
 	passes := 0
 	passDetail := "" // kept when every passing node reports the same evidence
 	per := make(map[string]Status, len(nodes))
@@ -197,8 +197,6 @@ func (e *evaluator) perNode(id, title, cat, group, fix string, nodes []string, c
 			fails = append(fails, n+": "+detail)
 		case Manual:
 			manual = append(manual, n+": "+detail)
-		case NA:
-			nas = append(nas, n)
 		}
 	}
 	r := Result{ID: id, Title: title, Cat: cat, Group: group, Fix: fix, PerNode: per}

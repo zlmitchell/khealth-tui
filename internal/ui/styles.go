@@ -46,10 +46,8 @@ var (
 	styleSubBar    = lipgloss.NewStyle().Background(colorSubBar)
 	styleSubOn     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Background(colorInfo).Padding(0, 1)
 	styleSubOff    = lipgloss.NewStyle().Foreground(colorTabTxt).Background(colorSubBar)
-	styleSubKey    = lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Background(colorSubBar)
 	styleRule      = lipgloss.NewStyle().Foreground(colorAccent)
 	styleRuleTitle = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
-	styleBar       = lipgloss.NewStyle().Foreground(colorDim)
 	styleKey       = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	styleBox       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1)
 )
@@ -193,11 +191,4 @@ func padLeft(s string, w int) string {
 		return trunc(s, w)
 	}
 	return strings.Repeat(" ", w-sw) + s
-}
-
-func plural(n int, s string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, s)
-	}
-	return fmt.Sprintf("%d %ss", n, s)
 }

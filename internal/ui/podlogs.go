@@ -277,13 +277,6 @@ func wrapStyled(s string, width int) []string {
 
 var reSGR = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-func prefixPlain(p string) string {
-	if p == "" {
-		return ""
-	}
-	return strings.Repeat(" ", ansiWidth(p))
-}
-
 func (a *App) logMaxScroll() int {
 	n := len(a.logVisibleLines()) - (a.height - 8)
 	if n < 0 {

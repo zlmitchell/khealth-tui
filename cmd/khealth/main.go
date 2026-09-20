@@ -136,9 +136,7 @@ func bootstrapKubeconfig(cfg *config.Config) error {
 		if !cfg.SSH.Enabled {
 			return errors.New("no kubeconfig found; pass --kubeconfig, or run without --no-ssh so khealth can fetch the admin kubeconfig from a server node")
 		}
-		for _, h := range sortedValues(cfg.SSH.Hosts) {
-			hosts = append(hosts, h)
-		}
+		hosts = append(hosts, sortedValues(cfg.SSH.Hosts)...)
 		if len(hosts) > 0 {
 			fmt.Fprintf(os.Stderr, "Fetch the admin kubeconfig over SSH from %s and write it under ~/.kube? [Y/n] ", strings.Join(hosts, ", "))
 			if !yes(readLine()) {

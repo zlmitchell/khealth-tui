@@ -564,7 +564,7 @@ func TestAbortAndFailure(t *testing.T) {
 	}
 
 	// a script failure stops the run and skips the rest
-	c, p = cluster(t, RKE2, nil)
+	_, p = cluster(t, RKE2, nil)
 	steps := p.Steps()
 	p.steps[2].run = func(ctx context.Context, s *Step) error { return fmt.Errorf("boom") }
 	last, _ = run(t, p)

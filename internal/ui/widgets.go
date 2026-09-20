@@ -24,13 +24,6 @@ func (s *series) push(v float64) {
 	}
 }
 
-func (s *series) last() float64 {
-	if s == nil || len(s.vals) == 0 {
-		return math.NaN()
-	}
-	return s.vals[len(s.vals)-1]
-}
-
 func (a *App) record(key string, v float64) {
 	if a.hist == nil {
 		a.hist = map[string]*series{}

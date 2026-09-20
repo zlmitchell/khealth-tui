@@ -548,7 +548,7 @@ func (a *App) storageContent() content {
 		} else if q, ok := p.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
 			capacity = q.String() + styleDim.Render(" (req)")
 		}
-		used := styleDim.Render("-")
+		var used string
 		mounted := ""
 		key := p.Namespace + "/" + p.Name
 		kind := pvKind[p.Spec.VolumeName]

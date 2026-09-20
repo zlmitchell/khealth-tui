@@ -17,6 +17,23 @@ It uses two sources:
    with the right client certs, `etcdctl` via `crictl`, snapshots and backup
    mechanisms.
 
+## Preview
+
+Two short walkthroughs, one per distribution (mp4, open the link or clone
+the repo to play them):
+
+- [RKE2 cluster walkthrough](docs/media/video-preview-rke2.mp4)
+  (`docs/media/video-preview-rke2.mp4`, 42 MB)
+- [kubeadm (upstream Kubernetes) cluster walkthrough](docs/media/video-preview-kubeadm.mp4)
+  (`docs/media/video-preview-kubeadm.mp4`, 28 MB)
+
+The etcd tab's **Triage** block on a three-server RKE2 cluster with one server
+down and one stale member, each with the numbered steps for that case (more
+under [etcd triage](#etcd-triage), the repair itself under
+[etcd rescue](#etcd-rescue-restore-a-snapshot)):
+
+![etcd tab: triage of a stopped rke2-server and a stale member](docs/media/etcd-troubelshooting.png)
+
 ## Tabs
 
 | Key | Tab | What it shows |
@@ -235,6 +252,10 @@ TUI comes up offline and the node is the SSH target.
 ## etcd rescue (restore a snapshot)
 
 Every step, command and check is listed in [docs/RESCUE.md](docs/RESCUE.md).
+Live-tested on three-server
+rke2 (RHEL 9 STIG, `profile: cis`) and three-node kubeadm (Ubuntu 24.04
+STIG) control planes: restore from any server, rejoin of a broken server
+(details and what was learnt in the *Tested* section of that document).
 
 `X` on the etcd tab repairs the control plane over SSH (needs SSH
 collection on, `actions.enabled`, and an rke2, k3s or kubeadm control
