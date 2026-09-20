@@ -284,9 +284,10 @@ type snapshotMsg struct {
 	snap *k8s.Snapshot
 }
 type nodeMsg struct {
-	gen  int
-	info *nodeinfo.Info
-	opts nodeinfo.Options // what the probe included (cost accounting)
+	gen    int
+	info   *nodeinfo.Info
+	opts   nodeinfo.Options // what the probe included (cost accounting)
+	logSum *logs.Summary    // the journal classified, when this probe carried one (heavy)
 }
 type etcdMsg struct {
 	gen   int
@@ -480,6 +481,7 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 		if snap.VSphereConf != nil {
 			opts.VCenters = snap.VSphereConf.VCenters
 		}
+		setNetTargets(&opts, snap, name)
 		// The OS STIG facts (sysctl -a, package lists, find scans, config
 		// dumps) are the most expensive part and never ride on a refresh: they
 		// are the Shift+S scan's own staged probes (stigStageCmd). The config
@@ -536,7 +538,9 @@ func (a *App) nodeProbeCmd(name, host string, opts nodeinfo.Options, timeout tim
 			}
 			info.Err = fmt.Errorf("%s", msg)
 		}
-		return nodeMsg{gen: gen, info: info, opts: opts}
+		// classify the journal here, off the UI loop: ~0.5 ms per line through
+		// the knowledge base, and it only changes when a heavy probe lands
+		return nodeMsg{gen: gen, info: info, opts: opts, logSum: classifyLogs(info)}
 	}
 }
 
@@ -998,17 +1002,12 @@ func (a *App) s3CheckCmd(node string) tea.Cmd {
 	}
 }
 
+// recompute re-derives what is shown from the collected data: the STIG
+// evaluation, the checks and the finding history. Log classification is
+// not part of it: a journal is classified once, in the probe goroutine
+// that fetched it (classifyLogs), because it costs ~0.5 ms per line and
+// only changes when a heavy probe lands.
 func (a *App) recompute() {
-	for name, ni := range a.nodes {
-		if ni != nil && (len(ni.Journal) > 0 || len(ni.LogFiles) > 0) {
-			// rke2's kubelet/containerd log to files rather than the journal
-			srcs := []logs.Source{{Lines: ni.Journal}}
-			for _, lf := range ni.LogFiles {
-				srcs = append(srcs, logs.Source{Unit: logFileUnit(lf.Path), Lines: strings.Split(lf.Content, "\n")})
-			}
-			a.logSum[name] = logs.ClassifySources(srcs, time.Now())
-		}
-	}
 	a.stigRes = nil
 	if a.secScanned {
 		a.stigRes = stig.Evaluate(stig.Input{Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec})
@@ -1243,6 +1242,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.info.MergeSTIG(a.nodes[m.info.Node])
 		m.info.MergeConfig(a.nodes[m.info.Node])
 		a.nodes[m.info.Node] = m.info
+		if m.logSum != nil {
+			a.logSum[m.info.Node] = m.logSum
+		}
 		delete(a.pending, m.info.Node)
 		a.adoptSTIG(m.info.Node)
 		a.recordNodeProbe(m.info, m.opts)
@@ -1332,16 +1334,24 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	model, cmd := a.handleKeyInner(m)
 	a.frame.hot = a.frameHot(m)
 	if a.viewSignature() != before {
-		// the frame layout changed (tab, sub-tab, inspector depth, overlay):
-		// repaint from scratch so no stale rows survive on any terminal
+		// An overlay opened or closed, or the inspector changed depth: the
+		// frame shape changed, repaint from scratch so no stale rows
+		// survive on any terminal. Tab and sub-tab switches deliberately do
+		// not: the renderer erases every changed line to its end and the
+		// frame is always exactly height lines (fitScreen), and the clear
+		// lands after the new frame was flushed - a blank screen and a
+		// second full paint on every switch, which reads as lag on wide,
+		// heavily colored tabs like Security.
 		cmd = tea.Batch(cmd, tea.ClearScreen)
 	}
 	return model, cmd
 }
 
-// viewSignature identifies the structural layout of the current view.
+// viewSignature identifies the shape of the current view: the overlay and
+// the inspector depth. Tabs, sub-tabs and the logs node are not part of it
+// (see handleKey).
 func (a *App) viewSignature() string {
-	return fmt.Sprintf("%d|%s|%d|%d|%s", a.tab, a.subName(), len(a.inspect), a.overlay, a.logsNode)
+	return fmt.Sprintf("%d|%d", len(a.inspect), a.overlay)
 }
 
 func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2651,3 +2661,40 @@ func (a *App) inNamespace(ns string) bool {
 }
 
 var _ = lipgloss.Width
+
+// classifyLogs runs a probe's journal and log files through the knowledge
+// base, or returns nil when the probe carried none (light cycle: the
+// previous summary stays).
+func classifyLogs(ni *nodeinfo.Info) *logs.Summary {
+	if ni == nil || (len(ni.Journal) == 0 && len(ni.LogFiles) == 0) {
+		return nil
+	}
+	// rke2's kubelet/containerd log to files rather than the journal
+	srcs := []logs.Source{{Lines: ni.Journal}}
+	for _, lf := range ni.LogFiles {
+		srcs = append(srcs, logs.Source{Unit: logFileUnit(lf.Path), Lines: strings.Split(lf.Content, "\n")})
+	}
+	return logs.ClassifySources(srcs, time.Now())
+}
+
+// setNetTargets gives a node's probe the addresses its network checks
+// target (config tier, see nodeinfo NETPROBE): one pod on every other node
+// for the overlay ping, the CoreDNS pod IPs, the DNS and kubernetes
+// service IPs.
+func setNetTargets(opts *nodeinfo.Options, snap *k8s.Snapshot, node string) {
+	if snap == nil {
+		return
+	}
+	for _, t := range snap.PodTargetList() {
+		if !strings.HasPrefix(t, node+"=") {
+			opts.NetTargets = append(opts.NetTargets, t)
+		}
+	}
+	for i := range snap.Pods {
+		p := &snap.Pods[i]
+		if p.Namespace == "kube-system" && strings.Contains(p.Name, "coredns") && !strings.Contains(p.Name, "autoscaler") && p.Status.Phase == corev1.PodRunning && p.Status.PodIP != "" && len(opts.DNSPods) < 2 {
+			opts.DNSPods = append(opts.DNSPods, p.Status.PodIP)
+		}
+	}
+	opts.DNSIP, opts.APISvcIP = snap.ClusterDNSIP(), snap.APIServiceIP()
+}

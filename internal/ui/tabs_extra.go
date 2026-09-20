@@ -678,6 +678,9 @@ func (a *App) addonsContent() content {
 			parts = append(parts, styleWarn.Render("no CNI config in /etc/cni/net.d"))
 		}
 		add("  " + styleBold.Render(n) + "  " + strings.Join(parts, "  "))
+		if l := netSummary(ni); l != "" {
+			add("      " + l)
+		}
 	}
 
 	// cloud provider integration and CSI
@@ -2359,7 +2362,17 @@ func (a *App) cloudLines(s *k8s.Snapshot) []string {
 		out = append(out, fmt.Sprintf("      node plugin: %s", comp(d.NodePlugin)))
 		for _, b := range d.Trident {
 			st := okText(b.Online && (b.State == "" || b.State == "online"), b.State, strings.ToUpper(b.State))
+			if b.StateReason != "" && !b.Online {
+				st += " " + styleDim.Render(trunc(b.StateReason, 60))
+			}
+			if strings.EqualFold(b.UserState, "suspended") {
+				st += " " + styleWarn.Render("suspended")
+			}
 			out = append(out, fmt.Sprintf("      backend %s  %s  %s  %s", styleBold.Render(b.BackendName), b.Driver, st, styleDim.Render(b.Version)))
+		}
+		out = append(out, a.tridentLines(s, d.TridentX)...)
+		if d.Longhorn != nil {
+			out = append(out, a.longhornLines(s, d.Longhorn)...)
 		}
 		if v := d.VSphere; v != nil {
 			sec := "secret " + v.SecretRef
@@ -2386,4 +2399,59 @@ func uniqStrings(in []string) []string {
 		}
 	}
 	return out
+}
+
+// netSummary is one line of a node's network facts for the Addons CNI
+// section and the node detail: the overlay and underlay MTUs, and the
+// outcome of the active probes when the config tier ran them.
+func netSummary(ni *nodeinfo.Info) string {
+	var parts []string
+	if ni.DefaultDev != "" {
+		if l := ni.Link(ni.DefaultDev); l != nil {
+			parts = append(parts, kv("underlay", fmt.Sprintf("%s mtu %d", l.Name, l.MTU)))
+		}
+	}
+	for _, name := range []string{"flannel.1", "flannel-wg", "vxlan.calico", "tunl0", "wireguard.cali", "cilium_vxlan", "cilium_wg0", "cni0", "cilium_host"} {
+		if l := ni.Link(name); l != nil {
+			txt := fmt.Sprintf("%s mtu %d", l.Name, l.MTU)
+			if l.State == "DOWN" {
+				txt = styleCrit.Render(txt + " DOWN")
+			}
+			parts = append(parts, txt)
+		}
+	}
+	if ni.NetProbed {
+		ok, fail, skip := 0, 0, 0
+		var failed []string
+		for _, p := range ni.NetProbes {
+			switch {
+			case p.Skip:
+				skip++
+			case p.OK:
+				ok++
+			default:
+				fail++
+				t := p.Kind
+				if p.Node != "" {
+					t += "→" + p.Node
+				} else {
+					t += " " + p.Target
+				}
+				failed = append(failed, t)
+			}
+		}
+		txt := fmt.Sprintf("probes %d ok", ok)
+		if fail > 0 {
+			txt = styleCrit.Render(fmt.Sprintf("probes %d failed (%s), %d ok", fail, strings.Join(failed, ", "), ok))
+		} else if ok > 0 {
+			txt = styleOK.Render(txt)
+		}
+		if skip > 0 {
+			txt += styleDim.Render(fmt.Sprintf(", %d skipped", skip))
+		}
+		parts = append(parts, txt)
+	} else if len(ni.Links) > 0 {
+		parts = append(parts, styleDim.Render("probes: with the next config collection (R)"))
+	}
+	return strings.Join(parts, "  ")
 }

@@ -38,14 +38,19 @@ type Snapshot struct {
 	StorageClasses []storagev1.StorageClass
 	CSIDrivers     []storagev1.CSIDriver
 	CSINodes       []storagev1.CSINode
-	Deployments    []appsv1.Deployment
-	DaemonSets     []appsv1.DaemonSet
-	StatefulSets   []appsv1.StatefulSet
-	Jobs           []batchv1.Job
-	CronJobs       []batchv1.CronJob
-	CRBs           []rbacv1.ClusterRoleBinding
-	NetPols        []networkingv1.NetworkPolicy
-	Ingresses      []networkingv1.Ingress
+	// VolumeAttachments is what the attach/detach controller believes is
+	// attached where: with a NotReady node and a pod rescheduled elsewhere it
+	// shows the stale attachment behind a Multi-Attach error.
+	VolumeAttachments []storagev1.VolumeAttachment
+	Deployments       []appsv1.Deployment
+	DaemonSets        []appsv1.DaemonSet
+	StatefulSets      []appsv1.StatefulSet
+	Jobs              []batchv1.Job
+	CronJobs          []batchv1.CronJob
+	CRBs              []rbacv1.ClusterRoleBinding
+	NetPols           []networkingv1.NetworkPolicy
+	Ingresses         []networkingv1.Ingress
+	Services          []corev1.Service
 
 	// Names of secrets / configmaps / service accounts (ns/name) from
 	// metadata-only lists, used to spot dangling references.
@@ -77,6 +82,8 @@ type Snapshot struct {
 	// Cloud provider / CSI extras (cloud.go): Trident backends and the
 	// vSphere CPI config; everything else is derived by Snapshot.Cloud.
 	TridentBackends []TridentBackend
+	Trident         *TridentInfo  // nil without the Trident CRDs
+	Longhorn        *LonghornInfo // nil without the Longhorn CRDs
 	VSphereConf     *VSphereConf
 	HelmReleases    []HelmRelease
 	Rancher         *RancherInfo
@@ -342,6 +349,16 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		mu.Unlock()
 		return nil
 	})
+	optional("volumeattachments", func() error {
+		l, err := cs.StorageV1().VolumeAttachments().List(ctx, all)
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		s.VolumeAttachments = l.Items
+		mu.Unlock()
+		return nil
+	})
 	run("deployments", func() error {
 		l, err := cs.AppsV1().Deployments("").List(ctx, all)
 		if err != nil {
@@ -369,6 +386,16 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		}
 		mu.Lock()
 		s.StatefulSets = l.Items
+		mu.Unlock()
+		return nil
+	})
+	run("services", func() error {
+		l, err := cs.CoreV1().Services("").List(ctx, all)
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		s.Services = l.Items
 		mu.Unlock()
 		return nil
 	})
@@ -504,8 +531,22 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 	go func() {
 		defer wg.Done()
 		tb := c.tridentBackends(ctx)
+		// the other Trident CRs only when the backend CRD is there
+		var ti *TridentInfo
+		if _, denied := c.Denied("tridentbackends.trident.netapp.io"); !denied {
+			ti = c.tridentInfo(ctx)
+		}
 		mu.Lock()
 		s.TridentBackends = tb
+		s.Trident = ti
+		mu.Unlock()
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		li := c.longhornInfo(ctx)
+		mu.Lock()
+		s.Longhorn = li
 		mu.Unlock()
 	}()
 	optional("kubeadm-config", func() error {

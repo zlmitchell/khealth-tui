@@ -25,6 +25,12 @@ type Options struct {
 	KnownTarballs []string // "path|size|mtime" entries whose manifests are already known
 	PVPaths       []string // hostPath/local PV directories to measure with du (heavy)
 	VCenters      []string // vCenter host[:port]s from the vSphere CPI config, probed from the node (config tier)
+	// network probe targets (config tier): one "node=podIP" per node for the
+	// overlay ping, the CoreDNS pod IPs, the DNS and kubernetes service IPs
+	NetTargets []string
+	DNSPods    []string
+	DNSIP      string
+	APISvcIP   string
 }
 
 var safeHost = regexp.MustCompile(`^[A-Za-z0-9._-]{1,253}(:[0-9]{1,5})?$`)
@@ -54,7 +60,12 @@ func Script(o Options) string {
 	var b strings.Builder
 	base := strings.ReplaceAll(baseScript, "__CONFIG__", map[bool]string{true: "1", false: "0"}[o.Config])
 	base = strings.ReplaceAll(base, "__CPUSAMPLE__", map[bool]string{true: "1", false: "0"}[o.CPUSample])
-	b.WriteString(strings.ReplaceAll(base, "__KPID__", fmt.Sprint(max(o.KubeletPID, 0))))
+	base = strings.ReplaceAll(base, "__KPID__", fmt.Sprint(max(o.KubeletPID, 0)))
+	base = strings.ReplaceAll(base, "__NETTARGETS__", strings.Join(netTargets(o.NetTargets), " "))
+	base = strings.ReplaceAll(base, "__DNSPODS__", strings.Join(ips(o.DNSPods), " "))
+	base = strings.ReplaceAll(base, "__DNSIP__", ipOrEmpty(o.DNSIP))
+	base = strings.ReplaceAll(base, "__APISVC__", ipOrEmpty(o.APISvcIP))
+	b.WriteString(base)
 	pf := strings.ReplaceAll(preflightScript, "__CONFIG__", map[bool]string{true: "1", false: "0"}[o.Config])
 	pf = strings.ReplaceAll(pf, "__HEAVY__", map[bool]string{true: "1", false: "0"}[o.Heavy])
 	var vcs []string
@@ -161,3 +172,36 @@ var heavyScript string
 //
 //go:embed scripts/preflight.sh
 var preflightScript string
+
+var safeIP = regexp.MustCompile(`^[0-9a-fA-F.:]{2,45}$`)
+var safeNode = regexp.MustCompile(`^[A-Za-z0-9._-]{1,253}$`)
+
+// netTargets keeps the "node=ip" entries that are safe to paste into the
+// script.
+func netTargets(in []string) []string {
+	var out []string
+	for _, t := range in {
+		n, ip, ok := strings.Cut(t, "=")
+		if ok && safeNode.MatchString(n) && safeIP.MatchString(ip) {
+			out = append(out, n+"="+ip)
+		}
+	}
+	return out
+}
+
+func ips(in []string) []string {
+	var out []string
+	for _, ip := range in {
+		if safeIP.MatchString(ip) {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+func ipOrEmpty(ip string) string {
+	if safeIP.MatchString(ip) {
+		return ip
+	}
+	return ""
+}

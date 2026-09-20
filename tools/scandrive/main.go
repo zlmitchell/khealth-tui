@@ -11,6 +11,7 @@
 //
 //	scandrive [-press 23s] [-timeout 6m] -- [khealth flags]
 //	scandrive -press 23s -- --kubeconfig ~/.kube/x.yaml --ssh-user root --ssh-key ~/.ssh/id_rsa
+//	scandrive -dump 60s -final 7 -- ...   (no scan: print the Addons tab 60 s in and exit)
 //	KHT_SSH_PASSWORD=... scandrive -- --kubeconfig ~/.kube/x.yaml --ssh-user ops --become sudo
 package main
 
@@ -24,7 +25,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 	"k8s.io/klog/v2"
 
 	"k8s-health-tui/internal/config"
@@ -37,6 +40,8 @@ func main() {
 	bf := flag.NewFlagSet("scandrive", flag.ExitOnError)
 	press := bf.Duration("press", 0, "delay after the first snapshot before 0 + Shift+S are pressed")
 	timeout := bf.Duration("timeout", 6*time.Minute, "give up (and print the current view) after this long")
+	final := bf.String("final", "", "keys to press before the final dump instead of the OS STIG sub-tab (e.g. 7 for Addons)")
+	dump := bf.Duration("dump", 0, "instead of waiting for the scan: press -final this long after start, print the view and exit")
 	bf.Usage = func() {
 		fmt.Fprintf(bf.Output(), "Usage: scandrive [-press D] [-timeout D] -- [khealth flags]\n\n")
 		bf.PrintDefaults()
@@ -59,6 +64,7 @@ func main() {
 	}
 	klog.SetOutput(io.Discard)
 	klog.LogToStderr(false)
+	lipgloss.SetColorProfile(termenv.TrueColor) // frames sized as a real terminal sees them
 	app, err := ui.New(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -98,8 +104,21 @@ func main() {
 	pressed := false
 	last := ""
 	deadline := time.After(*timeout)
+	var dumpAt <-chan time.Time
+	if *dump > 0 {
+		dumpAt = time.After(*dump)
+	}
 	for {
 		select {
+		case <-dumpAt:
+			for _, r := range *final {
+				update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			}
+			for len(msgs) > 0 {
+				update(<-msgs)
+			}
+			fmt.Println(ansi.Strip(model.View()))
+			return
 		case m := <-msgs:
 			t := fmt.Sprintf("%T", m)
 			if _, ok := m.(pressMsg); ok {
@@ -133,14 +152,29 @@ func main() {
 				}()
 			}
 			if strings.Contains(scanRe.FindString(v), "finished") {
-				// the OS STIG sub-tab, once the recompute has landed
-				update(tea.KeyMsg{Type: tea.KeyRight})
-				update(tea.KeyMsg{Type: tea.KeyRight})
+				// the OS STIG sub-tab (or -final keys), once the recompute has landed
+				if *final != "" {
+					for _, r := range *final {
+						update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+					}
+				} else {
+					update(tea.KeyMsg{Type: tea.KeyRight})
+					update(tea.KeyMsg{Type: tea.KeyRight})
+				}
 				time.Sleep(500 * time.Millisecond)
 				for len(msgs) > 0 {
 					update(<-msgs)
 				}
 				fmt.Println(ansi.Strip(model.View()))
+				// cost of a sub-tab switch (key + the frame after it), each sub-tab
+				for i := 0; i < 6; i++ {
+					t0 := time.Now()
+					update(tea.KeyMsg{Type: tea.KeyRight})
+					t1 := time.Now()
+					fr := model.View()
+					t2 := time.Now()
+					fmt.Printf("sub-tab switch %d: key %s, view %s, frame %d bytes, %d escapes\n", i, t1.Sub(t0).Round(time.Millisecond), t2.Sub(t1).Round(time.Millisecond), len(fr), strings.Count(fr, "\x1b["))
+				}
 				return
 			}
 		case <-deadline:

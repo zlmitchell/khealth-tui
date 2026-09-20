@@ -62,6 +62,27 @@ type CSIInfo struct {
 	MultipathBlacklist int    // blacklist stanzas in /etc/multipath.conf (-1 when no file)
 	FindMultipaths     string // multipath.conf find_multipaths (Trident iSCSI wants "no")
 	MountNFS           bool   // mount.nfs present (NAS backends)
+	// Longhorn block devices the node still presents (/dev/longhorn/<volume>)
+	// and the iSCSI sessions behind them: compared with where the cluster
+	// says each volume is attached, a device left on a node the cluster
+	// gave up on is the split-brain case.
+	LonghornDevs  []string
+	ISCSISessions []ISCSISession
+}
+
+// ISCSISession is one entry of /sys/class/iscsi_session.
+type ISCSISession struct {
+	Target string // iqn
+	State  string // LOGGED_IN, FAILED, ...
+}
+
+// LonghornVolume extracts the volume name from a Longhorn iSCSI target
+// (iqn.2019-10.io.longhorn:<volume>), "" for other targets.
+func (s ISCSISession) LonghornVolume() string {
+	if i := strings.Index(s.Target, "io.longhorn:"); i >= 0 {
+		return s.Target[i+len("io.longhorn:"):]
+	}
+	return ""
 }
 
 // SudoInfo is the sudo/ssh-key state of the ssh user and the cloud-init users.
@@ -462,6 +483,11 @@ func parsePreflight(info *Info, secs map[string]string) {
 			p.CSI.FindMultipaths = strings.TrimSpace(v)
 		case "mount_nfs":
 			p.CSI.MountNFS = v == "yes"
+		case "lhdev":
+			p.CSI.LonghornDevs = append(p.CSI.LonghornDevs, strings.TrimSpace(v))
+		case "iscsi":
+			t, st, _ := strings.Cut(strings.TrimSpace(v), "|")
+			p.CSI.ISCSISessions = append(p.CSI.ISCSISessions, ISCSISession{Target: t, State: st})
 		}
 	}
 	p.Auditd = kvLines(secs["AUDITD"])

@@ -574,12 +574,21 @@ func (a *App) storageContent() content {
 				used = styleDim.Render("no stats")
 			}
 		}
-		rows = append(rows, []string{p.Namespace, p.Name, st, used, mounted, kind, p.Spec.VolumeName, capacity, sc, age(p.CreationTimestamp.Time)})
+		row := []string{p.Namespace, p.Name, st, used, mounted, kind}
+		if s.Longhorn != nil {
+			row = append(row, backendHealth(s, p.Namespace, p.Name))
+		}
+		rows = append(rows, append(row, p.Spec.VolumeName, capacity, sc, age(p.CreationTimestamp.Time)))
 	}
 	if len(rows) == 0 {
 		add(styleDim.Render("  none"))
 	} else {
-		h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "NAME", max: 36}, {title: "STATUS"}, {title: "USED"}, {title: "NODE", max: 20}, {title: "BACKEND", max: 22}, {title: "VOLUME", max: 30}, {title: "CAPACITY"}, {title: "CLASS"}, {title: "AGE"}}, rows)
+		cols := []column{{title: "NAMESPACE", max: 24}, {title: "NAME", max: 36}, {title: "STATUS"}, {title: "USED"}, {title: "NODE", max: 20}, {title: "BACKEND", max: 22}}
+		if s.Longhorn != nil { // what the driver's control plane says about the volume (Longhorn robustness, healthy/wanted replicas)
+			cols = append(cols, column{title: "HEALTH"})
+		}
+		cols = append(cols, column{title: "VOLUME", max: 30}, column{title: "CAPACITY"}, column{title: "CLASS"}, column{title: "AGE"})
+		h, lines := renderTable(a.width, cols, rows)
 		add(h)
 		add(lines...)
 	}

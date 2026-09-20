@@ -40,6 +40,10 @@ Filesystem     Type 1024-blocks    Used Available Capacity Mounted on
 Filesystem      Inodes IUsed   IFree IUse% Mounted on
 /dev/sda1      3000000 300000 2700000   10% /
 /dev/sdb1     10000000 100000 9900000    1% /var/lib/rancher
+===STALEMOUNTS
+/var/lib/kubelet/plugins/kubernetes.io/csi/driver.longhorn.io/78dc/globalmount|10.43.224.112:/pvc-be8106a9|nfs4
+/var/lib/kubelet/pods/0223/volumes/kubernetes.io~csi/pvc-be8106a9/mount|10.43.224.112:/pvc-be8106a9|nfs4
+junk line
 ===SVC
 rke2-server loaded active running
 containerd loaded active running
@@ -183,6 +187,9 @@ func TestParse(t *testing.T) {
 	}
 	if info.MemTotal != 8000000*1024 || info.MemAvail != 2000000*1024 || int(info.MemPct) != 75 {
 		t.Errorf("mem: %d %d %v", info.MemTotal, info.MemAvail, info.MemPct)
+	}
+	if len(info.StaleMounts) != 2 || info.StaleMounts[0].Source != "10.43.224.112:/pvc-be8106a9" || info.StaleMounts[0].FSType != "nfs4" || info.StaleMounts[1].Mountpoint != "/var/lib/kubelet/pods/0223/volumes/kubernetes.io~csi/pvc-be8106a9/mount" {
+		t.Errorf("stale mounts: %+v", info.StaleMounts)
 	}
 	if len(info.Mounts) != 2 || info.Mounts[0].Mountpoint != "/" || info.Mounts[0].UsePct != 90 || info.Mounts[0].InodePct != 10 {
 		t.Errorf("mounts: %+v", info.Mounts)

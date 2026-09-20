@@ -272,12 +272,34 @@ func (a *App) nodeDetail(name string) (string, []string) {
 		}
 		plat = append(plat, []string{"cni", strings.Join(c, "; ")})
 	}
+	if l := netSummary(ni); l != "" {
+		plat = append(plat, []string{"network", l})
+	}
 	if len(ni.RegistryMirrors) > 0 {
 		plat = append(plat, []string{"registry mirrors", strings.Join(ni.RegistryMirrors, ", ") + styleDim.Render("  containerd hosts: "+strings.Join(ni.ContainerdHosts, ", "))})
 	}
 	if len(plat) > 0 {
 		add("", styleTitle.Render("Platform")+styleDim.Render("  full config on the RKE2 and Addons tabs"))
 		kvTable(plat)
+	}
+	if ni.NetProbed && len(ni.NetProbes) > 0 {
+		add("", styleTitle.Render("Network probes")+styleDim.Render("  run from this node with the config tier: ping one pod per node over the overlay, DNS to the CoreDNS pods and the service, TCP to the kubernetes service"))
+		var rows [][]string
+		for _, p := range ni.NetProbes {
+			st := styleOK.Render("ok")
+			switch {
+			case p.Skip:
+				st = styleDim.Render("skip")
+			case !p.OK:
+				st = styleCrit.Render("FAIL")
+			}
+			target := p.Target
+			if p.Node != "" {
+				target = "pod on " + p.Node + " (" + p.Target + ")"
+			}
+			rows = append(rows, []string{p.Kind, target, st, p.Detail})
+		}
+		table([]column{{title: "PROBE"}, {title: "TARGET"}, {title: "RESULT"}, {title: "DETAIL"}}, rows)
 	}
 
 	// ---- filesystems ----

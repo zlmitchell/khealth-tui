@@ -86,14 +86,18 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 			add(SevWarn, "storage", obj, fmt.Sprintf("%d volume failures in the last hour, latest %s on %s: %s", total, f.Reason, f.Object, truncStr(f.Message, 160)), "kubectl get events -A --field-selector reason="+f.Reason+"; controller logs of "+d.Driver)
 		}
 		if d.Provider == "trident" {
+			evalTridentExtra(in, d, add)
 			if len(d.Trident) == 0 && len(s.TridentBackends) == 0 {
 				add(SevWarn, "storage", obj, "Trident is installed but has no TridentBackend: no volume can be provisioned", "create a TridentBackendConfig (ONTAP SVM credentials) in the trident namespace")
 			}
 			for _, b := range d.Trident {
 				if !b.Online || (b.State != "" && b.State != "online") {
-					add(SevCrit, "storage", obj, fmt.Sprintf("Trident backend %s (%s) is %s: provisioning and attach on it fail", b.BackendName, b.Driver, orDefault(b.State, "offline")), "tridentctl -n trident get backend "+b.BackendName+"; check SVM credentials, management LIF reachability and the ONTAP aggregate")
+					add(SevCrit, "storage", obj, fmt.Sprintf("Trident backend %s (%s) is %s%s: provisioning and attach on it fail", b.BackendName, b.Driver, orDefault(b.State, "offline"), problemSuffix(b.StateReason)), "tridentctl -n trident get backend "+b.BackendName+"; check SVM credentials, management LIF reachability and the ONTAP aggregate")
 				}
 			}
+		}
+		if d.Provider == "longhorn" {
+			evalLonghorn(in, d, add)
 		}
 		if d.Provider == "vsphere" {
 			if ci.Provider != "vsphere" {
@@ -111,6 +115,8 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 			}
 		}
 	}
+
+	evalVolumeAttachments(in, add)
 
 	// StorageClasses whose CSI provisioner has no driver
 	have := map[string]bool{}
@@ -138,6 +144,7 @@ func evalCloudNode(name string, ni *nodeinfo.Info, in Input, ci k8s.CloudInfo, a
 			add(SevCrit, "cloud", name, fmt.Sprintf("kubelet runs with --cloud-provider=%s while the %s cloud controller is installed: the node registers without the uninitialized taint and providerID, so the CPI ignores it and the CSI cannot map it", orDefault(v, "<unset>"), ci.Provider), nv.CloudProvider(ci.Provider)+" (re-register the node if it already has an rke2:// providerID)")
 		}
 	}
+	evalStorageNode(name, ni, in, add)
 	if !p.Probed {
 		return
 	}

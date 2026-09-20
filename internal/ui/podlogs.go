@@ -38,6 +38,7 @@ type logView struct {
 	streaming  bool
 	seq        int
 	cancel     context.CancelFunc
+	rendered   logRender // display cache, see logVisibleLines
 	ch         chan logChunk
 }
 
@@ -199,52 +200,73 @@ func (a *App) handleLogMsg(m logMsg) tea.Cmd {
 	return waitLogs(lv.ch, lv.seq)
 }
 
+// logVisibleLines is the buffer rendered for display: filtered, with the
+// timestamp mode, highlighting and wrap applied. Rendering is cached on
+// the viewer and extended incrementally as chunks arrive: the stream
+// appends, and View runs on every spinner tick, so re-highlighting 5,000
+// lines per frame is what made the viewer lag on a busy pod. A change of
+// filter, timestamps, highlighting, wrap or width re-renders from scratch.
 func (a *App) logVisibleLines() []string {
 	lv := a.logs
 	if lv == nil {
 		return nil
 	}
-	f := strings.ToLower(lv.filter)
+	key := fmt.Sprintf("%s|%d|%v|%v|%d", lv.filter, lv.tsMode, lv.plain, lv.wrap, a.width)
+	rc := &lv.rendered
+	if rc.key != key || rc.n > len(lv.lines) || (rc.n > 0 && rc.first != lv.lines[0]) {
+		// settings changed, or the buffer was trimmed at the head
+		rc.key, rc.n, rc.out = key, 0, nil
+	}
+	for _, l := range lv.lines[rc.n:] {
+		rc.out = append(rc.out, a.renderPodLogLine(lv, l)...)
+	}
+	rc.n = len(lv.lines)
+	if rc.n > 0 {
+		rc.first = lv.lines[0]
+	}
+	return rc.out
+}
+
+// renderPodLogLine renders one streamed line: nothing when the filter
+// drops it, one line, or several when wrapping.
+func (a *App) renderPodLogLine(lv *logView, l string) []string {
+	if f := strings.ToLower(lv.filter); f != "" && !strings.Contains(strings.ToLower(l), f) {
+		return nil
+	}
 	w := a.width - 6
-	var out []string
-	for _, l := range lv.lines {
-		if f != "" && !strings.Contains(strings.ToLower(l), f) {
-			continue
+	t, rest, hasTS := splitTimestamp(l)
+	prefix := ""
+	if hasTS {
+		switch lv.tsMode {
+		case 0:
+			prefix = styleDim.Render(t.Local().Format("15:04:05")) + " "
+		case 2:
+			prefix = styleDim.Render(l[:len(l)-len(rest)-1]) + " "
 		}
-		t, rest, hasTS := splitTimestamp(l)
-		prefix := ""
-		if hasTS {
-			switch lv.tsMode {
-			case 0:
-				prefix = styleDim.Render(t.Local().Format("15:04:05")) + " "
-			case 2:
-				prefix = styleDim.Render(l[:len(l)-len(rest)-1]) + " "
-			}
+	}
+	hl := func(frag string) string {
+		if lv.plain {
+			return frag
 		}
-		hl := func(frag string) string {
-			if lv.plain {
-				return frag
-			}
-			return highlightLog(frag)
-		}
-		if lv.wrap {
-			// color the whole line (so JSON/logfmt detection sees it intact),
-			// then wrap with an escape-sequence-aware wrapper
-			indent := strings.Repeat(" ", ansiWidth(prefix))
-			width := w - ansiWidth(prefix)
-			if width < 20 {
-				width = 20
-			}
-			frags := wrapStyled(hl(rest), width)
-			for i, fr := range frags {
-				if i == 0 {
-					out = append(out, prefix+fr)
-				} else {
-					out = append(out, indent+fr)
-				}
-			}
+		return highlightLog(frag)
+	}
+	if !lv.wrap {
+		return []string{prefix + hl(rest)}
+	}
+	// color the whole line (so JSON/logfmt detection sees it intact),
+	// then wrap with an escape-sequence-aware wrapper
+	indent := strings.Repeat(" ", ansiWidth(prefix))
+	width := w - ansiWidth(prefix)
+	if width < 20 {
+		width = 20
+	}
+	frags := wrapStyled(hl(rest), width)
+	out := make([]string, 0, len(frags))
+	for i, fr := range frags {
+		if i == 0 {
+			out = append(out, prefix+fr)
 		} else {
-			out = append(out, prefix+hl(rest))
+			out = append(out, indent+fr)
 		}
 	}
 	return out
@@ -457,3 +479,13 @@ func (a *App) podForLogs() (ns, pod string, siblings []string, ok bool) {
 }
 
 var _ = k8s.PodStatus
+
+// logRender is the viewer's rendered buffer: the lines of lv.lines[:n]
+// under the settings in key, first being lv.lines[0] when it was rendered
+// (a trimmed buffer starts elsewhere and is re-rendered).
+type logRender struct {
+	key   string
+	n     int
+	first string
+	out   []string
+}

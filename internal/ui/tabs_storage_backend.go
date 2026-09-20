@@ -1,0 +1,254 @@
+package ui
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"k8s-health-tui/internal/k8s"
+)
+
+// CSI backend detail for the Addons tab: what Longhorn's and Trident's own
+// control planes report, under the driver's controller / node plugin
+// lines of cloudLines.
+
+// longhornLines renders the Longhorn backend: the volume tally, every node
+// with its disks, the backup target and the volumes that are not healthy.
+func (a *App) longhornLines(s *k8s.Snapshot, li *k8s.LonghornInfo) []string {
+	var out []string
+	healthy, degraded, faulted, unknown := li.Counts()
+	tally := fmt.Sprintf("%d volumes: %s", len(li.Volumes), styleOK.Render(fmt.Sprintf("%d healthy", healthy)))
+	if degraded > 0 {
+		tally += ", " + styleWarn.Render(fmt.Sprintf("%d degraded", degraded))
+	}
+	if faulted > 0 {
+		tally += ", " + styleCrit.Render(fmt.Sprintf("%d faulted", faulted))
+	}
+	if unknown > 0 {
+		tally += ", " + styleCrit.Render(fmt.Sprintf("%d unknown", unknown))
+	}
+	readyNodes := 0
+	for _, n := range li.Nodes {
+		if n.Ready {
+			readyNodes++
+		}
+	}
+	nodes := fmt.Sprintf("%d/%d", readyNodes, len(li.Nodes))
+	if readyNodes < len(li.Nodes) {
+		nodes = styleCrit.Render(nodes)
+	} else {
+		nodes = styleOK.Render(nodes)
+	}
+	line := "      " + styleBold.Render("longhorn") + "  " + tally + "  " + kv("nodes ready", nodes)
+	for _, bt := range li.BackupTargets {
+		switch {
+		case bt.URL == "":
+			line += "  " + kv("backup target", styleDim.Render("none"))
+		case bt.Available:
+			line += "  " + kv("backup target", styleOK.Render(bt.URL))
+		default:
+			line += "  " + kv("backup target", styleCrit.Render(bt.URL+" unavailable"))
+		}
+	}
+	if len(li.Orphans) > 0 {
+		line += "  " + styleWarn.Render(fmt.Sprintf("%d orphans", len(li.Orphans)))
+	}
+	if rc := li.Setting("default-replica-count"); rc != "" {
+		line += "  " + kv("default replicas", rc)
+	}
+	out = append(out, line)
+	for _, n := range li.Nodes {
+		st := styleOK.Render("ready")
+		if !n.Ready {
+			st = styleCrit.Render("NOT READY")
+		} else if !n.Schedulable || !n.AllowScheduling {
+			st = styleWarn.Render("unschedulable")
+		}
+		parts := []string{st}
+		if n.InstanceManager != "" && n.InstanceManager != "running" {
+			parts = append(parts, styleCrit.Render("instance manager "+n.InstanceManager))
+		}
+		for _, d := range n.Disks {
+			txt := fmt.Sprintf("%s %s free of %s (%d replicas)", d.Path, humanBytes(float64(d.Available)), humanBytes(float64(d.Maximum)), d.Replicas)
+			switch {
+			case !d.Ready:
+				txt = styleCrit.Render(d.Path + " NOT READY")
+			case !d.Schedulable:
+				txt = styleWarn.Render(txt + " unschedulable")
+			}
+			parts = append(parts, txt)
+		}
+		out = append(out, "        "+styleBold.Render(n.Name)+"  "+strings.Join(parts, "  "))
+	}
+	// volumes that need attention, worst first
+	var bad []k8s.LonghornVolume
+	for _, v := range li.Volumes {
+		if v.Robustness != "healthy" && !(v.State == "detached" && v.Robustness == "unknown" && v.Scheduled) || !v.Scheduled || (v.AccessMode == "rwx" && v.State == "attached" && v.ShareState != "" && v.ShareState != "running") {
+			bad = append(bad, v)
+		}
+	}
+	rank := map[string]int{"faulted": 0, "unknown": 1, "degraded": 2}
+	sort.SliceStable(bad, func(i, j int) bool {
+		ri, ok := rank[bad[i].Robustness]
+		if !ok {
+			ri = 3
+		}
+		rj, ok := rank[bad[j].Robustness]
+		if !ok {
+			rj = 3
+		}
+		return ri < rj
+	})
+	for i, v := range bad {
+		if i == 8 {
+			out = append(out, styleDim.Render(fmt.Sprintf("        ... %d more volumes need attention (Overview findings list them all)", len(bad)-8)))
+			break
+		}
+		out = append(out, "        "+longhornVolumeLine(v))
+	}
+	return out
+}
+
+// longhornVolumeLine is one volume: name (PVC), state@node, robustness with
+// the replica tally and the failed / rebuilding nodes.
+func longhornVolumeLine(v k8s.LonghornVolume) string {
+	name := v.Name
+	if v.PVC != "" {
+		name = v.PVC + styleDim.Render(" ("+trunc(v.Name, 20)+")")
+	}
+	state := v.State
+	if v.Node != "" {
+		state += "@" + v.Node
+	}
+	rob := v.Robustness
+	switch v.Robustness {
+	case "healthy":
+		rob = styleOK.Render(rob)
+	case "degraded":
+		rob = styleWarn.Render(rob)
+	case "faulted", "unknown":
+		rob = styleCrit.Render(strings.ToUpper(rob))
+	}
+	var failed, rebuilding []string
+	for _, r := range v.ReplicaList {
+		switch {
+		case r.Rebuild >= 0:
+			rebuilding = append(rebuilding, fmt.Sprintf("%s %d%%", r.Node, r.Rebuild))
+		case r.Mode == "WO":
+			rebuilding = append(rebuilding, r.Node)
+		case r.FailedAt != "" || r.Mode == "ERR" || r.State == "error" || r.State == "unknown":
+			failed = append(failed, orStr(r.Node, "unscheduled"))
+		case r.Node == "":
+			failed = append(failed, "unscheduled")
+		}
+	}
+	txt := fmt.Sprintf("%s  %s  %s %d/%d", name, state, rob, v.Healthy(), v.Replicas)
+	if len(failed) > 0 {
+		txt += styleDim.Render(" failed: " + strings.Join(uniqStrings(failed), ","))
+	}
+	if len(rebuilding) > 0 {
+		txt += "  " + styleInfo.Render("rebuilding "+strings.Join(rebuilding, ","))
+	}
+	if !v.Scheduled {
+		txt += "  " + styleCrit.Render("unscheduled: "+trunc(v.SchedMessage, 60))
+	}
+	if v.AccessMode == "rwx" && v.ShareState != "" {
+		txt += "  " + kv("share", okText(v.ShareState == "running", v.ShareState, strings.ToUpper(v.ShareState)))
+	}
+	return txt
+}
+
+// tridentLines renders the Trident control plane beyond the backends:
+// operator state, backend configs, node registrations, publications.
+func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo) []string {
+	var out []string
+	if ti == nil {
+		return nil
+	}
+	if o := ti.Orchestrator; o != nil {
+		st := o.Status
+		if strings.EqualFold(st, "installed") {
+			st = styleOK.Render(st)
+		} else {
+			st = styleCrit.Render(strings.ToUpper(orStr(st, "unknown")))
+		}
+		line := "      " + kv("operator", st) + "  " + kv("version", o.Version)
+		if o.Message != "" && !strings.EqualFold(o.Status, "installed") {
+			line += "  " + styleDim.Render(trunc(o.Message, 80))
+		}
+		line += "  " + kv("force-detach", okText(o.ForceDetach, "on", "off"))
+		out = append(out, line)
+	}
+	for _, bc := range ti.BackendConfigs {
+		st := bc.Phase
+		if strings.EqualFold(bc.Phase, "bound") {
+			st = styleOK.Render(st)
+		} else {
+			st = styleCrit.Render(strings.ToUpper(orStr(st, "unprocessed")))
+		}
+		line := fmt.Sprintf("      backendconfig %s  %s  %s", styleBold.Render(bc.Namespace+"/"+bc.Name), bc.Driver, st)
+		if strings.EqualFold(bc.LastOperation, "failed") {
+			line += "  " + styleWarn.Render("last update failed")
+		}
+		if bc.Message != "" && !strings.EqualFold(bc.Phase, "bound") {
+			line += "  " + styleDim.Render(trunc(bc.Message, 70))
+		}
+		out = append(out, line)
+	}
+	if len(ti.Nodes) > 0 {
+		registered, dirty := 0, 0
+		for _, n := range ti.Nodes {
+			if n.Registered && !n.Deleted {
+				registered++
+			}
+			if strings.EqualFold(n.PublicationState, "dirty") {
+				dirty++
+			}
+		}
+		nodes := fmt.Sprintf("%d/%d", registered, len(s.Nodes))
+		if registered < len(s.Nodes) {
+			nodes = styleWarn.Render(nodes)
+		} else {
+			nodes = styleOK.Render(nodes)
+		}
+		line := "      " + kv("nodes registered", nodes) + "  " + kv("publications", fmt.Sprint(len(ti.Publications)))
+		if dirty > 0 {
+			line += "  " + styleWarn.Render(fmt.Sprintf("%d nodes dirty", dirty))
+		}
+		for vol, nodes := range ti.MultiPublished() {
+			line += "  " + styleCrit.Render(vol+" published to "+strings.Join(nodes, "+"))
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// backendHealth is the Storage tab's BACKEND HEALTH cell for a PVC: what
+// the driver's control plane says about the volume behind it.
+func backendHealth(s *k8s.Snapshot, ns, name string) string {
+	if v := s.Longhorn.VolumeForPVC(ns, name); v != nil {
+		txt := fmt.Sprintf("%s %d/%d", v.Robustness, v.Healthy(), v.Replicas)
+		switch {
+		case !v.Scheduled && v.Robustness != "degraded":
+			return styleCrit.Render("unscheduled")
+		case v.Robustness == "faulted":
+			return styleCrit.Render("FAULTED")
+		case v.Robustness == "healthy":
+			return styleOK.Render(txt)
+		case v.Robustness == "degraded":
+			return styleWarn.Render(txt)
+		case v.State == "detached":
+			return styleDim.Render("detached")
+		default:
+			return styleCrit.Render(strings.ToUpper(txt))
+		}
+	}
+	return ""
+}
+
+func orStr(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}

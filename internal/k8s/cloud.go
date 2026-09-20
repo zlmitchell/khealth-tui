@@ -57,6 +57,8 @@ type CSIStatus struct {
 	PVs        int
 	Failures   []VolumeFailure // last hour
 	Trident    []TridentBackend
+	TridentX   *TridentInfo  // orchestrator, backend configs, nodes, publications
+	Longhorn   *LonghornInfo // volumes, replicas, nodes, disks, backup target
 	VSphere    *VSphereConf
 }
 
@@ -84,6 +86,55 @@ type TridentBackend struct {
 	Online                       bool
 	Driver                       string // config.storageDriverName: ontap-nas, ontap-san, ...
 	Version                      string
+	UserState                    string // "" or suspended
+	StateReason                  string
+	ConfigRef                    string // TridentBackendConfig uid
+}
+
+// TridentInfo is the rest of the Trident control plane: the operator's
+// TridentOrchestrator, the TridentBackendConfigs the backends come from,
+// the node registrations and which node each volume is published to.
+type TridentInfo struct {
+	Orchestrator   *TridentOrchestrator
+	BackendConfigs []TridentBackendConfig
+	Nodes          []TridentNode
+	Publications   []TridentPublication
+}
+
+// TridentOrchestrator is the trident-operator's install state.
+type TridentOrchestrator struct {
+	Name, Status, Message, Version, Namespace string // Status: Installed, Installing, Failed, Error, Uninstalled, Updating
+	SilenceAutosupport, ForceDetach           bool
+}
+
+// TridentBackendConfig is a TridentBackendConfig (the declarative backend).
+type TridentBackendConfig struct {
+	Namespace, Name, BackendName, Driver string
+	Phase                                string // Bound, Unbound, Failed, Deleting, Deleted, Lost
+	LastOperation                        string // Success, Failed
+	Message                              string
+	Credentials                          string // spec.credentials.name
+}
+
+// TridentNode is a node registered with the Trident controller.
+type TridentNode struct {
+	Name             string
+	Registered       bool // status.registered (newer Trident) or present at all (older)
+	IQN, NQN         string
+	PublicationState string // clean, cleanable, dirty
+	Deleted          bool
+}
+
+// TridentPublication is a TridentVolumePublication: volume -> node.
+type TridentPublication struct {
+	Volume, Node string
+	ReadOnly     bool
+	AccessMode   int32 // CSI access mode: 1 single-node-writer, 5 multi-node-multi-writer, ...
+}
+
+// SingleWriter reports whether the access mode allows one writer node only.
+func (p TridentPublication) SingleWriter() bool {
+	return p.AccessMode == 1 || p.AccessMode == 6 || p.AccessMode == 7
 }
 
 // VSphereConf is the vSphere CPI configuration (kube-system
@@ -97,7 +148,11 @@ type VSphereConf struct {
 }
 
 var (
-	tridentBackendGVR = schema.GroupVersionResource{Group: "trident.netapp.io", Version: "v1", Resource: "tridentbackends"}
+	tridentBackendGVR       = schema.GroupVersionResource{Group: "trident.netapp.io", Version: "v1", Resource: "tridentbackends"}
+	tridentOrchestratorGVR  = schema.GroupVersionResource{Group: "trident.netapp.io", Version: "v1", Resource: "tridentorchestrators"}
+	tridentBackendConfigGVR = schema.GroupVersionResource{Group: "trident.netapp.io", Version: "v1", Resource: "tridentbackendconfigs"}
+	tridentNodeGVR          = schema.GroupVersionResource{Group: "trident.netapp.io", Version: "v1", Resource: "tridentnodes"}
+	tridentPublicationGVR   = schema.GroupVersionResource{Group: "trident.netapp.io", Version: "v1", Resource: "tridentvolumepublications"}
 
 	// cloudWorkloads classifies DaemonSets/Deployments by name. Order
 	// matters: the first match wins.
@@ -168,7 +223,36 @@ func (s *Snapshot) Cloud() CloudInfo {
 		}
 		return out
 	}
+	// FailedCreate on the DaemonSet/ReplicaSet: the pods were never
+	// created (PodSecurity admission, quota, missing ServiceAccount), so no
+	// pod carries the reason
+	failedCreate := map[string]string{}
+	for i := range s.Events {
+		e := &s.Events[i]
+		if e.Reason != "FailedCreate" || e.Type != corev1.EventTypeWarning {
+			continue
+		}
+		name := e.InvolvedObject.Name
+		if e.InvolvedObject.Kind == "ReplicaSet" {
+			if i := strings.LastIndex(name, "-"); i > 0 {
+				name = name[:i]
+			}
+		}
+		key := e.InvolvedObject.Namespace + "/" + name
+		if _, ok := failedCreate[key]; !ok {
+			msg := e.Message
+			if i := strings.Index(msg, "Error creating: "); i >= 0 {
+				msg = msg[i+len("Error creating: "):]
+			}
+			failedCreate[key] = firstLineOf(msg)
+		}
+	}
 	fill := func(c *Component, pods []*corev1.Pod) {
+		if len(pods) == 0 && c.Desired > c.Ready {
+			if m, ok := failedCreate[c.Namespace+"/"+c.Name]; ok {
+				c.Problem = "FailedCreate: " + m
+			}
+		}
 		for _, p := range pods {
 			for _, cs := range p.Status.ContainerStatuses {
 				c.Restarts += cs.RestartCount
@@ -383,6 +467,10 @@ func (s *Snapshot) Cloud() CloudInfo {
 		st.NodePlugin = byProvRole[st.Provider+"/csi-node"]
 		if st.Provider == "trident" {
 			st.Trident = s.TridentBackends
+			st.TridentX = s.Trident
+		}
+		if st.Provider == "longhorn" {
+			st.Longhorn = s.Longhorn
 		}
 		if st.Provider == "vsphere" && s.VSphereConf != nil {
 			vc := *s.VSphereConf
@@ -453,6 +541,9 @@ func (c *Client) tridentBackends(ctx context.Context) []TridentBackend {
 		b.Online, _, _ = unstructured.NestedBool(it.Object, "online")
 		b.Driver, _, _ = unstructured.NestedString(it.Object, "config", "storageDriverName")
 		b.Version, _, _ = unstructured.NestedString(it.Object, "version")
+		b.UserState, _, _ = unstructured.NestedString(it.Object, "userState")
+		b.StateReason, _, _ = unstructured.NestedString(it.Object, "stateReason")
+		b.ConfigRef, _, _ = unstructured.NestedString(it.Object, "configRef")
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].BackendName < out[j].BackendName })
@@ -539,4 +630,129 @@ func parseVSphereConf(text string) *VSphereConf {
 		v.SecretRef = secretNS + "/" + secretName
 	}
 	return v
+}
+
+// tridentInfo lists the other Trident CRs (best effort, each list skipped
+// while denied or absent). nil when none of them could be read.
+func (c *Client) tridentInfo(ctx context.Context) *TridentInfo {
+	var ti TridentInfo
+	found := false
+	if l, err := c.dynList(ctx, "tridentorchestrators.trident.netapp.io", tridentOrchestratorGVR); err == nil {
+		found = true
+		for _, it := range l.Items {
+			o := &TridentOrchestrator{Name: it.GetName()}
+			o.Status, _, _ = unstructured.NestedString(it.Object, "status", "status")
+			o.Message, _, _ = unstructured.NestedString(it.Object, "status", "message")
+			o.Version, _, _ = unstructured.NestedString(it.Object, "status", "version")
+			o.Namespace, _, _ = unstructured.NestedString(it.Object, "status", "namespace")
+			o.SilenceAutosupport, _, _ = unstructured.NestedBool(it.Object, "spec", "silenceAutosupport")
+			o.ForceDetach, _, _ = unstructured.NestedBool(it.Object, "spec", "enableForceDetach")
+			ti.Orchestrator = o
+			break
+		}
+	}
+	if l, err := c.dynList(ctx, "tridentbackendconfigs.trident.netapp.io", tridentBackendConfigGVR); err == nil {
+		found = true
+		for _, it := range l.Items {
+			b := TridentBackendConfig{Namespace: it.GetNamespace(), Name: it.GetName()}
+			b.BackendName, _, _ = unstructured.NestedString(it.Object, "status", "backendInfo", "backendName")
+			if b.BackendName == "" {
+				b.BackendName, _, _ = unstructured.NestedString(it.Object, "spec", "backendName")
+			}
+			b.Driver, _, _ = unstructured.NestedString(it.Object, "spec", "storageDriverName")
+			b.Phase, _, _ = unstructured.NestedString(it.Object, "status", "phase")
+			b.LastOperation, _, _ = unstructured.NestedString(it.Object, "status", "lastOperationStatus")
+			b.Message, _, _ = unstructured.NestedString(it.Object, "status", "message")
+			b.Credentials, _, _ = unstructured.NestedString(it.Object, "spec", "credentials", "name")
+			ti.BackendConfigs = append(ti.BackendConfigs, b)
+		}
+		sort.Slice(ti.BackendConfigs, func(i, j int) bool { return ti.BackendConfigs[i].Name < ti.BackendConfigs[j].Name })
+	}
+	if l, err := c.dynList(ctx, "tridentnodes.trident.netapp.io", tridentNodeGVR); err == nil {
+		found = true
+		for _, it := range l.Items {
+			n := TridentNode{Name: it.GetName(), Registered: true}
+			// Trident 25.x moved the fields under spec/status; older releases keep them top-level
+			if name, _, _ := unstructured.NestedString(it.Object, "spec", "nodeName"); name != "" {
+				n.Name = name
+			} else if name, _, _ := unstructured.NestedString(it.Object, "name"); name != "" {
+				n.Name = name
+			}
+			if _, ok, _ := unstructured.NestedFieldNoCopy(it.Object, "status", "registered"); ok {
+				n.Registered, _, _ = unstructured.NestedBool(it.Object, "status", "registered")
+			}
+			n.IQN, _, _ = unstructured.NestedString(it.Object, "spec", "iqn")
+			if n.IQN == "" {
+				n.IQN, _, _ = unstructured.NestedString(it.Object, "iqn")
+			}
+			n.NQN, _, _ = unstructured.NestedString(it.Object, "spec", "nqn")
+			if n.NQN == "" {
+				n.NQN, _, _ = unstructured.NestedString(it.Object, "nqn")
+			}
+			n.PublicationState, _, _ = unstructured.NestedString(it.Object, "status", "publicationState")
+			if n.PublicationState == "" {
+				n.PublicationState, _, _ = unstructured.NestedString(it.Object, "publicationState")
+			}
+			n.Deleted, _, _ = unstructured.NestedBool(it.Object, "status", "deleted")
+			if !n.Deleted {
+				n.Deleted, _, _ = unstructured.NestedBool(it.Object, "deleted")
+			}
+			ti.Nodes = append(ti.Nodes, n)
+		}
+		sort.Slice(ti.Nodes, func(i, j int) bool { return ti.Nodes[i].Name < ti.Nodes[j].Name })
+	}
+	if l, err := c.dynList(ctx, "tridentvolumepublications.trident.netapp.io", tridentPublicationGVR); err == nil {
+		found = true
+		for _, it := range l.Items {
+			p := TridentPublication{}
+			p.Volume, _, _ = unstructured.NestedString(it.Object, "volumeID")
+			p.Node, _, _ = unstructured.NestedString(it.Object, "nodeID")
+			p.ReadOnly, _, _ = unstructured.NestedBool(it.Object, "readOnly")
+			if m, _, _ := unstructured.NestedInt64(it.Object, "accessMode"); m > 0 {
+				p.AccessMode = int32(m)
+			}
+			ti.Publications = append(ti.Publications, p)
+		}
+		sort.Slice(ti.Publications, func(i, j int) bool {
+			return ti.Publications[i].Volume+ti.Publications[i].Node < ti.Publications[j].Volume+ti.Publications[j].Node
+		})
+	}
+	if !found {
+		return nil
+	}
+	return &ti
+}
+
+// TridentNode returns the registration for a Kubernetes node, if any.
+func (ti *TridentInfo) TridentNode(name string) *TridentNode {
+	if ti == nil {
+		return nil
+	}
+	for i := range ti.Nodes {
+		if ti.Nodes[i].Name == name {
+			return &ti.Nodes[i]
+		}
+	}
+	return nil
+}
+
+// MultiPublished lists single-writer volumes published to more than one
+// node: the controller granted a second ControllerPublish before the first
+// node released the volume, so two hosts can write the same LUN/export.
+func (ti *TridentInfo) MultiPublished() map[string][]string {
+	if ti == nil {
+		return nil
+	}
+	nodes := map[string][]string{}
+	for _, p := range ti.Publications {
+		if p.SingleWriter() && !p.ReadOnly {
+			nodes[p.Volume] = append(nodes[p.Volume], p.Node)
+		}
+	}
+	for v, ns := range nodes {
+		if len(ns) < 2 {
+			delete(nodes, v)
+		}
+	}
+	return nodes
 }

@@ -75,6 +75,10 @@ dir=/var/lib/longhorn
 multipath_blacklist=0
 find_multipaths=no
 mount_nfs=yes
+lhdev=pvc-5380446d-86fc-4eee-b796-201031981e44
+lhdev=pvc-56877adc-b5f2-4f67-a88e-efe12ea762dc
+iscsi=iqn.2019-10.io.longhorn:pvc-56877adc-b5f2-4f67-a88e-efe12ea762dc|LOGGED_IN
+iscsi=iqn.2019-10.io.longhorn:pvc-5380446d-86fc-4eee-b796-201031981e44|FAILED
 ===AUDITD
 log_file=/var/log/audit/audit.log
 max_log_file=8
@@ -184,6 +188,12 @@ func TestParsePreflight(t *testing.T) {
 	}
 	if len(p.CSI.Drivers) != 2 || p.CSI.Drivers[0] != "driver.longhorn.io" || !p.CSI.Has("longhorn") || len(p.CSI.HostDirs) != 2 || p.CSI.ISCSID || p.CSI.MultipathBlacklist != 0 {
 		t.Errorf("csi: %+v", p.CSI)
+	}
+	if len(p.CSI.LonghornDevs) != 2 || p.CSI.LonghornDevs[1] != "pvc-56877adc-b5f2-4f67-a88e-efe12ea762dc" || len(p.CSI.ISCSISessions) != 2 || p.CSI.ISCSISessions[1].State != "FAILED" || p.CSI.ISCSISessions[0].LonghornVolume() != "pvc-56877adc-b5f2-4f67-a88e-efe12ea762dc" {
+		t.Errorf("longhorn devices: %+v %+v", p.CSI.LonghornDevs, p.CSI.ISCSISessions)
+	}
+	if (ISCSISession{Target: "iqn.1992-08.com.netapp:sn.1:vs.3"}).LonghornVolume() != "" {
+		t.Error("a NetApp target is not a Longhorn volume")
 	}
 	if p.Auditd["disk_full_action"] != "halt" || p.Auditd["admin_space_left"] != "50" || p.Auditd["log_file"] != "/var/log/audit/audit.log" {
 		t.Errorf("auditd: %v", p.Auditd)

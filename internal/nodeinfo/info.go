@@ -42,6 +42,7 @@ type Info struct {
 	MemPct                 float64
 	Mounts                 []Mount
 	PVMounts               []PVMount        // PV filesystems mounted for pods (df on kubelet volume dirs)
+	StaleMounts            []StaleMount     // network mounts whose server stopped answering (df/stat block)
 	PVDirs                 map[string]int64 // hostPath/local PV directory -> used KB (du, heavy mode)
 	Services               []Service
 	Units                  []Unit
@@ -74,6 +75,11 @@ type Info struct {
 	Settings         map[string]string // merged top-level key: value from config files
 	Rancher          RancherNode
 	CNI              []CNIConf
+	Links            []Link            // interfaces with MTU and state (every probe)
+	DefaultDev       string            // interface of the default route (the underlay)
+	Flannel          map[string]string // /run/flannel/subnet.env: mtu, network, subnet, ipmasq
+	NetProbes        []NetProbe        // active network checks (config tier)
+	NetProbed        bool              // the NETPROBE section was present
 	Registries       []ConfigFile
 	RegistryMirrors  []string // registry hosts with mirrors in registries.yaml
 	ContainerdHosts  []string // registries containerd has certs.d/hosts.toml for
@@ -152,6 +158,12 @@ type PVMount struct {
 	Mountpoint              string
 	SizeKB, UsedKB, AvailKB int64
 	UsePct                  int
+}
+
+// StaleMount is a network filesystem mount that no longer answers: stat
+// timed out on it, so every process touching it (and df) blocks in D state.
+type StaleMount struct {
+	Mountpoint, Source, FSType string
 }
 
 // Service is a systemd unit state.
@@ -256,6 +268,26 @@ type CNIConf struct {
 	Path  string
 	Name  string
 	Types []string
+	MTU   int // "mtu" of the main plugin when the conf sets one (calico/canal veth_mtu, flannel)
+}
+
+// Link is one network interface of the node (NETLINK section).
+type Link struct {
+	Name  string
+	MTU   int
+	State string // UP, DOWN, UNKNOWN (tunnels)
+}
+
+// NetProbe is one active network check run from the node (NETPROBE
+// section, config tier): Kind PING (to a pod on Node), DNS (a query to a
+// CoreDNS pod or the DNS service) or TCP (the kubernetes service).
+type NetProbe struct {
+	Kind   string
+	Node   string // PING: the node the target pod runs on
+	Target string // ip, or ip:port
+	OK     bool
+	Skip   bool   // the tool was not on the node
+	Detail string // rtt / answer / connect time, or the failure
 }
 
 // Image is a container image known to the CRI.
@@ -325,6 +357,12 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	info.Mounts = parseDF(secs["DF"])
 	applyInodes(info.Mounts, secs["DFI"])
 	info.PVMounts = parsePVMounts(secs["PVMOUNTS"])
+	for _, l := range nonEmpty(secs["STALEMOUNTS"]) {
+		f := strings.Split(l, "|")
+		if len(f) == 3 {
+			info.StaleMounts = append(info.StaleMounts, StaleMount{Mountpoint: f[0], Source: f[1], FSType: f[2]})
+		}
+	}
 	for _, l := range nonEmpty(secs["SVC"]) {
 		f := strings.Fields(l)
 		if len(f) >= 4 {
@@ -502,6 +540,7 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	for _, cf := range parseDumps(secs["CNI"]) {
 		info.CNI = append(info.CNI, parseCNI(cf))
 	}
+	parseNetwork(info, secs)
 	info.Registries = parseDumps(secs["REGISTRIES"])
 	info.RegistryMirrors = parseRegistryMirrors(info.Registries)
 	for _, cf := range parseDumps(secs["CONTAINERDREG"]) {
@@ -1038,17 +1077,23 @@ func parseCNI(cf ConfigFile) CNIConf {
 	var doc struct {
 		Name    string `json:"name"`
 		Type    string `json:"type"`
+		MTU     int    `json:"mtu"`
 		Plugins []struct {
 			Type string `json:"type"`
+			MTU  int    `json:"mtu"`
 		} `json:"plugins"`
 	}
 	if err := json.Unmarshal([]byte(cf.Content), &doc); err == nil {
 		c.Name = doc.Name
+		c.MTU = doc.MTU
 		if doc.Type != "" {
 			c.Types = append(c.Types, doc.Type)
 		}
 		for _, p := range doc.Plugins {
 			c.Types = append(c.Types, p.Type)
+			if c.MTU == 0 && p.MTU > 0 {
+				c.MTU = p.MTU
+			}
 		}
 	}
 	return c
@@ -1438,6 +1483,7 @@ func (i *Info) MergeConfig(prev *Info) {
 	}
 	i.ConfigFiles, i.ExtraFiles, i.Manifests, i.StaticPods, i.Settings = prev.ConfigFiles, prev.ExtraFiles, prev.Manifests, prev.StaticPods, prev.Settings
 	i.CNI, i.Registries, i.RegistryMirrors, i.ContainerdHosts, i.ContainerdConfig = prev.CNI, prev.Registries, prev.RegistryMirrors, prev.ContainerdHosts, prev.ContainerdConfig
+	i.NetProbes, i.NetProbed = prev.NetProbes, prev.NetProbed
 	i.Preflight.mergeConfig(&prev.Preflight)
 	if i.Hardening == nil {
 		i.Hardening = map[string]string{}
@@ -1478,4 +1524,62 @@ func (i *Info) MergeHeavy(prev *Info) {
 	i.LogFiles = prev.LogFiles
 	i.CrictlInfo = prev.CrictlInfo
 	i.Preflight.mergeHeavy(&prev.Preflight)
+}
+
+// parseNetwork reads the NETLINK section (every probe) and the NETPROBE
+// section (config tier) into the node's network facts.
+func parseNetwork(info *Info, secs map[string]string) {
+	if s, ok := secs["NETLINK"]; ok {
+		info.Links = nil
+		for _, l := range nonEmpty(s) {
+			switch {
+			case strings.HasPrefix(l, "default="):
+				info.DefaultDev = strings.TrimSpace(strings.TrimPrefix(l, "default="))
+			case strings.HasPrefix(l, "flannel_"):
+				if k, v, ok := strings.Cut(strings.TrimPrefix(l, "flannel_"), "="); ok {
+					if info.Flannel == nil {
+						info.Flannel = map[string]string{}
+					}
+					info.Flannel[strings.TrimSpace(k)] = strings.TrimSpace(v)
+				}
+			default:
+				f := strings.Fields(l)
+				if len(f) < 3 {
+					continue
+				}
+				mtu, err := strconv.Atoi(f[1])
+				if err != nil {
+					continue
+				}
+				info.Links = append(info.Links, Link{Name: f[0], MTU: mtu, State: f[2]})
+			}
+		}
+	}
+	if s, ok := secs["NETPROBE"]; ok {
+		info.NetProbed = true
+		info.NetProbes = nil
+		for _, l := range nonEmpty(s) {
+			f := strings.SplitN(l, "|", 5)
+			var p NetProbe
+			switch {
+			case len(f) == 5 && f[0] == "PING":
+				p = NetProbe{Kind: "PING", Node: f[1], Target: f[2], OK: f[3] == "ok", Skip: f[3] == "skip", Detail: f[4]}
+			case len(f) == 4 && (f[0] == "DNS" || f[0] == "TCP"):
+				p = NetProbe{Kind: f[0], Target: f[1], OK: f[2] == "ok", Skip: f[2] == "skip", Detail: f[3]}
+			default:
+				continue
+			}
+			info.NetProbes = append(info.NetProbes, p)
+		}
+	}
+}
+
+// Link returns the interface by name, nil when the node has none.
+func (i *Info) Link(name string) *Link {
+	for k := range i.Links {
+		if i.Links[k].Name == name {
+			return &i.Links[k]
+		}
+	}
+	return nil
 }

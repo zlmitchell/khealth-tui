@@ -24,7 +24,7 @@ import (
 // kubeconfig, SSH runner, perf log, text inputs) and gives it the fixture
 // snapshot of testApp, so the key and message handlers run against the
 // complete state rather than a hand-built struct.
-func newDriveApp(t *testing.T) *App {
+func newDriveApp(t testing.TB) *App {
 	t.Helper()
 	dir := t.TempDir()
 	kc := filepath.Join(dir, "kubeconfig")

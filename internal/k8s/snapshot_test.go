@@ -31,6 +31,7 @@ func rke2Cluster(f *fakeAPI) {
 		{ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "etcd-cp-1", Labels: map[string]string{"component": "etcd"}}, Spec: corev1.PodSpec{NodeName: "cp-1"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}},
 		{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "nginx-a"}, Spec: corev1.PodSpec{NodeName: "w-1"}},
 	}})
+	f.set("/api/v1/services", corev1.ServiceList{TypeMeta: tm("ServiceList"), Items: []corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: "kubernetes", Namespace: "default"}, Spec: corev1.ServiceSpec{ClusterIP: "10.43.0.1"}}, {ObjectMeta: metav1.ObjectMeta{Name: "rke2-coredns-rke2-coredns", Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}}, Spec: corev1.ServiceSpec{ClusterIP: "10.43.0.10"}}}})
 	f.set("/api/v1/namespaces", corev1.NamespaceList{TypeMeta: tm("NamespaceList"), Items: []corev1.Namespace{{ObjectMeta: metav1.ObjectMeta{Name: "web"}}, {ObjectMeta: metav1.ObjectMeta{Name: "kube-system"}}}})
 	f.set("/api/v1/events", corev1.EventList{TypeMeta: tm("EventList"), Items: []corev1.Event{
 		{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "old"}, Type: "Normal", LastTimestamp: earlier},
@@ -114,6 +115,9 @@ func TestFetchRKE2(t *testing.T) {
 	}
 	if len(s.Pods) != 3 || s.Pods[0].Name != "etcd-cp-1" || s.Pods[1].Name != "nginx-a" || s.Pods[2].Name != "nginx-b" {
 		t.Errorf("pods not sorted by ns/name: %v", podNames(s.Pods))
+	}
+	if s.ClusterDNSIP() != "10.43.0.10" || s.APIServiceIP() != "10.43.0.1" {
+		t.Errorf("service IPs: dns=%q api=%q", s.ClusterDNSIP(), s.APIServiceIP())
 	}
 	if len(s.Namespaces) != 2 || s.Namespaces[0].Name != "kube-system" {
 		t.Errorf("namespaces: %+v", s.Namespaces)
@@ -291,7 +295,7 @@ func TestFetchKubeletProxyDenied(t *testing.T) {
 		t.Errorf("denied proxies: cfg=%q usage=%q", s.KubeletCfgErr, s.PVCUsageErr)
 	}
 	got := c.DeniedList()
-	if strings.Join(got, ",") != "kubeadm-config,nodes/proxy configz,nodes/proxy stats,tridentbackends.trident.netapp.io" {
+	if strings.Join(got, ",") != "kubeadm-config,nodes/proxy configz,nodes/proxy stats,tridentbackends.trident.netapp.io,volumeattachments,volumes.longhorn.io" {
 		t.Errorf("denied list: %v", got)
 	}
 	hits := f.hitCount("/api/v1/nodes/cp-1/proxy/configz") + f.hitCount("/api/v1/nodes/w-1/proxy/configz")

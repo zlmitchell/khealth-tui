@@ -71,6 +71,9 @@ func testApp() *App {
 	a.nodes["w-1"] = &nodeinfo.Info{Node: "w-1", Err: fmt.Errorf("dial tcp: connection refused")}
 	a.etcd["cp-1"] = etcd.Parse("cp-1", etcdSample)
 	a.s3 = &k8s.S3SecretInfo{Name: "rke2-s3", Found: true, Endpoint: "s3.example.com", Bucket: "b", HasCredentials: true}
+	if ls := classifyLogs(a.nodes["cp-1"]); ls != nil {
+		a.logSum["cp-1"] = ls // as the probe goroutine would
+	}
 	a.recompute()
 	return a
 }
@@ -567,5 +570,55 @@ func TestInspectArrowsScrollYAML(t *testing.T) {
 	a.handleKey(up)
 	if top.cursor != 0 || top.scroll != 0 {
 		t.Fatalf("up should unscroll the YAML before moving the cursor: cursor=%d scroll=%d", top.cursor, top.scroll)
+	}
+}
+
+// TestPodLogsRenderCache: the viewer renders a line once; a chunk extends
+// the rendered buffer without re-rendering the old lines; a settings
+// change (wrap, timestamps, filter, highlighting, width) or a trimmed
+// buffer re-renders from scratch.
+func TestPodLogsRenderCache(t *testing.T) {
+	a := testApp()
+	a.width, a.height = 120, 30
+	var lines []string
+	for i := 0; i < 50; i++ {
+		lines = append(lines, fmt.Sprintf("2024-09-18T10:00:%02dZ level=info msg=\"line %d\" n=%d", i, i, i))
+	}
+	lv := &logView{ns: "default", pod: "p", containers: []string{"c"}, lines: lines, follow: true}
+	a.logs = lv
+	a.overlay = ovPodLogs
+	v1 := a.logVisibleLines()
+	if len(v1) != 50 || lv.rendered.n != 50 {
+		t.Fatalf("first render: %d lines, cached %d", len(v1), lv.rendered.n)
+	}
+	// unchanged: the same slice comes back
+	v2 := a.logVisibleLines()
+	if &v1[0] != &v2[0] {
+		t.Errorf("second call re-rendered")
+	}
+	// a chunk arrives: only the new lines are rendered, appended
+	lv.lines = append(lv.lines, "2024-09-18T10:01:00Z level=error msg=\"boom\"")
+	v3 := a.logVisibleLines()
+	if len(v3) != 51 || &v3[0] != &v1[0] || !strings.Contains(v3[50], "boom") {
+		t.Errorf("incremental render failed: %d lines", len(v3))
+	}
+	// wrap on: re-rendered
+	lv.wrap = true
+	a.width = 40
+	v4 := a.logVisibleLines()
+	if len(v4) <= 51 {
+		t.Errorf("wrap did not re-render: %d lines", len(v4))
+	}
+	// filter: re-rendered to the matches
+	lv.wrap, a.width, lv.filter = false, 120, "boom"
+	if v := a.logVisibleLines(); len(v) != 1 {
+		t.Errorf("filter render: %d lines", len(v))
+	}
+	// buffer trimmed at the head: re-rendered from the new start
+	lv.filter = ""
+	a.logVisibleLines()
+	lv.lines = lv.lines[10:]
+	if v := a.logVisibleLines(); len(v) != 41 || !strings.Contains(v[0], "line 10") {
+		t.Errorf("trimmed buffer render: %d lines, first %q", len(v), v[0])
 	}
 }

@@ -1,0 +1,588 @@
+package checks
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+
+	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/nodeinfo"
+)
+
+// CSI backend health: what the driver's own control plane says about the
+// volumes, beyond "the pods run". Longhorn from its CRs (volume robustness
+// and replicas, node/disk conditions, instance managers, engine images,
+// backup target, orphans, settings), Trident from the operator, backend
+// configs, node registrations and volume publications, and for every driver
+// the VolumeAttachments the attach/detach controller holds - a volume still
+// attached to a NotReady node while the workload moved is the split-brain
+// case where two kubelets can end up writing the same volume.
+
+// evalVolumeAttachments raises the attachment findings that do not need a
+// driver: stale attachments to NotReady nodes with the pod elsewhere, and
+// attach/detach errors the controller reports.
+func evalVolumeAttachments(in Input, add func(Severity, string, string, string, string)) {
+	s := in.Snap
+	if len(s.VolumeAttachments) == 0 {
+		return
+	}
+	now := in.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	ready := map[string]bool{}
+	for i := range s.Nodes {
+		ready[s.Nodes[i].Name] = k8s.NodeReady(&s.Nodes[i])
+	}
+	// pods per PV: who uses the volume and where
+	claimPV := map[string]string{} // ns/claim -> pv
+	for i := range s.PVCs {
+		p := &s.PVCs[i]
+		claimPV[p.Namespace+"/"+p.Name] = p.Spec.VolumeName
+	}
+	type user struct {
+		pod, node, status string
+	}
+	usersOf := map[string][]user{}
+	for i := range s.Pods {
+		p := &s.Pods[i]
+		for _, v := range p.Spec.Volumes {
+			if v.PersistentVolumeClaim == nil {
+				continue
+			}
+			pv := claimPV[p.Namespace+"/"+v.PersistentVolumeClaim.ClaimName]
+			if pv != "" {
+				usersOf[pv] = append(usersOf[pv], user{p.Namespace + "/" + p.Name, p.Spec.NodeName, k8s.PodStatus(p)})
+			}
+		}
+	}
+	pvClaim := map[string]string{}
+	shared := map[string]bool{} // PVs mountable by several nodes at once (RWX / ROX)
+	for i := range s.PVs {
+		pv := &s.PVs[i]
+		if r := pv.Spec.ClaimRef; r != nil {
+			pvClaim[pv.Name] = r.Namespace + "/" + r.Name
+		}
+		for _, m := range pv.Spec.AccessModes {
+			if m == corev1.ReadWriteMany || m == corev1.ReadOnlyMany {
+				shared[pv.Name] = true
+			}
+		}
+	}
+	for i := range s.VolumeAttachments {
+		va := &s.VolumeAttachments[i]
+		if va.Spec.Source.PersistentVolumeName == nil {
+			continue
+		}
+		pv := *va.Spec.Source.PersistentVolumeName
+		obj := pvClaim[pv]
+		if obj == "" {
+			obj = pv
+		}
+		if e := va.Status.AttachError; e != nil && !va.Status.Attached {
+			add(SevWarn, "storage", obj, fmt.Sprintf("attach to %s failing since %s: %s", va.Spec.NodeName, roundDur(now.Sub(e.Time.Time)), firstLine(e.Message)), "kubectl describe volumeattachment "+va.Name+"; "+va.Spec.Attacher+" controller logs")
+		}
+		if e := va.Status.DetachError; e != nil {
+			add(SevWarn, "storage", obj, fmt.Sprintf("detach from %s failing since %s: %s - the volume cannot move to another node until it succeeds", va.Spec.NodeName, roundDur(now.Sub(e.Time.Time)), firstLine(e.Message)), "kubectl describe volumeattachment "+va.Name+"; if the node is gone: kubectl delete volumeattachment "+va.Name+" (after making sure nothing writes to the volume there)")
+		}
+		if !va.Status.Attached || va.DeletionTimestamp != nil {
+			continue
+		}
+		if isReady, known := ready[va.Spec.NodeName]; known && isReady {
+			continue
+		}
+		// attached to a NotReady (or vanished) node: who wants it now?
+		var elsewhere, stuck []string
+		for _, u := range usersOf[pv] {
+			switch {
+			case u.node == va.Spec.NodeName:
+				stuck = append(stuck, u.pod+" ("+u.status+")")
+			case u.node != "":
+				elsewhere = append(elsewhere, u.pod+" on "+u.node+" ("+u.status+")")
+			default:
+				elsewhere = append(elsewhere, u.pod+" (unscheduled)")
+			}
+		}
+		state := "NotReady"
+		if _, known := ready[va.Spec.NodeName]; !known {
+			state = "no longer in the cluster"
+		}
+		switch {
+		case shared[pv]:
+			add(SevInfo, "storage", obj, fmt.Sprintf("shared (RWX/ROX) volume still attached to %s (%s); the other nodes keep their own attachment", va.Spec.NodeName, state), "kubectl delete volumeattachment "+va.Name+" when the node will not return")
+		case len(elsewhere) > 0:
+			add(SevCrit, "storage", obj, fmt.Sprintf("volume is still attached to %s (%s) while %s waits for it: RWO volumes cannot attach twice, and if the old kubelet still runs the pod there both nodes write the same volume once the attachment is forced", va.Spec.NodeName, state, truncList(elsewhere, 2)), "confirm the node is really down (power/console), then let the attach/detach controller force-detach (6 min) or kubectl delete volumeattachment "+va.Name+"; never force while the old node may still be writing")
+		case len(stuck) > 0:
+			add(SevWarn, "storage", obj, fmt.Sprintf("volume attached to %s (%s) with %s still bound there: the pod cannot be rescheduled until the node returns or is deleted", va.Spec.NodeName, state, truncList(stuck, 2)), "StatefulSet pods are never force-deleted automatically: kubectl delete pod --force --grace-period=0 once the node is confirmed down (or fence the node)")
+		default:
+			add(SevInfo, "storage", obj, fmt.Sprintf("volume attached to %s (%s) with no pod using it", va.Spec.NodeName, state), "kubectl delete volumeattachment "+va.Name+" when the node will not return")
+		}
+	}
+}
+
+// evalLonghorn raises the Longhorn findings for the driver.longhorn.io
+// CSIStatus. Attribution: volumes to their PVC, node facts to the node.
+func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, string, string)) {
+	li := d.Longhorn
+	s := in.Snap
+	if li == nil {
+		return
+	}
+	now := in.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	k8sReady := map[string]bool{}
+	for i := range s.Nodes {
+		k8sReady[s.Nodes[i].Name] = k8s.NodeReady(&s.Nodes[i])
+	}
+	lhNodes := map[string]*k8s.LonghornNode{}
+	schedulable, allowed := 0, 0 // nodes taking replicas now / nodes meant to
+	for i := range li.Nodes {
+		n := &li.Nodes[i]
+		lhNodes[n.Name] = n
+		if n.AllowScheduling {
+			allowed++
+		}
+		if n.Ready && n.Schedulable && n.AllowScheduling {
+			schedulable++
+		}
+	}
+
+	// ---- nodes, disks, instance managers ----
+	for i := range li.Nodes {
+		n := &li.Nodes[i]
+		if !n.Ready {
+			if k8sReady[n.Name] {
+				add(SevCrit, "storage", n.Name, "Longhorn node not ready although the Kubernetes node is: "+orDefault(n.ReadyMsg, "longhorn-manager on the node is down"), "kubectl -n longhorn-system get pods -o wide --field-selector spec.nodeName="+n.Name+"; longhorn-manager logs on that node")
+			}
+			// a NotReady Kubernetes node is reported by the node checks; the volumes on it below
+		} else {
+			if n.InstanceManager != "" && n.InstanceManager != "running" {
+				add(SevCrit, "storage", n.Name, "Longhorn instance manager on the node is "+n.InstanceManager+": no engine or replica process can run here, every volume with a replica on this node is degraded and volumes attached here are down", "kubectl -n longhorn-system get instancemanagers -l longhorn.io/node="+n.Name+"; kubectl -n longhorn-system logs instance-manager-<id>; check the priority class / resource requests")
+			}
+			if !n.Schedulable && n.AllowScheduling {
+				add(SevWarn, "storage", n.Name, "Longhorn cannot schedule replicas on the node: "+orDefault(n.SchedulableMsg, "no schedulable disk"), "kubectl -n longhorn-system describe nodes.longhorn.io "+n.Name)
+			}
+			for cname, c := range n.Conditions {
+				if c.Status {
+					continue
+				}
+				switch cname {
+				case "MountPropagation":
+					add(SevCrit, "storage", n.Name, "kubelet mount propagation is not enabled on the node: Longhorn cannot mount volumes for pods there", "the kubelet needs the mount-propagation feature (default on rke2/k3s); check the longhorn-manager DaemonSet mountPropagation: Bidirectional and that /var/lib/kubelet is not a private mount")
+				case "RequiredPackages", "NFSClientInstalled", "KernelModulesLoaded", "Multipathd":
+					sev := SevWarn
+					if cname == "RequiredPackages" {
+						sev = SevCrit
+					}
+					add(sev, "storage", n.Name, "Longhorn "+cname+" condition failed: "+orDefault(c.Message, c.Reason), longhornPackageHint(cname))
+				}
+			}
+		}
+		if n.Eviction {
+			add(SevInfo, "storage", n.Name, "Longhorn eviction requested for the node: replicas are being moved off it", "")
+		}
+		for _, disk := range n.Disks {
+			obj := n.Name + ":" + disk.Path
+			switch {
+			case !disk.Ready && n.Ready:
+				add(SevCrit, "storage", obj, "Longhorn disk not ready: "+orDefault(disk.ReadyMsg, "disk path missing or unreadable"), "mount the disk at "+disk.Path+" or remove it from the node (Longhorn UI > Node > Edit disks, or kubectl -n longhorn-system edit nodes.longhorn.io "+n.Name+")")
+			case !disk.Schedulable && disk.AllowScheduling && n.Ready:
+				add(SevWarn, "storage", obj, "Longhorn disk not schedulable: "+orDefault(disk.SchedulableMsg, "insufficient storage")+fmt.Sprintf(" (available %s of %s, scheduled %s, reserved %s)", human(float64(disk.Available)), human(float64(disk.Maximum)), human(float64(disk.Scheduled)), human(float64(disk.Reserved))), "free space on the disk, lower storage-reserved, or raise storage-over-provisioning-percentage (replicas are thin: scheduled != used)")
+			}
+			if disk.Maximum > 0 && disk.Ready {
+				freePct := disk.Available * 100 / disk.Maximum
+				if freePct < 10 {
+					add(SevCrit, "storage", obj, fmt.Sprintf("Longhorn disk %d%% full (%s free of %s): replicas here stop growing and go to error when it fills", 100-freePct, human(float64(disk.Available)), human(float64(disk.Maximum))), "free space or add a disk; volumes are thin-provisioned, actual usage grows with writes and snapshots")
+				}
+			}
+		}
+	}
+	// instance managers on nodes without a Longhorn node object
+	for _, im := range li.InstanceManagers {
+		if _, ok := lhNodes[im.Node]; !ok && im.State != "running" {
+			add(SevWarn, "storage", im.Node, "Longhorn instance manager "+im.Name+" is "+im.State, "")
+		}
+	}
+
+	// ---- engine images ----
+	for _, ei := range li.EngineImages {
+		if ei.Incompatible && ei.RefCount > 0 {
+			add(SevCrit, "storage", d.Driver, fmt.Sprintf("engine image %s (%s) is incompatible with this Longhorn version and %d volumes still use it", ei.Name, ei.Version, ei.RefCount), "upgrade those volumes' engine (Longhorn UI > Volume > Upgrade Engine) before the next Longhorn upgrade")
+		}
+		var notOnReady []string
+		for _, n := range ei.NotOn {
+			if k8sReady[n] {
+				notOnReady = append(notOnReady, n)
+			}
+		}
+		if ei.State != "deployed" && ei.RefCount > 0 && len(notOnReady) > 0 {
+			add(SevWarn, "storage", d.Driver, fmt.Sprintf("engine image %s (%s) is %s, missing on %s: volumes cannot attach or place replicas on those nodes", ei.Name, ei.Version, orDefault(ei.State, "not deployed"), truncList(notOnReady, 4)), "kubectl -n longhorn-system get pods -l longhorn.io/component=engine-image -o wide; image pull / fapolicyd / disk space on those nodes")
+		}
+	}
+
+	// ---- volumes ----
+	nodeDown := func(n string) bool {
+		if n == "" {
+			return false
+		}
+		if r, ok := k8sReady[n]; ok && !r {
+			return true
+		}
+		if ln := lhNodes[n]; ln != nil && !ln.Ready {
+			return true
+		}
+		return false
+	}
+	podsByName := map[string]*corev1.Pod{}
+	for i := range s.Pods {
+		podsByName[s.Pods[i].Name] = &s.Pods[i]
+	}
+	var singles []string
+	for i := range li.Volumes {
+		v := &li.Volumes[i]
+		obj := v.PVC
+		if obj == "" {
+			obj = v.Name
+		}
+		healthy := v.Healthy()
+		var failedOn, rebuilding []string
+		for _, r := range v.ReplicaList {
+			switch {
+			case r.Rebuild >= 0:
+				rebuilding = append(rebuilding, fmt.Sprintf("%s %d%%", orDefault(r.Node, "?"), r.Rebuild))
+			case r.Mode == "WO":
+				rebuilding = append(rebuilding, orDefault(r.Node, "?"))
+			case r.FailedAt != "" || r.Mode == "ERR" || r.State == "error" || r.State == "unknown":
+				failedOn = append(failedOn, orDefault(r.Node, "unscheduled"))
+			case r.Node == "":
+				failedOn = append(failedOn, "unscheduled")
+			}
+		}
+		sort.Strings(failedOn)
+		detail := fmt.Sprintf("%d/%d replicas healthy", healthy, v.Replicas)
+		if len(failedOn) > 0 {
+			detail += " (failed: " + truncList(uniq(failedOn), 3) + ")"
+		}
+		if len(rebuilding) > 0 {
+			detail += ", rebuilding on " + truncList(rebuilding, 3)
+		}
+		pods := ""
+		if len(v.Workloads) > 0 {
+			pods = " used by " + truncList(v.Workloads, 2)
+		}
+		everScheduled := false
+		for _, r := range v.ReplicaList {
+			if r.Node != "" {
+				everScheduled = true
+			}
+		}
+		switch v.Robustness {
+		case "faulted":
+			if !v.Scheduled && !everScheduled {
+				break // no replica was ever placed: the scheduling finding below says why
+			}
+			add(SevCrit, "storage", obj, fmt.Sprintf("Longhorn volume %s is FAULTED: every replica failed (%s)%s - the data is unavailable until a replica is salvaged", v.Name, detail, pods), "Longhorn UI > Volume > Salvage (pick the replica with the newest data); if auto-salvage is on and it stays faulted, check the replica directories on the nodes' disks")
+		case "degraded":
+			sev := SevWarn
+			msg := fmt.Sprintf("Longhorn volume %s degraded: %s%s", v.Name, detail, pods)
+			if !v.Scheduled {
+				msg += "; cannot rebuild: " + orDefault(v.SchedMessage, "replica scheduling failed")
+				if v.Replicas > schedulable {
+					msg += fmt.Sprintf(" (%d replicas requested, %d schedulable nodes)", v.Replicas, schedulable)
+				}
+			} else if !v.LastDegraded.IsZero() && now.Sub(v.LastDegraded) > 30*time.Minute && len(rebuilding) == 0 {
+				sev = SevWarn
+				msg += fmt.Sprintf("; degraded for %s with no rebuild in progress", roundDur(now.Sub(v.LastDegraded)))
+			}
+			if healthy <= 1 && v.Replicas > 1 {
+				sev = SevCrit
+				msg = "one healthy replica left: " + msg
+			}
+			hint := "kubectl -n longhorn-system get replicas -l longhornvolume=" + v.Name + "; a rebuild needs a schedulable disk on another node (replica-soft-anti-affinity, node tags, disk space)"
+			if !v.Scheduled && v.Replicas > schedulable {
+				hint = "lower numberOfReplicas on the volume (or StorageClass), add a node, or set replica-soft-anti-affinity=true (replicas on the same node give no redundancy)"
+			}
+			add(sev, "storage", obj, msg, hint)
+		case "unknown":
+			if v.State == "attached" {
+				if nodeDown(v.Node) {
+					add(SevCrit, "storage", obj, fmt.Sprintf("Longhorn volume %s is attached on %s which is down: the engine there is unreachable, robustness unknown (%s)%s", v.Name, v.Node, detail, pods), "when the node is confirmed down: delete its pods (node-down-pod-deletion-policy is "+orDefault(li.Setting("node-down-pod-deletion-policy"), "do-nothing")+") so the volume can reattach elsewhere from the surviving replicas; if the node is only partitioned its kubelet may still be writing")
+				} else {
+					add(SevWarn, "storage", obj, fmt.Sprintf("Longhorn volume %s robustness unknown while attached on %s (engine %s, %s)", v.Name, v.Node, orDefault(v.EngineState, "?"), detail), "kubectl -n longhorn-system get engines -l longhornvolume="+v.Name+"; instance-manager logs on "+v.Node)
+				}
+			}
+		}
+		if v.State == "attached" && v.Robustness != "unknown" && nodeDown(v.Node) {
+			add(SevCrit, "storage", obj, fmt.Sprintf("Longhorn volume %s is attached on %s which is NotReady%s", v.Name, v.Node, pods), "see the VolumeAttachment finding for this volume")
+		}
+		if !v.Scheduled && v.Robustness != "degraded" {
+			msg := fmt.Sprintf("Longhorn volume %s cannot schedule its replicas: %s", v.Name, orDefault(v.SchedMessage, "replica scheduling failed"))
+			hint := "kubectl -n longhorn-system describe volumes.longhorn.io " + v.Name + "; disk space (storage-over-provisioning-percentage, storage-minimal-available-percentage), node/disk tags, replica count vs nodes"
+			if strings.Contains(v.SchedMessage, "insufficient storage") {
+				msg += fmt.Sprintf(" - the %s volume does not fit the schedulable disks (the PVC is Bound anyway, so the pod will hang in ContainerCreating)", human(float64(v.Size)))
+			}
+			add(SevCrit, "storage", obj, msg, hint)
+		}
+		if v.AccessMode == "rwx" && v.State == "attached" && v.ShareState != "" && v.ShareState != "running" {
+			add(SevCrit, "storage", obj, fmt.Sprintf("Longhorn RWX volume %s share manager is %s: the NFS export is down, every pod mounting it hangs", v.Name, v.ShareState), "kubectl -n longhorn-system get pods -l longhorn.io/share-manager="+v.Name+"; share-manager logs; nfs-utils on the nodes")
+		}
+		if v.TooManySnaps {
+			add(SevWarn, "storage", obj, fmt.Sprintf("Longhorn volume %s has too many snapshots (%d, max %s): new snapshots and backups fail", v.Name, v.Snapshots, orDefault(li.Setting("snapshot-max-count"), "250")), "delete or purge snapshots (recurring job with retain), raise snapshot-max-count")
+		}
+		if v.ExpansionErr != "" {
+			add(SevWarn, "storage", obj, "Longhorn volume "+v.Name+" expansion failed: "+firstLine(v.ExpansionErr), "kubectl -n longhorn-system describe engines -l longhornvolume="+v.Name)
+		}
+		if v.Replicas == 1 && v.PVC != "" && !v.Standby {
+			singles = append(singles, v.PVC)
+		}
+		if v.Image != "" && v.CurrentImage != "" && v.Image != v.CurrentImage {
+			add(SevInfo, "storage", obj, fmt.Sprintf("Longhorn volume %s engine upgrade pending (%s -> %s)", v.Name, imageTag(v.CurrentImage), imageTag(v.Image)), "live upgrade happens when the volume is attached and healthy")
+		}
+		// pods wanting the volume on another node than the engine
+		if v.State == "attached" && v.AccessMode != "rwx" {
+			for _, w := range v.Workloads {
+				if p := podsByName[w]; p != nil && p.Spec.NodeName != "" && p.Spec.NodeName != v.Node && p.DeletionTimestamp == nil && p.Status.Phase == corev1.PodPending {
+					add(SevWarn, "storage", obj, fmt.Sprintf("pod %s/%s is scheduled on %s but Longhorn volume %s is attached on %s: the pod waits until the volume detaches there", p.Namespace, p.Name, p.Spec.NodeName, v.Name, v.Node), "kubectl -n longhorn-system get volumeattachments.longhorn.io "+v.Name+" (attachment tickets); the previous pod must terminate first")
+				}
+			}
+		}
+	}
+	if len(singles) > 0 {
+		add(SevInfo, "storage", d.Driver, fmt.Sprintf("%d Longhorn volumes have a single replica (no redundancy: %s)", len(singles), truncList(singles, 3)), "numberOfReplicas on the StorageClass or volume; a node loss loses the data")
+	}
+
+	// ---- backup target, orphans ----
+	for _, bt := range li.BackupTargets {
+		switch {
+		case bt.URL == "":
+			add(SevInfo, "storage", d.Driver, "Longhorn has no backup target: no backups, no DR volumes, snapshots stay on the same disks as the data", "set the backup target (s3://, nfs://, cifs://) and its credential secret in Longhorn settings")
+		case !bt.Available:
+			add(SevWarn, "storage", d.Driver, "Longhorn backup target "+bt.URL+" unavailable: "+orDefault(bt.Message, "not reachable")+" - scheduled backups fail", "kubectl -n longhorn-system describe backuptargets.longhorn.io "+bt.Name+"; credentials secret "+orDefault(bt.Credential, "(none)")+", endpoint reachability from the longhorn-manager pods")
+		}
+	}
+	if len(li.Orphans) > 0 {
+		byNode := map[string]int{}
+		for _, o := range li.Orphans {
+			byNode[o.Node]++
+		}
+		var parts []string
+		for _, n := range sortedKeysInt(byNode) {
+			parts = append(parts, fmt.Sprintf("%s x%d", n, byNode[n]))
+		}
+		add(SevWarn, "storage", d.Driver, fmt.Sprintf("%d orphaned replica directories on the Longhorn disks (%s): leftover data of deleted or failed replicas taking space", len(li.Orphans), strings.Join(parts, ", ")), "kubectl -n longhorn-system get orphans; delete them (kubectl delete orphan <name>) or enable orphan-resource-auto-deletion")
+	}
+
+	// ---- settings ----
+	if rc := li.SettingInt("default-replica-count", 3); rc > allowed && allowed > 0 {
+		add(SevWarn, "storage", d.Driver, fmt.Sprintf("default-replica-count is %d but only %d Longhorn nodes allow scheduling: every new volume with the default class starts degraded", rc, allowed), "lower default-replica-count / numberOfReplicas, or add schedulable nodes")
+	}
+	if li.Setting("replica-soft-anti-affinity") == "true" && allowed > 1 {
+		add(SevInfo, "storage", d.Driver, "replica-soft-anti-affinity is on: replicas of one volume may land on the same node, so a node loss can take every copy", "keep it off unless the cluster has fewer nodes than replicas")
+	}
+	if li.SettingInt("concurrent-replica-rebuild-per-node-limit", 5) == 0 {
+		add(SevWarn, "storage", d.Driver, "concurrent-replica-rebuild-per-node-limit is 0: degraded volumes never rebuild", "set it back to 5 (default)")
+	}
+	if li.Setting("auto-salvage") == "false" {
+		add(SevInfo, "storage", d.Driver, "auto-salvage is off: a volume whose replicas all fail stays faulted until salvaged by hand", "")
+	}
+	if li.Setting("upgrade-checker") == "true" {
+		add(SevInfo, "storage", d.Driver, "Longhorn upgrade-checker is on: longhorn-manager contacts longhorn.io for version checks", "set upgrade-checker=false on air-gapped or restricted clusters")
+	}
+	if li.Setting("node-down-pod-deletion-policy") == "do-nothing" {
+		for i := range s.StatefulSets {
+			if statefulSetUsesLonghorn(&s.StatefulSets[i], s) {
+				add(SevInfo, "storage", d.Driver, "node-down-pod-deletion-policy is do-nothing: StatefulSet pods on a lost node stay Terminating and their Longhorn volumes stay attached there until deleted by hand", "delete-statefulset-pod (or delete-both-statefulset-and-deployment-pod) lets Longhorn force-delete them once the node is down")
+				break
+			}
+		}
+	}
+}
+
+// evalTridentExtra covers the Trident CRs beyond TridentBackend.
+func evalTridentExtra(in Input, d k8s.CSIStatus, add func(Severity, string, string, string, string)) {
+	ti := d.TridentX
+	s := in.Snap
+	for _, b := range d.Trident {
+		if strings.EqualFold(b.UserState, "suspended") {
+			add(SevInfo, "storage", d.Driver, "Trident backend "+b.BackendName+" is suspended by the user: no new volumes are provisioned on it", "tridentctl update backend-state "+b.BackendName+" --user-state normal")
+		}
+	}
+	if ti == nil {
+		return
+	}
+	if o := ti.Orchestrator; o != nil {
+		switch strings.ToLower(o.Status) {
+		case "installed", "":
+		case "installing", "updating":
+			add(SevInfo, "cloud", "tridentorchestrator/"+o.Name, "Trident operator is "+o.Status+": "+firstLine(o.Message), "")
+		default:
+			add(SevCrit, "storage", "tridentorchestrator/"+o.Name, "Trident operator reports "+o.Status+": "+orDefault(firstLine(o.Message), "installation failed")+" - the CSI driver is not (fully) installed", "kubectl -n "+orDefault(o.Namespace, "trident")+" logs deploy/trident-operator; kubectl describe tridentorchestrator "+o.Name)
+		}
+	}
+	for _, bc := range ti.BackendConfigs {
+		obj := bc.Namespace + "/" + bc.Name
+		switch strings.ToLower(bc.Phase) {
+		case "bound":
+			if strings.EqualFold(bc.LastOperation, "failed") {
+				add(SevWarn, "storage", obj, "TridentBackendConfig last update failed: "+orDefault(firstLine(bc.Message), "see status")+" (the backend keeps its previous config)", "kubectl -n "+bc.Namespace+" describe tridentbackendconfig "+bc.Name)
+			}
+		case "unbound", "failed", "lost", "":
+			add(SevCrit, "storage", obj, fmt.Sprintf("TridentBackendConfig %s (%s) is %s: %s - no backend, so no volume can be provisioned from it", bc.Name, bc.Driver, orDefault(bc.Phase, "not processed"), orDefault(firstLine(bc.Message), "see status")), "check the credentials secret "+orDefault(bc.Credentials, "(inline)")+", the management LIF reachability from the trident-controller pod and the SVM permissions; kubectl -n "+bc.Namespace+" describe tridentbackendconfig "+bc.Name)
+		case "deleting":
+			add(SevWarn, "storage", obj, "TridentBackendConfig is deleting; the backend "+bc.BackendName+" is removed once no volume uses it", "")
+		}
+	}
+	if len(ti.Nodes) > 0 {
+		var missing, dirty []string
+		for i := range s.Nodes {
+			n := &s.Nodes[i]
+			tn := ti.TridentNode(n.Name)
+			switch {
+			case tn == nil || tn.Deleted:
+				if d.NodePlugin != nil && k8s.NodeReady(n) {
+					missing = append(missing, n.Name)
+				}
+			case !tn.Registered:
+				missing = append(missing, n.Name)
+			case strings.EqualFold(tn.PublicationState, "dirty"):
+				dirty = append(dirty, n.Name)
+			}
+		}
+		if len(missing) > 0 {
+			add(SevWarn, "storage", d.Driver, "no TridentNode registration for "+truncList(missing, 4)+": the node plugin there never registered with the controller, so volumes cannot be published to those nodes", "kubectl -n trident logs ds/trident-node-linux -c trident-main on that node; the controller must be reachable from the node pods")
+		}
+		if len(dirty) > 0 {
+			add(SevWarn, "storage", d.Driver, "TridentNode publication state is dirty on "+truncList(dirty, 4)+": volumes were force-detached from the node and Trident refuses new publications there until it is cleaned", "once the node is healthy: tridentctl node cleanup, or restart the trident node pod on it (Trident 23.10+ cleans automatically with enableForceDetach)")
+		}
+	}
+	for vol, nodes := range ti.MultiPublished() {
+		add(SevCrit, "storage", vol, "Trident published the single-writer volume to "+strings.Join(nodes, " and ")+" at the same time: two hosts can write the same LUN/export (split brain)", "kubectl get tridentvolumepublications -l volumeID="+vol+"; detach the stale one from the node that no longer runs the pod (tridentctl force-detach is Trident 23.10+ with enableForceDetach)")
+	}
+	if o := ti.Orchestrator; o != nil && !o.ForceDetach {
+		add(SevInfo, "storage", d.Driver, "Trident enableForceDetach is off: a volume on a node that went down stays published there until the node comes back, so its pod cannot restart elsewhere", "set enableForceDetach: true on the TridentOrchestrator (needs the node to be tainted out-of-service / NotReady for 6 min)")
+	}
+}
+
+func longhornPackageHint(cond string) string {
+	switch cond {
+	case "RequiredPackages":
+		return "install nfs-utils/nfs-common, iscsi-initiator-utils/open-iscsi, cryptsetup, device-mapper on the node"
+	case "NFSClientInstalled":
+		return "install nfs-utils / nfs-common (RWX volumes mount over NFS)"
+	case "KernelModulesLoaded":
+		return "modprobe dm_crypt (and iscsi_tcp), persist in /etc/modules-load.d"
+	case "Multipathd":
+		return "multipathd claims Longhorn devices: blacklist them in /etc/multipath.conf or stop multipathd"
+	}
+	return ""
+}
+
+func statefulSetUsesLonghorn(ss interface{ GetName() string }, s *k8s.Snapshot) bool {
+	// a StatefulSet uses Longhorn when any PVC of its volumeClaimTemplates is a Longhorn PV
+	name := ss.GetName()
+	for i := range s.PVCs {
+		p := &s.PVCs[i]
+		if !strings.HasSuffix(p.Name, "-"+name+"-0") && !strings.Contains(p.Name, "-"+name+"-") {
+			continue
+		}
+		for j := range s.PVs {
+			if s.PVs[j].Name == p.Spec.VolumeName && s.PVs[j].Spec.CSI != nil && s.PVs[j].Spec.CSI.Driver == "driver.longhorn.io" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func imageTag(img string) string {
+	if i := strings.LastIndex(img, ":"); i >= 0 && !strings.Contains(img[i:], "/") {
+		return img[i+1:]
+	}
+	return img
+}
+
+func sortedKeysOf(m map[string][]nodeinfo.StaleMount) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedKeysInt(m map[string]int) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// evalStorageNode cross-checks a node's storage facts with the cluster:
+// network mounts that stopped answering, and Longhorn block devices the
+// node still presents for volumes the cluster has attached elsewhere or
+// given up on (the split-brain case after a partition).
+func evalStorageNode(name string, ni *nodeinfo.Info, in Input, add func(Severity, string, string, string, string)) {
+	// one finding per export: the same NFS source is mounted twice per pod
+	// (the CSI globalmount and the pod's own mount)
+	bySource := map[string][]nodeinfo.StaleMount{}
+	for _, m := range ni.StaleMounts {
+		bySource[m.Source] = append(bySource[m.Source], m)
+	}
+	for _, src := range sortedKeysOf(bySource) {
+		ms := bySource[src]
+		hint := "the server behind the mount is unreachable from this node; processes in D state cannot be killed until it answers or the mount is forced off (umount -f -l)"
+		if in.Snap.IsServiceIP(strings.SplitN(src, ":", 2)[0]) || strings.Contains(ms[0].Mountpoint, "driver.longhorn.io") {
+			hint = "a Longhorn RWX export: the share-manager pod (kubectl -n longhorn-system get pods -l longhorn.io/component=share-manager) is unreachable from this node - node partitioned, share manager down, or kube-proxy/CNI broken on this node"
+		}
+		where := ms[0].Mountpoint
+		if len(ms) > 1 {
+			where = fmt.Sprintf("%d mountpoints under /var/lib/kubelet", len(ms))
+		}
+		add(SevCrit, "storage", name, fmt.Sprintf("network mount %s (%s, %s) is hung: stat blocks on it, df stalls, every pod with that volume hangs and cannot terminate", src, ms[0].FSType, where), hint)
+	}
+	li := in.Snap.Longhorn
+	if li == nil || len(ni.Preflight.CSI.LonghornDevs) == 0 {
+		return
+	}
+	session := map[string]string{}
+	for _, s := range ni.Preflight.CSI.ISCSISessions {
+		if v := s.LonghornVolume(); v != "" {
+			session[v] = s.State
+		}
+	}
+	byName := map[string]*k8s.LonghornVolume{}
+	for i := range li.Volumes {
+		byName[li.Volumes[i].Name] = &li.Volumes[i]
+	}
+	for _, dev := range ni.Preflight.CSI.LonghornDevs {
+		v := byName[dev]
+		st := session[dev]
+		if st != "" {
+			st = " (iSCSI session " + st + ")"
+		}
+		switch {
+		case v == nil:
+			add(SevWarn, "storage", name, fmt.Sprintf("/dev/longhorn/%s is still present on the node but the Longhorn volume no longer exists%s", dev, st), "iscsiadm -m session; log out of the stale target (iscsiadm -m node -T iqn.2019-10.io.longhorn:"+dev+" -u) once nothing uses the device")
+		case v.State == "attached" && v.Node == name:
+		default:
+			where := "detached"
+			if v.Node != "" {
+				where = v.State + " on " + v.Node
+			} else if v.State != "detached" {
+				where = v.State
+			}
+			obj := v.PVC
+			if obj == "" {
+				obj = dev
+			}
+			add(SevCrit, "storage", obj, fmt.Sprintf("node %s still presents /dev/longhorn/%s%s while the cluster has the volume %s: the engine on this node can keep writing to its local replica, and once the volume is attached elsewhere the two copies diverge (split brain) - whatever is written here is discarded when the node rejoins", name, dev, st, where), "stop the pods on this node (or fence it) before the volume is reattached elsewhere; when the node is back, Longhorn rebuilds its replica from the surviving ones - do not salvage the replica from this node unless it is the only one with the data")
+		}
+	}
+}

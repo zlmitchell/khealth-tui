@@ -49,9 +49,26 @@ sec STAT1; head -1 /proc/stat
 # has nothing to diff against and samples over one second here.
 if [ "__CPUSAMPLE__" = 1 ]; then sleep 1; sec STAT2; head -1 /proc/stat; fi
 sec MEM; cat /proc/meminfo
-sec DF; df -PkT -x tmpfs -x devtmpfs -x overlay -x squashfs -x nsfs -x efivarfs -x fuse.lxcfs -x shm 2>/dev/null || df -Pk
-sec PVMOUNTS; df -Pk 2>/dev/null | grep -E 'kubelet/(pods|plugins)/.*/volumes/' | awk '{print $2"|"$3"|"$4"|"$5"|"$6}'
-sec DFI; df -Pki -x tmpfs -x devtmpfs -x overlay -x squashfs -x nsfs -x efivarfs -x fuse.lxcfs -x shm 2>/dev/null
+# df blocks in statfs on a hung network mount (NFS server gone, RWX share
+# manager down): a stalled df is retried without network filesystems and
+# the hung mounts are named in STALEMOUNTS (checked one by one, in parallel,
+# 3 s each). Excluded types are skipped before statfs, so the retry cannot
+# hang on them.
+DFX="-x tmpfs -x devtmpfs -x overlay -x squashfs -x nsfs -x efivarfs -x fuse.lxcfs -x shm"
+DFNET="-x nfs -x nfs4 -x cifs -x smb3 -x ceph -x fuse.sshfs -x fuse.glusterfs -x glusterfs -x fuse.ceph -x 9p -x virtiofs"
+STALLED=0
+dfrun() { out=$(timeout 8 df $1 $DFX 2>/dev/null) && [ -n "$out" ] && { echo "$out"; return 0; }; STALLED=1; timeout 8 df $1 $DFX $DFNET 2>/dev/null; }
+sec DF; dfrun -PkT || df -Pk $DFNET
+sec PVMOUNTS; dfrun -Pk | grep -E 'kubelet/(pods|plugins)/.*/volumes/' | awk '{print $2"|"$3"|"$4"|"$5"|"$6}'
+sec DFI; dfrun -Pki
+sec STALEMOUNTS
+if [ "$STALLED" = 1 ]; then
+  smchk() { timeout 3 stat -f -c %T "$1" >/dev/null 2>&1 || echo "$1|$2|$3"; }
+  while read -r src mnt fst _; do
+    case "$fst" in nfs|nfs4|cifs|smb3|ceph|fuse.sshfs|glusterfs|fuse.glusterfs|9p|virtiofs) smchk "$mnt" "$src" "$fst" & ;; esac
+  done < /proc/mounts
+  wait
+fi
 # units() prints "name|LoadState|ActiveState|SubState|NRestarts|ExecMainStartTimestamp|Result|UnitFileState" per loaded unit
 units() {
   systemctl show -p Id,LoadState,ActiveState,SubState,NRestarts,ExecMainStartTimestamp,Result,UnitFileState "$@" 2>/dev/null | awk -F= '
@@ -65,6 +82,13 @@ sec SVC
 echo "$UNITS_OUT" | awk -F'|' '$1=="kubelet"||$1=="containerd"||$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="etcd"||$1=="docker"||$1=="crio"||$1=="rancher-system-agent"||$1=="chronyd"||$1=="chrony"||$1=="ntpd"||$1=="ntp"||$1=="systemd-timesyncd"||$1=="firewalld"||$1=="ufw"||$1=="nftables"||$1=="iptables"||$1=="apparmor"{print $1, $2, $3, $4}'
 sec UNITS
 echo "$UNITS_OUT" | awk -F'|' '$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="kubelet"||$1=="containerd"||$1=="rancher-system-agent"||$1=="etcd"||$1=="cloud-init-local"||$1=="cloud-init"||$1=="cloud-config"||$1=="cloud-final"{print $1"|"$3"|"$4"|"$5"|"$6"|"$7"|"}'
+sec NETLINK
+# every interface: name, mtu, oper state, flags - the overlay (flannel.1,
+# vxlan.calico, cilium_vxlan, flannel-wg, tunl0, cni0) vs the underlay MTU
+# is the CNI check that needs no traffic
+ip -o link show 2>/dev/null | sed -E 's/^[0-9]+: ([^:@ ]+)(@[^: ]+)?: <([^>]*)>.* mtu ([0-9]+) .*state ([A-Z]+).*/\1 \4 \5 \3/'
+echo "default=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')"
+[ -f /run/flannel/subnet.env ] && sed -n 's/^FLANNEL_\(MTU\|NETWORK\|SUBNET\|IPMASQ\)=/flannel_\1=/p' /run/flannel/subnet.env | tr 'A-Z' 'a-z'
 sec NTP
 # timedatectl activates systemd-timedated over D-Bus (~0.8 s wall); read the
 # time daemon directly when it is chrony (6 ms) or timesyncd (a file) and
@@ -212,6 +236,41 @@ for d in /var/lib/rancher/rke2/agent/etc/cni/net.d /var/lib/rancher/k3s/agent/et
   [ -d "$d" ] || continue
   for f in "$d"/*.conf "$d"/*.conflist; do [ -f "$f" ] || continue; echo "--- $f"; head -c 6000 "$f"; echo; done
 done
+sec NETPROBE
+# Active network checks from this node, all in parallel and each capped at
+# a few seconds: ping one pod on every node (the overlay path: cni bridge,
+# vxlan / wireguard / ipip to the other node, its pod), a DNS query to the
+# CoreDNS pods and to the DNS service ClusterIP (pod path vs kube-proxy
+# path), a TCP connect to the kubernetes service ClusterIP (kube-proxy).
+# Targets come from the API snapshot; nothing is created in the cluster.
+DNSIP=__DNSIP__; APISVC=__APISVC__
+pp() {
+  n=${1%%=*}; ip=${1#*=}
+  if ! command -v ping >/dev/null 2>&1; then echo "PING|$n|$ip|skip|no ping on the node"; return; fi
+  out=$(ping -n -c 1 -W 2 "$ip" 2>&1); rc=$?
+  if [ $rc -eq 0 ]; then echo "PING|$n|$ip|ok|$(echo "$out" | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -1)"
+  else echo "PING|$n|$ip|fail|$(echo "$out" | grep -v '^$' | tail -1 | cut -c1-80)"; fi
+}
+dq() {
+  if command -v dig >/dev/null 2>&1; then out=$(dig +short +time=2 +tries=1 @"$1" kubernetes.default.svc.cluster.local A 2>&1); rc=$?
+  elif command -v nslookup >/dev/null 2>&1; then out=$(timeout 4 nslookup kubernetes.default.svc.cluster.local "$1" 2>&1 | awk '/^Address/ && !/#53/ {print $2}'); rc=$?
+  elif command -v host >/dev/null 2>&1; then out=$(timeout 4 host -W 2 kubernetes.default.svc.cluster.local "$1" 2>&1 | awk '/has address/ {print $NF}'); rc=$?
+  else echo "DNS|$1|skip|no dig, nslookup or host on the node"; return; fi
+  if [ $rc -eq 0 ] && echo "$out" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then echo "DNS|$1|ok|$(echo "$out" | head -1)"
+  else echo "DNS|$1|fail|$(echo "$out" | tr '\n' ' ' | cut -c1-80)"; fi
+}
+tc() {
+  if command -v curl >/dev/null 2>&1; then
+    t=$(curl -sk -o /dev/null -m 3 -w '%{time_connect}' "https://$1/version" 2>/dev/null) && [ -n "$t" ] && echo "TCP|$1|ok|$t" || echo "TCP|$1|fail|connect timed out or refused"
+  elif command -v bash >/dev/null 2>&1; then
+    timeout 3 bash -c "exec 3<>/dev/tcp/${1%%:*}/${1##*:}" 2>/dev/null && echo "TCP|$1|ok|" || echo "TCP|$1|fail|connect timed out or refused"
+  else echo "TCP|$1|skip|no curl or bash on the node"; fi
+}
+for t in __NETTARGETS__; do pp "$t" & done
+for d in __DNSPODS__; do dq "$d" & done
+[ -n "$DNSIP" ] && dq "$DNSIP" &
+[ -n "$APISVC" ] && tc "$APISVC:443" &
+wait
 sec REGISTRIES
 for f in /etc/rancher/rke2/registries.yaml /etc/rancher/k3s/registries.yaml; do
   [ -f "$f" ] || continue

@@ -79,6 +79,21 @@ func main() {
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, Config: true, Heavy: *heavy, CPUSample: true}
+		setNet := func(o nodeinfo.Options, node string) nodeinfo.Options {
+			for _, t := range snap.PodTargetList() {
+				if !strings.HasPrefix(t, node+"=") {
+					o.NetTargets = append(o.NetTargets, t)
+				}
+			}
+			for i := range snap.Pods {
+				p := &snap.Pods[i]
+				if p.Namespace == "kube-system" && strings.Contains(p.Name, "coredns") && !strings.Contains(p.Name, "autoscaler") && p.Status.PodIP != "" && len(o.DNSPods) < 2 {
+					o.DNSPods = append(o.DNSPods, p.Status.PodIP)
+				}
+			}
+			o.DNSIP, o.APISvcIP = snap.ClusterDNSIP(), snap.APIServiceIP()
+			return o
+		}
 		for i := range snap.Nodes {
 			n := &snap.Nodes[i]
 			host := cfg.SSH.Hosts[n.Name]
@@ -90,7 +105,7 @@ func main() {
 				defer wg.Done()
 				c, cancel := context.WithTimeout(ctx, 3*cfg.SSH.Timeout)
 				defer cancel()
-				res := runner.Run(c, host, nodeinfo.Script(o))
+				res := runner.Run(c, host, nodeinfo.Script(setNet(o, name)))
 				if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
 					fmt.Fprintf(os.Stderr, "node probe %s: %v %s\n", name, res.Err, res.Stderr)
 				}

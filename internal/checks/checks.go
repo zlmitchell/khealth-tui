@@ -197,6 +197,7 @@ func Evaluate(in Input) []Finding {
 
 	// ---- cloud provider / CSI (API) ----
 	evalCloud(in, add)
+	evalNetwork(in, add)
 
 	// ---- nodes (SSH) ----
 	// Nodes presenting the same SSH host key are clones that were never
