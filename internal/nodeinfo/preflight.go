@@ -11,41 +11,45 @@ import (
 // Preflight holds the facts scripts/preflight.sh collects: what stops rke2
 // or k3s from (re)starting or the node from being re-provisioned although
 // the OS itself is healthy. Swaps and Units are refreshed every probe; the
-// rest comes with the config tier (Probed) and Denies with the heavy tier.
+// rest comes with the config tier (Probed); Denies and Pulls with the
+// heavy tier.
 type Preflight struct {
-	Swaps        []SwapDev
-	Units        map[string]PFUnit // NetworkManager, nm-cloud-setup, vmtoolsd, cloud-init, multipathd, fapolicyd, auditd, firewalld
-	Probed       bool
-	FstabSwap    []string
-	FailSwapOn   string // kubelet config failSwapOn from the drop-ins ("" when not set: upstream default true)
-	SwapBehavior string // kubelet memorySwap.swapBehavior
-	MountOpts    []MountOpt
-	Modprobe     []ModprobeLine  // install/blacklist lines from modprobe.d for the modules that matter
-	Modules      map[string]bool // loaded kernel modules among the ones that matter
-	Virt         VirtInfo
-	CloudInit    CloudInit
-	Fapolicyd    Fapolicyd
-	Auditd       map[string]string // auditd.conf keys
-	Accounts     []Account
-	SudoUser     string // the ssh user (SUDO_USER on the node)
-	Today        int    // days since the epoch on the node
-	LoginDefs    map[string]string
-	Faillock     map[string]int // user -> valid failed attempts
-	FaillockDeny int
-	Proxy        []ProxyLine
-	Iptables     string
-	SEPkgs       []string // rpm -q rke2-selinux k3s-selinux container-selinux
-	NMUnmanaged  []string
-	RegProbes    []RegProbe
-	RegFiles     []RegFile
-	CurlMissing  bool
-	Denies       []FapDeny // fapolicyd denials from the audit log (heavy)
-	DeniesProbed bool
-	CSI          CSIInfo
-	CIUsers      []string            // users cloud-init created (sudoers.d/90-cloud-init-users)
-	CIDefault    string              // default_user from /etc/cloud/cloud.cfg
-	Sudo         map[string]SudoInfo // ssh user and cloud-init users
-	VCenters     []VCenterProbe
+	Swaps         []SwapDev
+	Units         map[string]PFUnit // NetworkManager, nm-cloud-setup, vmtoolsd, cloud-init, multipathd, fapolicyd, auditd, firewalld
+	Probed        bool
+	FstabSwap     []string
+	FailSwapOn    string // kubelet config failSwapOn from the drop-ins ("" when not set: upstream default true)
+	SwapBehavior  string // kubelet memorySwap.swapBehavior
+	MountOpts     []MountOpt
+	Modprobe      []ModprobeLine  // install/blacklist lines from modprobe.d for the modules that matter
+	Modules       map[string]bool // loaded kernel modules among the ones that matter
+	Virt          VirtInfo
+	CloudInit     CloudInit
+	Fapolicyd     Fapolicyd
+	Auditd        map[string]string // auditd.conf keys
+	Accounts      []Account
+	SudoUser      string // the ssh user (SUDO_USER on the node)
+	Today         int    // days since the epoch on the node
+	LoginDefs     map[string]string
+	Faillock      map[string]int // user -> valid failed attempts
+	FaillockDeny  int
+	Proxy         []ProxyLine
+	Iptables      string
+	SEPkgs        []string // rpm -q rke2-selinux k3s-selinux container-selinux
+	NMUnmanaged   []string
+	RegProbes     []RegProbe
+	RegFiles      []RegFile
+	CurlMissing   bool
+	Denies        []FapDeny // fapolicyd denials from the audit log (heavy)
+	DeniesProbed  bool
+	Pulls         []RegPull // crictl pull dry run per mirrored registry (heavy)
+	PullsProbed   bool
+	CrictlMissing bool // no crictl on the node: the pull dry run did not happen
+	CSI           CSIInfo
+	CIUsers       []string            // users cloud-init created (sudoers.d/90-cloud-init-users)
+	CIDefault     string              // default_user from /etc/cloud/cloud.cfg
+	Sudo          map[string]SudoInfo // ssh user and cloud-init users
+	VCenters      []VCenterProbe
 }
 
 // CSIInfo is what storage drivers left on the host: the CSI node plugins
@@ -262,6 +266,19 @@ type RegProbe struct {
 	Skipped   string // why the endpoint was not probed ("airgap": image tarballs on the node, no egress attempted)
 }
 
+// RegPull is one crictl pull dry run: an image the node already holds from
+// a registry registries.yaml mirrors, pulled again by digest through
+// containerd (manifest resolve only, nothing downloaded). Unlike RegProbe
+// it goes through the hosts.toml rke2/k3s rendered, not registries.yaml.
+type RegPull struct {
+	Registry  string   // the mirrors: key
+	Image     string   // the digest reference pulled ("" when skipped)
+	Endpoints []string // mirror endpoint hosts registries.yaml lists (empty: containerd goes to the registry itself)
+	OK        bool
+	Skipped   string // why no pull was made ("airgap", "no image from this registry on the node")
+	Detail    string // containerd's error when the pull failed
+}
+
 // RegFile is a TLS file registries.yaml names.
 type RegFile struct {
 	Key, Kind, Path string
@@ -316,9 +333,7 @@ func parsePreflight(info *Info, secs map[string]string) {
 		}
 	}
 	if _, ok := secs["MOUNTOPTS"]; !ok {
-		if _, ok := secs["FAPDENY"]; ok {
-			parseFapDeny(p, secs["FAPDENY"])
-		}
+		parseHeavy(p, secs)
 		return
 	}
 	p.Probed = true
@@ -516,9 +531,44 @@ func parsePreflight(info *Info, secs map[string]string) {
 		}
 	}
 	sort.Slice(p.RegProbes, func(i, j int) bool { return p.RegProbes[i].URL < p.RegProbes[j].URL })
+	parseHeavy(p, secs)
+}
+
+// parseHeavy reads the heavy-tier sections of preflight.sh.
+func parseHeavy(p *Preflight, secs map[string]string) {
 	if _, ok := secs["FAPDENY"]; ok {
 		parseFapDeny(p, secs["FAPDENY"])
 	}
+	if _, ok := secs["REGPULL"]; ok {
+		parseRegPulls(p, secs["REGPULL"])
+	}
+}
+
+func parseRegPulls(p *Preflight, s string) {
+	p.PullsProbed = true
+	for _, l := range nonEmpty(s) {
+		if l == "crictl=missing" {
+			p.CrictlMissing = true
+			continue
+		}
+		f := strings.SplitN(l, "|", 5)
+		if len(f) != 5 {
+			continue
+		}
+		r := RegPull{Registry: f[0], Image: f[1], OK: f[3] == "ok"}
+		for _, e := range strings.Split(f[2], ",") {
+			if e != "" {
+				r.Endpoints = append(r.Endpoints, e)
+			}
+		}
+		if f[3] == "skip" {
+			r.Skipped = f[4]
+		} else {
+			r.Detail = f[4]
+		}
+		p.Pulls = append(p.Pulls, r)
+	}
+	sort.Slice(p.Pulls, func(i, j int) bool { return p.Pulls[i].Registry < p.Pulls[j].Registry })
 }
 
 func parseFapDeny(p *Preflight, s string) {
@@ -544,16 +594,23 @@ func (p *Preflight) mergeConfig(prev *Preflight) {
 	}
 	swaps, units := p.Swaps, p.Units
 	denies, dp := p.Denies, p.DeniesProbed
+	pulls, pp, cm := p.Pulls, p.PullsProbed, p.CrictlMissing
 	*p = *prev
 	p.Swaps, p.Units = swaps, units
 	p.Denies, p.DeniesProbed = denies, dp
+	p.Pulls, p.PullsProbed, p.CrictlMissing = pulls, pp, cm
 }
 
 func (p *Preflight) mergeHeavy(prev *Preflight) {
-	if p.DeniesProbed || prev == nil {
+	if prev == nil {
 		return
 	}
-	p.Denies, p.DeniesProbed = prev.Denies, prev.DeniesProbed
+	if !p.DeniesProbed {
+		p.Denies, p.DeniesProbed = prev.Denies, prev.DeniesProbed
+	}
+	if !p.PullsProbed {
+		p.Pulls, p.PullsProbed, p.CrictlMissing = prev.Pulls, prev.PullsProbed, prev.CrictlMissing
+	}
 }
 
 // Account returns the account entry for name.

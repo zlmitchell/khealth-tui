@@ -9,16 +9,11 @@
 # (===NAME lines) and parsed by the Go side; keep names in sync with the
 # parser. Never print secrets: pass file dumps through `mask`.
 sec CRICTL
-CRICTL=; CRI=
-if [ -x /var/lib/rancher/rke2/bin/crictl ]; then CRICTL=/var/lib/rancher/rke2/bin/crictl; CRI=unix:///run/k3s/containerd/containerd.sock
-elif command -v k3s >/dev/null 2>&1 && [ -S /run/k3s/containerd/containerd.sock ]; then CRICTL="k3s crictl"; CRI=
-elif command -v crictl >/dev/null 2>&1; then CRICTL=$(command -v crictl)
-  for s in /run/containerd/containerd.sock /var/run/crio/crio.sock /run/cri-dockerd.sock; do [ -S "$s" ] && { CRI="unix://$s"; break; }; done
-fi
+# CRICTL, CRI and runcri come from base.sh
 echo "crictl=$CRICTL cri=$CRI"
-runcri() { if [ -n "$CRI" ]; then $CRICTL -r "$CRI" "$@"; else $CRICTL "$@"; fi; }
 sec IMAGES
-[ -n "$CRICTL" ] && runcri images -o json 2>/dev/null
+# preflight.sh already listed the images for the registry pull dry run
+if [ -n "$CRIIMG" ]; then printf '%s\n' "$CRIIMG"; elif [ -n "$CRICTL" ]; then runcri images -o json 2>/dev/null; fi
 sec CONTAINERS
 [ -n "$CRICTL" ] && runcri ps -o json 2>/dev/null
 sec TARBALLS

@@ -110,7 +110,9 @@ is spread over 2.5 minutes.
     registries, and the hardening commands that spawn real tools
     (`needs-restarting` alone is 0.3 s of python);
   - **heavy** (same cadence): journal, `crictl images/ps`, tarball manifests
-    (cached by path/size/mtime), `du` of hostPath PVs;
+    (cached by path/size/mtime), `du` of hostPath PVs, the registry pull
+    dry run (`crictl pull` by digest, ~1 s wall in parallel per registry,
+    0.03 s CPU);
   - **OS STIG** (`Shift+S` on the Security tab only, four stages per node,
     each its own SSH run): `sysctl -a`, package list, unit files, `find`
     scans (de-duplicated across the RHEL 8/9/10 and Ubuntu rule sets),
@@ -179,7 +181,7 @@ is spread over 2.5 minutes.
 ## Offline / airgapped environments
 
 Everything the tool does is local to the operator's machine, the API server
-and the nodes, except three things:
+and the nodes, except four things:
 
 - **Helm update check** (operator machine -> chart repos / Artifact Hub): a
   2 s TCP reachability probe first, then helm's own cached `index.yaml` as
@@ -194,6 +196,18 @@ and the nodes, except three things:
   tarballs in `agent/images` (airgap install) those are **not probed at
   all** - no egress attempt to trip a firewall alert, no "unreachable"
   finding - and appear as `skip` in the node's preflight table.
+- **Registry pull dry run** (node -> the same registries, through
+  containerd, heavy cycles only): `crictl pull` by digest of an image the
+  node already holds, one per registry `registries.yaml` names, in
+  parallel with a 20 s cap. Every blob is local, so containerd only
+  resolves the manifest (one HEAD per endpoint) through the `hosts.toml`
+  it rendered: ~1 s wall and 0.03 s CPU per registry, nothing downloaded,
+  `crictl images` unchanged, four info lines in containerd's log. The same
+  airgap rule applies to endpoint-less mirrors. containerd tries the next
+  host on any error and falls through to the upstream registry after the
+  mirrors - that is its behaviour on any pull - so a pass proves the chain,
+  a failure names the host that failed, and the curl probe is what checks
+  each endpoint on its own.
 - **etcd S3 snapshot check** (node -> the S3 endpoint you configured).
 
 No DNS, package repository, vendor site or telemetry is contacted.

@@ -516,6 +516,117 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 			add(SevWarn, "images", name, m, "the configs key must equal the endpoint host:port exactly, port included, or containerd never sends the credentials/TLS settings")
 		}
 	}
+
+	// ---- registry pull dry run through containerd (heavy) ----
+	if p.PullsProbed {
+		if p.CrictlMissing && len(ni.RegistryMirrors) > 0 {
+			add(SevInfo, "images", name, "crictl is not on the node: the registry mirrors were not pull-tested through containerd", "")
+		}
+		for _, r := range p.Pulls {
+			if msg, hint, sev, ok := pullVerdict(r, p, len(ni.Tarballs) > 0, dataDir, v); ok {
+				add(sev, "images", name, msg, hint)
+			}
+		}
+	}
+}
+
+// pullVerdict interprets one crictl pull dry run (RegPull). The detail is
+// containerd's error and the host it names is the one that failed: a mirror
+// endpoint, or the registry itself after every mirror answered 404 (the
+// image is not on the mirror and containerd fell through). The curl probe
+// of the same host tells the two sides apart: curl reads registries.yaml,
+// containerd the hosts.toml rendered from it.
+func pullVerdict(r nodeinfo.RegPull, p *nodeinfo.Preflight, airgap bool, dataDir string, v distro.Vocab) (msg, hint string, sev Severity, ok bool) {
+	if r.OK || r.Skipped != "" {
+		return "", "", 0, false
+	}
+	low := strings.ToLower(r.Detail)
+	failed := pullFailedHost(r.Detail)
+	via := "registry " + r.Registry
+	if len(r.Endpoints) > 0 {
+		via += " through its mirror " + strings.Join(r.Endpoints, ", ")
+	}
+	hostsToml := "/etc/containerd/certs.d/" + r.Registry + "/hosts.toml"
+	if distro.IsRancher(v.Name) {
+		hostsToml = dataDir + "/agent/etc/containerd/certs.d/" + r.Registry + "/hosts.toml"
+	}
+	curlNote := ""
+	if failed != "" && curlReached(p, failed) {
+		curlNote = "; curl from the node with the registries.yaml settings reaches " + failed + ", so the rendered " + hostsToml + " is what differs"
+	}
+	fixHint := "compare " + hostsToml + " with " + v.Registries + " and the containerd log, then " + v.RegistryReload
+	img := shortRef(r.Image)
+	switch {
+	case len(r.Endpoints) > 0 && failed != "" && !hostIn(failed, r.Endpoints):
+		// every mirror answered 404 and the fallback to the registry itself failed
+		if airgap {
+			return fmt.Sprintf("mirror %s does not hold %s (404) and containerd fell through to %s, unreachable from this airgapped node: images the mirror lacks cannot be pulled again", strings.Join(r.Endpoints, ", "), img, failed), "push the images the node runs to the mirror, or ignore when they only ever come from the agent/images tarballs", SevInfo, true
+		}
+		return fmt.Sprintf("mirror %s does not hold %s (404) and containerd fell through to %s, which failed: %s", strings.Join(r.Endpoints, ", "), img, failed, r.Detail), "push the image to the mirror, or fix the node's path to " + failed, SevWarn, true
+	case strings.Contains(low, "unauthorized") || pullStatus(low, "401"):
+		return fmt.Sprintf("containerd cannot pull from %s: authentication rejected (%s)%s", via, r.Detail, curlNote), "the configs entry whose key equals the endpoint host:port is what becomes the auth header; " + fixHint, SevCrit, true
+	case strings.Contains(low, "forbidden") || pullStatus(low, "403") || strings.Contains(low, "denied"):
+		return fmt.Sprintf("containerd is refused by %s: %s%s", via, r.Detail, curlNote), "check the robot account's project permissions / registry ACLs", SevWarn, true
+	case strings.Contains(low, "not found"):
+		return fmt.Sprintf("%s no longer serves %s (not found): the node runs an image that cannot be pulled again", via, img), "the image was deleted or garbage-collected on the registry; push it back before the node needs it", SevInfo, true
+	case strings.Contains(low, "timed out"):
+		return fmt.Sprintf("containerd's pull from %s timed out%s", via, curlNote), fixHint, SevWarn, true
+	}
+	return fmt.Sprintf("containerd cannot pull from %s: %s%s", via, r.Detail, curlNote), fixHint, SevWarn, true
+}
+
+// pullStatus says whether the error carries this HTTP status as a word
+// (a bare "401" could as well be three digits of a digest).
+func pullStatus(low, code string) bool {
+	return regexp.MustCompile(`(^|[^0-9a-f])` + code + `($|[^0-9a-f])`).MatchString(low)
+}
+
+// shortRef trims a digest reference to 12 hex digits for prose.
+func shortRef(ref string) string {
+	if i := strings.Index(ref, "@sha256:"); i > 0 {
+		return ref[:min(len(ref), i+8+12)]
+	}
+	return ref
+}
+
+var pullHostRe = []*regexp.Regexp{
+	regexp.MustCompile(`https?://([^/"\s]+)`),
+	regexp.MustCompile(`pulling from host (\S+) failed`),
+	regexp.MustCompile(`lookup ([^\s:]+)`),
+}
+
+// pullFailedHost extracts the host containerd's error names.
+func pullFailedHost(detail string) string {
+	for _, re := range pullHostRe {
+		if m := re.FindStringSubmatch(detail); m != nil {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+// hostIn matches a host against a list, with and without the default port.
+func hostIn(h string, list []string) bool {
+	for _, e := range list {
+		if e == h || strings.TrimSuffix(e, ":443") == strings.TrimSuffix(h, ":443") {
+			return true
+		}
+	}
+	return false
+}
+
+// curlReached says whether the curl probe of the same host got an answer
+// that means "reachable and, if credentials were needed, accepted".
+func curlReached(p *nodeinfo.Preflight, host string) bool {
+	for _, r := range p.RegProbes {
+		if !hostIn(r.Host, []string{host}) {
+			continue
+		}
+		if r.Code == 200 || (r.Code == 401 && r.TokenCode == 200) {
+			return true
+		}
+	}
+	return false
 }
 
 var iptablesVer = regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
@@ -966,6 +1077,39 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 	for _, f := range p.RegFiles {
 		if f.Missing {
 			row("registry "+f.Key+" "+f.Kind, f.Path+" MISSING", "crit")
+		}
+	}
+	if p.PullsProbed && p.CrictlMissing && len(ni.RegistryMirrors) > 0 {
+		row("pull test", "no crictl on the node", "dim")
+	}
+	for _, r := range p.Pulls {
+		img := shortRef(r.Image)
+		via := "the registry itself"
+		if len(r.Endpoints) > 0 {
+			via = "mirror " + strings.Join(r.Endpoints, ", ")
+		}
+		switch {
+		case r.Skipped == "airgap":
+			row("pull "+r.Registry, "not tested: node has airgap image tarballs, no egress attempted", "dim")
+		case r.Skipped != "":
+			row("pull "+r.Registry, "not tested: "+r.Skipped, "dim")
+		case r.OK && len(r.Endpoints) > 0:
+			// containerd moves on to the next host on any error, so a pass
+			// proves the chain (mirror, then the registry itself), not the
+			// mirror alone: the curl probe rows above cover each endpoint
+			row("pull "+r.Registry, "ok: containerd resolved "+img+" through "+via+" or the registry itself", "ok")
+		case r.OK:
+			row("pull "+r.Registry, "ok: containerd resolved "+img+" from the registry itself", "ok")
+		default:
+			st := "warn"
+			if _, _, sev, bad := pullVerdict(r, p, len(ni.Tarballs) > 0, dataDir, distro.For(ni.Dist)); bad {
+				if sev == SevCrit {
+					st = "crit"
+				} else if sev == SevInfo {
+					st = "dim"
+				}
+			}
+			row("pull "+r.Registry, "FAILED via "+via+": "+r.Detail, st)
 		}
 	}
 	if p.Iptables != "" {

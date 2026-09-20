@@ -114,6 +114,10 @@ F|harbor.corp:5000|ca_file|/etc/rancher/rke2/harbor-ca.crt|missing
 harbor.corp:5000|https://harbor.corp:5000|401|0|401|yes|yes|false
 registry-1.docker.io|https://registry-1.docker.io|401|0|200|||false
 mirror.corp|https://mirror.corp|000|60||||false
+===REGPULL
+quay.io|||skip|airgap
+docker.io|docker.io/rancher/mirrored-pause@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|harbor.corp:5000|ok|
+ghcr.io|ghcr.io/org/app@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc|ghcr-mirror.corp,ghcr-mirror2.corp|fail|pulling from host ghcr-mirror.corp failed with status code https://ghcr-mirror.corp/v2/org/app/manifests/sha256:cccc: 401 Unauthorized
 ===FAPDENY
 7|1700003600|/var/lib/rancher/rke2/data/v1.30/bin/containerd-shim-runc-v2|/var/lib/rancher/rke2/data/v1.30/bin/runc
 2|1700003000|/usr/bin/bash|/home/ops/tool.sh
@@ -240,6 +244,41 @@ func TestParsePreflight(t *testing.T) {
 	}
 	if len(p.Denies) != 2 || p.Denies[0].Count != 7 || !strings.HasSuffix(p.Denies[0].Path, "/runc") || p.Denies[0].Last.Unix() != 1700003600 {
 		t.Errorf("denies: %+v", p.Denies)
+	}
+	if !p.PullsProbed || p.CrictlMissing || len(p.Pulls) != 3 {
+		t.Fatalf("pulls: probed=%v missing=%v %+v", p.PullsProbed, p.CrictlMissing, p.Pulls)
+	}
+	// sorted by registry: docker.io, ghcr.io, quay.io
+	hubPull, gh, quay := p.Pulls[0], p.Pulls[1], p.Pulls[2]
+	if !hubPull.OK || hubPull.Registry != "docker.io" || !strings.HasPrefix(hubPull.Image, "docker.io/rancher/mirrored-pause@sha256:") || len(hubPull.Endpoints) != 1 || hubPull.Endpoints[0] != "harbor.corp:5000" || hubPull.Detail != "" {
+		t.Errorf("docker.io pull: %+v", hubPull)
+	}
+	if gh.OK || len(gh.Endpoints) != 2 || gh.Endpoints[1] != "ghcr-mirror2.corp" || !strings.Contains(gh.Detail, "401 Unauthorized") || gh.Skipped != "" {
+		t.Errorf("ghcr.io pull: %+v", gh)
+	}
+	if quay.OK || quay.Skipped != "airgap" || quay.Image != "" || len(quay.Endpoints) != 0 {
+		t.Errorf("quay.io pull: %+v", quay)
+	}
+}
+
+func TestRegPullHeavyTierMerge(t *testing.T) {
+	heavy := Parse("n1", "h", "===MOUNTOPTS\n/|xfs|rw\n===REGPULL\ncrictl=missing\n===FAPDENY\n===END\n", time.Now())
+	if !heavy.Preflight.PullsProbed || !heavy.Preflight.CrictlMissing {
+		t.Fatalf("heavy parse: %+v", heavy.Preflight)
+	}
+	// a light cycle carries the heavy-tier pulls forward with the denials
+	light := Parse("n1", "h", "===SWAPS\n===END\n", time.Now())
+	light.MergeConfig(heavy)
+	light.MergeHeavy(heavy)
+	if !light.Preflight.PullsProbed || !light.Preflight.CrictlMissing || !light.Preflight.DeniesProbed {
+		t.Errorf("merge: %+v", light.Preflight)
+	}
+	// a heavy cycle whose output lacks the section (older node output)
+	// keeps the previous pulls rather than dropping them
+	next := Parse("n1", "h", "===MOUNTOPTS\n/|xfs|rw\n===FAPDENY\n===END\n", time.Now())
+	next.MergeHeavy(heavy)
+	if !next.Preflight.PullsProbed || !next.Preflight.CrictlMissing {
+		t.Errorf("heavy without REGPULL should carry the previous pulls: %+v", next.Preflight)
 	}
 }
 

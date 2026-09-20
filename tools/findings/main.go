@@ -1,12 +1,13 @@
 // Command findings runs one khealth collection cycle headlessly (API snapshot,
-// node probe with the config tier, full etcd probe on etcd nodes) and prints
+// node probe with the config tier - the heavy tier too with -heavy: journal,
+// images, the registry pull dry run - full etcd probe on etcd nodes) and prints
 // the findings the TUI would show, plus each etcd node's newest snapshot and
 // backup hints. Meant for scripted verification, e.g. after configuring etcd
 // backups.
 //
 // Usage:
 //
-//	findings [-area etcd] -- [khealth flags]
+//	findings [-area etcd] [-heavy] -- [khealth flags]
 //	findings -- --kubeconfig ~/.kube/x.yaml --ssh-user root --ssh-key ~/.ssh/id_rsa
 package main
 
@@ -33,8 +34,9 @@ import (
 func main() {
 	bf := flag.NewFlagSet("findings", flag.ExitOnError)
 	area := bf.String("area", "", "only print findings of this area (etcd, node, ...)")
+	heavy := bf.Bool("heavy", false, "run the heavy node tier too (journal, images, registry pull dry run)")
 	bf.Usage = func() {
-		fmt.Fprintf(bf.Output(), "Usage: findings [-area X] -- [khealth flags]\n\n")
+		fmt.Fprintf(bf.Output(), "Usage: findings [-area X] [-heavy] -- [khealth flags]\n\n")
 		bf.PrintDefaults()
 	}
 	args := os.Args[1:]
@@ -76,7 +78,7 @@ func main() {
 		defer runner.Close()
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, Config: true, CPUSample: true}
+		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, Config: true, Heavy: *heavy, CPUSample: true}
 		for i := range snap.Nodes {
 			n := &snap.Nodes[i]
 			host := cfg.SSH.Hosts[n.Name]

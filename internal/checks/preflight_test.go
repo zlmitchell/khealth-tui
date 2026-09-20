@@ -3,6 +3,7 @@ package checks
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/nodeinfo"
@@ -217,5 +218,117 @@ func TestRegistryProbeOffline(t *testing.T) {
 	msg, _, _, _ = regVerdict(nodeinfo.RegProbe{Host: "harbor.local", URL: "https://harbor.local", Exit: 7}, distro.For("rke2"))
 	if strings.Contains(msg, "no mirror endpoint") {
 		t.Fatalf("explicit endpoint tagged implicit: %q", msg)
+	}
+}
+
+// The crictl pull dry run goes through the hosts.toml containerd renders
+// from registries.yaml; its verdicts name the host containerd's error
+// names and tell a mirror that failed from a mirror that fell through to
+// the upstream registry.
+func TestRegistryPullVerdicts(t *testing.T) {
+	v := distro.For("rke2")
+	dd := "/var/lib/rancher/rke2"
+	img := "docker.io/rancher/mirrored-pause@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	pf := &nodeinfo.Preflight{RegProbes: []nodeinfo.RegProbe{{Host: "harbor.corp:5000", URL: "https://harbor.corp:5000", Code: 200, Auth: true}}}
+	for _, r := range []nodeinfo.RegPull{
+		{Registry: "docker.io", Image: img, Endpoints: []string{"harbor.corp:5000"}, OK: true},
+		{Registry: "quay.io", Skipped: "airgap"},
+		{Registry: "quay.io", Skipped: "no image from this registry on the node"},
+	} {
+		if _, _, _, bad := pullVerdict(r, pf, false, dd, v); bad {
+			t.Errorf("finding for %+v", r)
+		}
+	}
+	// 401 from the mirror while curl with the same credentials succeeds: the rendered hosts.toml is at fault
+	msg, hint, sev, bad := pullVerdict(nodeinfo.RegPull{Registry: "docker.io", Image: img, Endpoints: []string{"harbor.corp:5000"},
+		Detail: "pulling from host harbor.corp:5000 failed with status code https://harbor.corp:5000/v2/rancher/mirrored-pause/manifests/sha256:aaaa: 401 Unauthorized"}, pf, false, dd, v)
+	if !bad || sev != SevCrit || !strings.Contains(msg, "authentication rejected") || !strings.Contains(msg, "curl from the node") || !strings.Contains(hint, dd+"/agent/etc/containerd/certs.d/docker.io/hosts.toml") {
+		t.Errorf("401: %v %s %q %q", bad, sev, msg, hint)
+	}
+	// the mirror answered 404 and containerd fell through to the registry itself, which has no DNS
+	fell := nodeinfo.RegPull{Registry: "gone.example", Image: "gone.example/x/y@sha256:dddd", Endpoints: []string{"gone-mirror.corp"},
+		Detail: `failed to do request: Head "https://gone.example/v2/x/y/manifests/sha256:dddd": dial tcp: lookup gone.example on 10.0.0.2:53: no such host`}
+	msg, _, sev, bad = pullVerdict(fell, pf, false, dd, v)
+	if !bad || sev != SevWarn || !strings.Contains(msg, "does not hold") || !strings.Contains(msg, "fell through to gone.example") {
+		t.Errorf("fell through: %v %s %q", bad, sev, msg)
+	}
+	// ... which on an airgapped node is expected: INFO, no egress complaint
+	msg, _, sev, bad = pullVerdict(fell, pf, true, dd, v)
+	if !bad || sev != SevInfo || !strings.Contains(msg, "airgapped") {
+		t.Errorf("fell through on airgap: %v %s %q", bad, sev, msg)
+	}
+	// the mirror endpoint itself is unreachable
+	msg, hint, sev, bad = pullVerdict(nodeinfo.RegPull{Registry: "ghcr.io", Image: "ghcr.io/org/app@sha256:cccc", Endpoints: []string{"ghcr-mirror.corp"},
+		Detail: `failed to do request: Head "https://ghcr-mirror.corp/v2/org/app/manifests/sha256:cccc": dial tcp 10.0.0.9:443: connect: connection refused`}, pf, false, dd, v)
+	if !bad || sev != SevWarn || !strings.Contains(msg, "cannot pull from registry ghcr.io through its mirror ghcr-mirror.corp") || strings.Contains(msg, "curl from the node") || !strings.Contains(hint, "certs.d/ghcr.io/hosts.toml") {
+		t.Errorf("unreachable mirror: %v %s %q %q", bad, sev, msg, hint)
+	}
+	// three digits of a digest are not a status code
+	msg, _, sev, _ = pullVerdict(nodeinfo.RegPull{Registry: "ghcr.io", Image: "ghcr.io/org/app@sha256:4013cccc", Endpoints: []string{"ghcr-mirror.corp"},
+		Detail: `failed to do request: Head "https://ghcr-mirror.corp/v2/org/app/manifests/sha256:4013cccc": dial tcp 10.0.0.9:443: connect: connection refused`}, pf, false, dd, v)
+	if sev != SevWarn || strings.Contains(msg, "authentication") {
+		t.Errorf("digest digits read as a status: %s %q", sev, msg)
+	}
+	// no mirror endpoint, the registry itself no longer has the image: informational
+	msg, _, sev, bad = pullVerdict(nodeinfo.RegPull{Registry: "quay.io", Image: "quay.io/a/b@sha256:eeee", Detail: "quay.io/a/b@sha256:eeee: not found"}, pf, false, dd, v)
+	if !bad || sev != SevInfo || !strings.Contains(msg, "no longer serves") {
+		t.Errorf("not found: %v %s %q", bad, sev, msg)
+	}
+	msg, _, sev, bad = pullVerdict(nodeinfo.RegPull{Registry: "slow.example", Image: "slow.example/x/y@sha256:ffff", Endpoints: []string{"slow-mirror.corp"}, Detail: "timed out after 20 s"}, pf, false, dd, v)
+	if !bad || sev != SevWarn || !strings.Contains(msg, "timed out") {
+		t.Errorf("timeout: %v %s %q", bad, sev, msg)
+	}
+	// kubeadm nodes: containerd's own certs.d
+	_, hint, _, _ = pullVerdict(nodeinfo.RegPull{Registry: "docker.io", Image: img, Endpoints: []string{"harbor.corp:5000"}, Detail: "x: 403 Forbidden"}, pf, false, "/var/lib/kubelet", distro.For("kubeadm"))
+	if strings.Contains(hint, "/etc/containerd/certs.d/") {
+		t.Errorf("403 hint should point at the registry ACLs, got %q", hint)
+	}
+	_, hint, _, _ = pullVerdict(nodeinfo.RegPull{Registry: "docker.io", Image: img, Endpoints: []string{"harbor.corp:5000"}, Detail: "timed out after 20 s"}, pf, false, "/var/lib/kubelet", distro.For("kubeadm"))
+	if !strings.Contains(hint, "/etc/containerd/certs.d/docker.io/hosts.toml") {
+		t.Errorf("kubeadm hosts.toml path: %q", hint)
+	}
+}
+
+// Pull results flow into Evaluate (heavy tier) and the preflight detail rows.
+func TestRegistryPullFindingsAndRows(t *testing.T) {
+	in := baseInput()
+	ni := &nodeinfo.Info{Node: "cp-1", Dist: "rke2", DataDir: "/var/lib/rancher/rke2", RegistryMirrors: []string{"docker.io"}, KubeletFlags: map[string]string{}, Sysctl: map[string]string{}, Settings: map[string]string{}, Hardening: map[string]string{}}
+	ni.Preflight = nodeinfo.Preflight{Probed: true, PullsProbed: true, Pulls: []nodeinfo.RegPull{
+		{Registry: "docker.io", Image: "docker.io/rancher/mirrored-pause@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Endpoints: []string{"harbor.corp:5000"}, Detail: "pulling from host harbor.corp:5000 failed with status code https://harbor.corp:5000/v2/x: 401 Unauthorized"},
+		{Registry: "quay.io", Skipped: "airgap"},
+	}}
+	in.Nodes["cp-1"] = ni
+	var got bool
+	for _, f := range findingsFor(Evaluate(in), "cp-1") {
+		if strings.Contains(f.Message, "authentication rejected") {
+			got = true
+			if f.Area != "images" || f.Severity != SevCrit {
+				t.Errorf("finding: %+v", f)
+			}
+		}
+	}
+	if !got {
+		t.Error("no pull finding")
+	}
+	rows := PreflightRows(ni, in.Cfg, time.Now())
+	var pullRows []string
+	for _, r := range rows {
+		if strings.HasPrefix(r[0], "pull ") {
+			pullRows = append(pullRows, r[0]+"="+r[2]+":"+r[1])
+		}
+	}
+	if len(pullRows) != 2 || !strings.HasPrefix(pullRows[0], "pull docker.io=crit:FAILED via mirror harbor.corp:5000") || !strings.HasPrefix(pullRows[1], "pull quay.io=dim:not tested: node has airgap") {
+		t.Errorf("rows: %q", pullRows)
+	}
+	// crictl missing on a node with mirrors: one INFO, one dim row
+	ni.Preflight = nodeinfo.Preflight{Probed: true, PullsProbed: true, CrictlMissing: true}
+	got = false
+	for _, f := range findingsFor(Evaluate(in), "cp-1") {
+		if strings.Contains(f.Message, "crictl is not on the node") {
+			got = f.Severity == SevInfo
+		}
+	}
+	if !got {
+		t.Error("no crictl-missing finding")
 	}
 }

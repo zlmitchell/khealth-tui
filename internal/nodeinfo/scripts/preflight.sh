@@ -10,8 +10,9 @@
 # The SWAPS and PFUNITS sections run every refresh (reads of /proc and /run);
 # everything inside __CONFIG__ runs with the config tier (heavy cycles, first
 # contact, R) and is carried forward by Info.MergeConfig; FAPDENY (ausearch)
-# runs with the heavy tier. The registry probe is the only network activity:
-# parallel curls capped at 6 s each.
+# and REGPULL (crictl pull dry run) run with the heavy tier. The registry
+# probe and the pull dry run are the only network activity: parallel curls
+# capped at 6 s each, parallel pulls capped at 20 s each.
 #
 # Runs after base.sh in the same shell: sec, mask, RKE2_DD and K3S_DD are
 # defined there. Sent to nodes over SSH by khealth as `sudo sh -s`; POSIX sh
@@ -31,6 +32,25 @@ for u in NetworkManager.service nm-cloud-setup.service nm-cloud-setup.timer vmto
   e=disabled; case "$WANTS" in *" $u "*) e=enabled;; esac
   echo "$u|$a|$e"
 done
+# registries.yaml parser, field separator and the airgap marker are shared
+# by the curl probe (config tier) and the crictl pull dry run (heavy tier)
+T=$(printf '\037')
+regyaml() {
+  awk '
+    function cflush() { if (top=="configs" && reg!="") printf "C\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", reg, u, p, ca, ce, ke, ins; u=p=ca=ce=ke=ins="" }
+    function mflush() { if (top=="mirrors" && reg!="" && reg!="*" && neps==0) print "M\037" reg "\037" }
+    function val(s,  i) { i=index(s,":"); s=substr(s,i+1); sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+#.*$/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^["'\'']|["'\'']$/,"",s); return s }
+    /^[[:space:]]*(#|$)/ {next}
+    /^[^[:space:]]/ { cflush(); mflush(); top=$1; sub(/:.*/,"",top); reg=""; neps=0; next }
+    top=="mirrors" && /^  [^[:space:]]/ { mflush(); reg=$0; sub(/^  /,"",reg); sub(/:[[:space:]]*(\{\})?[[:space:]]*$/,"",reg); gsub(/["'\'']/,"",reg); neps=0; next }
+    top=="mirrors" && /^[[:space:]]+endpoint:[[:space:]]*\[/ { s=$0; sub(/^[^[]*\[/,"",s); sub(/\].*$/,"",s); n=split(s,a,","); for(i=1;i<=n;i++){e=a[i]; gsub(/["'\'' ]/,"",e); if(e!=""){print "M\037" reg "\037" e; neps++}} next }
+    top=="mirrors" && reg!="" && /^[[:space:]]*-[[:space:]]*/ { e=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",e); gsub(/["'\'' ]/,"",e); if (e!="") {print "M\037" reg "\037" e; neps++} next }
+    top=="configs" && /^  [^[:space:]]/ { cflush(); reg=$0; sub(/^  /,"",reg); sub(/:[[:space:]]*$/,"",reg); gsub(/["'\'']/,"",reg); next }
+    top=="configs" && reg!="" { l=$0; sub(/^[[:space:]]+/,"",l); k=l; sub(/:.*/,"",k)
+      if (k=="username") u=val(l); else if (k=="password") p=val(l); else if (k=="ca_file") ca=val(l); else if (k=="cert_file") ce=val(l); else if (k=="key_file") ke=val(l); else if (k=="insecure_skip_verify") ins=val(l); next }
+    END { cflush(); mflush() }' "$1"
+}
+AIRGAP=; for d in "$RKE2_DD"/agent/images "$K3S_DD"/agent/images; do ls "$d"/*.tar* >/dev/null 2>&1 && AIRGAP=yes; done
 if [ "__CONFIG__" = 1 ]; then
 sec FSTABSWAP
 grep -E '^[^#]*[[:space:]]swap[[:space:]]' /etc/fstab 2>/dev/null
@@ -156,22 +176,6 @@ sec REGPROBE
 # listed as skipped|host|url|airgap. configs-only keys are still probed.
 # fields are separated by the unit separator (0x1f): `read` collapses runs
 # of tab/space so empty fields would shift, and passwords may contain '|'
-T=$(printf '\037')
-regyaml() {
-  awk '
-    function cflush() { if (top=="configs" && reg!="") printf "C\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", reg, u, p, ca, ce, ke, ins; u=p=ca=ce=ke=ins="" }
-    function mflush() { if (top=="mirrors" && reg!="" && reg!="*" && neps==0) print "M\037" reg "\037" }
-    function val(s,  i) { i=index(s,":"); s=substr(s,i+1); sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+#.*$/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^["'\'']|["'\'']$/,"",s); return s }
-    /^[[:space:]]*(#|$)/ {next}
-    /^[^[:space:]]/ { cflush(); mflush(); top=$1; sub(/:.*/,"",top); reg=""; neps=0; next }
-    top=="mirrors" && /^  [^[:space:]]/ { mflush(); reg=$0; sub(/^  /,"",reg); sub(/:[[:space:]]*({})?[[:space:]]*$/,"",reg); gsub(/["'\'']/,"",reg); neps=0; next }
-    top=="mirrors" && /^[[:space:]]+endpoint:[[:space:]]*\[/ { s=$0; sub(/^[^[]*\[/,"",s); sub(/\].*$/,"",s); n=split(s,a,","); for(i=1;i<=n;i++){e=a[i]; gsub(/["'\'' ]/,"",e); if(e!=""){print "M\037" reg "\037" e; neps++}} next }
-    top=="mirrors" && reg!="" && /^[[:space:]]*-[[:space:]]*/ { e=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",e); gsub(/["'\'' ]/,"",e); if (e!="") {print "M\037" reg "\037" e; neps++} next }
-    top=="configs" && /^  [^[:space:]]/ { cflush(); reg=$0; sub(/^  /,"",reg); sub(/:[[:space:]]*$/,"",reg); gsub(/["'\'']/,"",reg); next }
-    top=="configs" && reg!="" { l=$0; sub(/^[[:space:]]+/,"",l); k=l; sub(/:.*/,"",k)
-      if (k=="username") u=val(l); else if (k=="password") p=val(l); else if (k=="ca_file") ca=val(l); else if (k=="cert_file") ce=val(l); else if (k=="key_file") ke=val(l); else if (k=="insecure_skip_verify") ins=val(l); next }
-    END { cflush(); mflush() }' "$1"
-}
 probe() { # url host user pass ca cert key insecure implicit
   url=$1; host=$2; user=$3; pass=$4; ca=$5; cert=$6; key=$7; ins=$8; impl=$9
   opts() {
@@ -195,7 +199,6 @@ probe() { # url host user pass ca cert key insecure implicit
   fi
   echo "$host|$url|${code:-000}|$rc|$code2|${user:+yes}|${ca:+yes}|$ins|$impl"
 }
-AIRGAP=; for d in "$RKE2_DD"/agent/images "$K3S_DD"/agent/images; do ls "$d"/*.tar* >/dev/null 2>&1 && AIRGAP=yes; done
 if ! command -v curl >/dev/null 2>&1; then echo "curl=missing"; else
 for f in /etc/rancher/rke2/registries.yaml /etc/rancher/k3s/registries.yaml; do
   [ -f "$f" ] || continue
@@ -243,6 +246,61 @@ done
 fi
 fi
 if [ "__HEAVY__" = 1 ]; then
+sec REGPULL
+# crictl pull dry run: for every registry registries.yaml names (a mirrors:
+# key, or a configs: key images reference directly), one image the node
+# already holds from that registry (the pause image when there is one) is
+# pulled again by digest through containerd. All of its content is
+# local, so containerd only resolves the manifest - one HEAD per endpoint
+# until one answers - nothing is downloaded and `crictl images` does not
+# change. The curl probe above reads registries.yaml itself; this exercises
+# what containerd actually runs, the hosts.toml rke2/k3s rendered from it
+# (endpoint rewrite, auth header, CA bundle), so a registries.yaml the
+# supervisor refused to render, a mirror that answers /v2/ but not the
+# repository path, or a rewrite rule that misfires surface here. Pulls run
+# in parallel, 20 s cap each. One line per registry:
+# registry|image|endpoint hosts|ok/fail/skip|detail
+# detail is containerd's error; the host it names is the one that failed:
+# a mirror endpoint, or the upstream registry after every mirror answered
+# 404 (containerd falls through to the registry itself). Same airgap rule
+# as the curl probe: an endpoint-less mirror is not pulled when the node
+# has image tarballs; a configs: key is (the credential/TLS check is the
+# point).
+CRIIMG=; R=
+for f in /etc/rancher/rke2/registries.yaml /etc/rancher/k3s/registries.yaml; do [ -f "$f" ] && R=$(regyaml "$f"); done
+if [ -z "$CRICTL" ]; then echo "crictl=missing"; elif [ -n "$R" ]; then
+  CRIIMG=$(runcri images -o json 2>/dev/null)
+  IMGS=$(printf '%s\n' "$CRIIMG" | grep -oE '"[^"@]+@sha256:[0-9a-f]{64}"' | tr -d '"')
+  cripull() { if [ -n "$CRI" ]; then timeout 20 $CRICTL -r "$CRI" pull "$1"; else timeout 20 $CRICTL pull "$1"; fi; }
+  # mirrors: keys, plus configs: keys that are neither a mirror nor one of
+  # its endpoint hosts (those are exercised by the mirror's pull)
+  printf '%s\n' "$R" | awk -F"$T" '
+    $1=="M" && $3!="" { h=$3; sub(/^[a-z]+:\/\//,"",h); sub(/\/.*/,"",h); ep[h]=1 }
+    $1=="M" { m[$2]=1 } $1=="C" { c[$2]=1 }
+    END { for (r in m) if (r !~ /^\*/) print r; for (r in c) if (r !~ /^\*/ && !(r in m) && !(r in ep)) print r }' | sort -u | head -8 | {
+    while read -r reg; do
+      eps=$(printf '%s\n' "$R" | awk -F"$T" -v r="$reg" '$1=="M" && $2==r && $3!="" {print $3}' | sed -E 's#^[a-z]+://##; s#/.*##' | tr '\n' ',' | sed 's/,$//')
+      # a mirror without endpoints sends containerd to the upstream registry
+      upstream=$(printf '%s\n' "$R" | awk -F"$T" -v r="$reg" '$1=="M" && $2==r && $3=="" {print "yes"; exit}')
+      if [ -n "$upstream" ] && [ -n "$AIRGAP" ]; then echo "$reg||$eps|skip|airgap"; continue; fi
+      # images are stored under their registry host (docker.io/rancher/...)
+      list=$(printf '%s\n' "$IMGS" | awk -v r="$reg/" 'index($0,r)==1')
+      img=$(printf '%s\n' "$list" | grep pause | head -1); [ -z "$img" ] && img=$(printf '%s\n' "$list" | head -1)
+      if [ -z "$img" ]; then echo "$reg||$eps|skip|no image from this registry on the node"; continue; fi
+      { out=$(cripull "$img" 2>&1); rc=$?
+        if [ $rc -eq 0 ]; then echo "$reg|$img|$eps|ok|"
+        elif [ $rc -eq 124 ]; then echo "$reg|$img|$eps|fail|timed out after 20 s"
+        else
+          # crictl logs through logrus: FATA[0001] msg on a tty, time="..."
+          # level=fatal msg="..." (inner quotes escaped) when piped, as here
+          l=$(printf '%s\n' "$out" | grep -E '^FATA|level=fatal' | tail -1); [ -z "$l" ] && l=$(printf '%s\n' "$out" | grep . | tail -1)
+          echo "$reg|$img|$eps|fail|$(printf '%s' "$l" | sed -E 's/^time="[^"]*" level=fatal msg="//; s/"$//; s/\\"/"/g; s/^FATA\[[^]]*\] //; s/^pulling image: //; s/.*rpc error: code = [A-Za-z]+ desc = //; s/failed to pull and unpack image "[^"]*": //; s/failed to resolve reference "[^"]*": //; s/\?ns=[^":[:space:]]*//' | cut -c1-240)"
+        fi
+      } &
+    done
+    wait
+  }
+fi
 sec FAPDENY
 # fapolicyd denials land in the audit log as FANOTIFY records (resp=2); the
 # SYSCALL/PATH records of the same event name the program and the file.
