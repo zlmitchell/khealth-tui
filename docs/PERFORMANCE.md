@@ -40,6 +40,15 @@ go build -o perfbench ./tools/perfbench       # or ./build.sh with the tools pat
 ./perfbench -cycles 3 -no-ssh                 # API only
 ```
 
+- **`tools/scandrive`**: headless too, but it drives the real TUI model:
+  every command the update loop returns is executed and fed back, so the
+  refresh cycle, probes and the Security scan behave exactly as in the
+  terminal. `-press 23s` presses `0` + `Shift+S` that long after the first
+  snapshot; each message is logged with the header line, and the OS STIG
+  sub-tab is printed when the scan finishes. Use it to reproduce
+  timing-dependent behaviour (a scan pressed just before a refresh tick):
+  `scandrive -press 23s -- --kubeconfig ~/.kube/x.yaml --ssh-user root --ssh-key ~/.ssh/id_rsa`.
+
 Per-section CPU of a probe script (to find what to move out of the light
 tier): run it with `times` at each section boundary, e.g.
 `go run ./tools/scriptdump -config=false | ssh root@node sh -s` with `sec()`
@@ -66,7 +75,7 @@ One-off cycles:
 | | before | after |
 |---|---|---|
 | first contact (light + config + heavy) | 4.99 s CPU, 7.3 s wall, 1.3 MB | **~1.6 s CPU**, ~2.5 s wall (1 s of it the one-time CPU sample) |
-| OS STIG facts (`S` on the Security tab) | 7.2 s CPU, 7.4 s wall - and the filesystem sweep stopped at 200 container-rootfs hits before reaching the host | **~3.5 s CPU / ~3.5 s wall**, of which the full host sweep (175 K entries) is 2.0 s / 1.4 s |
+| OS STIG facts (`Shift+S` on the Security tab) | 7.2 s CPU, 7.4 s wall - and the filesystem sweep stopped at 200 container-rootfs hits before reaching the host | **~3.5 s CPU / ~3.5 s wall**, of which the full host sweep (175 K entries) is 2.0 s / 1.4 s |
 | first API snapshot (discovery + every CRD schema + helm payloads) | 18.7 MB | 18.7 MB, then cached (5 min / until a release changes) |
 | `find` scans in the OS STIG probe | 174 | **39** (same output) |
 | local `stig.Evaluate` per node per recompute | 3.5 ms, 1.2 MB allocated | **2.7 ms, 0.7 MB** (compiled patterns cached) |
@@ -84,7 +93,7 @@ is spread over 2.5 minutes.
   default on). It yields to kubelet, etcd and the workloads; on an idle node
   nothing changes. The idle I/O class is not used because on a saturated disk
   it can starve the probe past its timeout and lose the data that matters.
-- Nothing in the live tier waits. CPU utilisation is the delta between this
+- Nothing in the live tier waits. CPU utilization is the delta between this
   probe's `/proc/stat` counters and the previous probe's (`Info.CPUFromPrev`,
   a 30 s window) instead of a `sleep 1` on the node; only first contact
   samples twice. NTP state comes from `chronyc tracking` (6 ms) or
@@ -102,9 +111,10 @@ is spread over 2.5 minutes.
     (`needs-restarting` alone is 0.3 s of python);
   - **heavy** (same cadence): journal, `crictl images/ps`, tarball manifests
     (cached by path/size/mtime), `du` of hostPath PVs;
-  - **OS STIG** (`S` on the Security tab only): `sysctl -a`, package list,
-    unit files, `find` scans (de-duplicated across the RHEL 8/9/10 and
-    Ubuntu rule sets), config dumps, and one filesystem sweep. The sweep
+  - **OS STIG** (`Shift+S` on the Security tab only, four stages per node,
+    each its own SSH run): `sysctl -a`, package list, unit files, `find`
+    scans (de-duplicated across the RHEL 8/9/10 and Ubuntu rule sets),
+    config dumps, and one filesystem sweep. The sweep
     walks host filesystems only - overlay/nsfs mounts are running
     containers' root filesystems (150+ on a busy node) and containerd /
     docker image layer stores and kubelet pod volumes are pruned - in a
@@ -219,7 +229,7 @@ directories, awk instead of `stat` per file).
 
 - `remote CPU / refresh` is the steady-state share of one core the tool takes
   on a node. 0.5 s per 30 s is 1.7 %. If a node shows several seconds per
-  cycle, look at which probe: `node+heavy` / `node+stig` are expected to be
+  cycle, look at which probe: `node+heavy` and the `stig:*` scan stages are expected to be
   large but rare; `node` should be well under a second.
 - `wall` much larger than `remote CPU` means the node is waiting, not
   computing: D-Bus (`systemctl`/`timedatectl`), a slow disk under `du`, or the

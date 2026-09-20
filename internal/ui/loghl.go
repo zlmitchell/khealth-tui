@@ -9,9 +9,9 @@ import (
 )
 
 // Log line highlighting: JSON, logfmt (key=value), klog and plain lines get
-// keys dimmed, level tokens coloured by severity and messages emphasised.
+// keys dimmed, level tokens colored by severity and messages emphasized.
 
-// keyPalette gives every key a stable, distinct colour (hashed by name) so
+// keyPalette gives every key a stable, distinct color (hashed by name) so
 // the same field is easy to pick out across lines.
 var keyPalette = []lipgloss.AdaptiveColor{
 	{Light: "#0969da", Dark: "#79c0ff"}, // blue
@@ -32,7 +32,7 @@ func keyStyle(key string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(keyPalette[h%uint32(len(keyPalette))]).Bold(true)
 }
 
-// renderKey colours a key and dims its separator (":" or "=").
+// renderKey colors a key and dims its separator (":" or "=").
 func renderKey(key, sep string) string {
 	return keyStyle(key).Render(key) + styleLogSep.Render(sep)
 }
@@ -50,6 +50,8 @@ var (
 	reJSONKey   = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"\s*:\s*`)
 	reJSONVal   = regexp.MustCompile(`^("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|true|false|null)`)
 	reKlog      = regexp.MustCompile(`^([IWEF])(\d{4} \d\d:\d\d:\d\d\.\d+)\s+(\d+)\s+([A-Za-z0-9_./\-]+:\d+)\]\s?`)
+	reKlogLoc   = regexp.MustCompile(`^[A-Za-z0-9_./\-]+\.go:\d+\]\s?`) // klog line after logMessage stripped its header
+	reQuoted    = regexp.MustCompile(`^"(?:[^"\\]|\\.)*"`)
 	reLevelWord = regexp.MustCompile(`(?i)\b(FATAL|PANIC|ERROR|ERR|WARNING|WARN|INFO|DEBUG|TRACE)\b`)
 )
 
@@ -83,7 +85,7 @@ func isMsgKey(k string) bool {
 	return false
 }
 
-// highlightLog colours one (unwrapped, timestamp-stripped) log line.
+// highlightLog colors one (unwrapped, timestamp-stripped) log line.
 func highlightLog(l string) string {
 	t := strings.TrimLeft(l, " ")
 	pad := l[:len(l)-len(t)]
@@ -92,6 +94,8 @@ func highlightLog(l string) string {
 		return pad + highlightJSON(t)
 	case reKlog.MatchString(t):
 		return pad + highlightKlog(t)
+	case reKlogLoc.MatchString(t):
+		return pad + highlightKlogLoc(t)
 	case strings.Count(t, "=") >= 2 && reLogfmtTok.MatchString(t):
 		return pad + highlightLogfmt(t)
 	}
@@ -176,15 +180,38 @@ func highlightLogfmt(s string) string {
 func highlightKlog(s string) string {
 	m := reKlog.FindStringSubmatch(s)
 	st, _ := levelStyle(m[1])
-	// keep the original spacing: colour the severity letter, dim the rest of the header
+	// keep the original spacing: color the severity letter, dim the rest of the header
 	head := st.Bold(true).Render(m[1]) + styleLogKey.Render(m[0][1:])
-	rest := s[len(m[0]):]
-	if strings.Contains(rest, "=") {
-		rest = highlightLogfmt(rest)
-	} else if m[1] == "E" || m[1] == "F" {
-		rest = styleCrit.Render(rest)
+	return head + highlightKlogBody(s[len(m[0]):], m[1])
+}
+
+// highlightKlogLoc colors a klog line whose header (severity, time, pid)
+// was stripped by logMessage for a table's TIME column: `file.go:123] ...`.
+func highlightKlogLoc(s string) string {
+	m := reKlogLoc.FindString(s)
+	return styleLogKey.Render(m) + highlightKlogBody(s[len(m):], "")
+}
+
+// highlightKlogBody colors what follows a klog header: structured logging
+// puts a quoted message first (bold) and key=value pairs after it; the
+// older free-text form is red for E/F lines and plain otherwise.
+func highlightKlogBody(rest, level string) string {
+	if strings.HasPrefix(rest, `"`) {
+		if m := reQuoted.FindString(rest); m != "" {
+			msg := styleLogMsg.Render(m)
+			if level == "E" || level == "F" {
+				msg = styleCrit.Bold(true).Render(m)
+			}
+			return msg + highlightLogfmt(rest[len(m):])
+		}
 	}
-	return head + rest
+	if strings.Contains(rest, "=") {
+		return highlightLogfmt(rest)
+	}
+	if level == "E" || level == "F" {
+		return styleCrit.Render(rest)
+	}
+	return rest
 }
 
 func highlightPlain(s string) string {

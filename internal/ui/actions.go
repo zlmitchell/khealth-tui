@@ -194,10 +194,7 @@ func (a *App) handleActionDone(m actionDoneMsg) tea.Cmd {
 	} else {
 		lines = append(lines, styleOK.Render("succeeded")+styleDim.Render(fmt.Sprintf(" in %s; refreshing", humanDur(m.dur))))
 	}
-	a.detailTitle = m.act.title
-	a.detailLines = lines
-	a.detailScroll = 0
-	a.overlay = ovDetail
+	a.setDetail(m.act.title, lines)
 	if m.err == nil && !a.refreshing {
 		return a.refreshCmd()
 	}
@@ -217,7 +214,7 @@ func (a *App) handleActionOverlayKey(key string) (tea.Model, tea.Cmd) {
 		default:
 			a.pendingAct = nil
 			a.overlay = ovNone
-			a.setStatus("cancelled")
+			a.setStatus("canceled")
 		}
 	case ovRevisions:
 		switch key {

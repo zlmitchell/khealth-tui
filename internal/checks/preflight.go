@@ -746,7 +746,7 @@ func registryKeyMismatches(files []nodeinfo.ConfigFile) ([]string, map[string]bo
 	return out, bad
 }
 
-// preflightNodeRows summarises the preflight facts for the node detail view:
+// preflightNodeRows summarizes the preflight facts for the node detail view:
 // FIELD, VALUE, STATE rows.
 func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]string {
 	var rows [][3]string

@@ -87,10 +87,10 @@ func TestSkipProbeStillRunningAndBackoff(t *testing.T) {
 func TestRecomputeIsCoalesced(t *testing.T) {
 	a := testApp()
 	a.fp = newFootprint()
-	a.seq = 1
+	a.gen = 1
 	info := nodeinfo.Parse("cp-1", "10.0.0.1", nodeSample, time.Now())
-	_, c1 := a.Update(nodeMsg{seq: 1, info: info})
-	_, c2 := a.Update(nodeMsg{seq: 1, info: info})
+	_, c1 := a.Update(nodeMsg{gen: 1, info: info})
+	_, c2 := a.Update(nodeMsg{gen: 1, info: info})
 	if c1 == nil || c2 != nil {
 		t.Fatalf("expected one scheduled recompute, got %v %v", c1 != nil, c2 != nil)
 	}
@@ -99,7 +99,7 @@ func TestRecomputeIsCoalesced(t *testing.T) {
 	if c3 != nil || m.(*App).fp.recomputeTimer {
 		t.Fatal("recompute timer not cleared")
 	}
-	if _, c4 := a.Update(nodeMsg{seq: 1, info: info}); c4 == nil {
+	if _, c4 := a.Update(nodeMsg{gen: 1, info: info}); c4 == nil {
 		t.Fatal("recompute not re-armed after it ran")
 	}
 	_ = before

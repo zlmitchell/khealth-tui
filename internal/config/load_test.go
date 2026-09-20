@@ -104,9 +104,9 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.Refresh != 45*time.Second || cfg.SSH.User != "fileuser" || cfg.SSH.Port != 2200 || cfg.Thresholds.DiskWarnPct != 70 || cfg.Thresholds.DiskCritPct != 90 {
 		t.Errorf("file + flag merge: %+v", cfg)
 	}
-	// normalisation of bad values
+	// normalization of bad values
 	if cfg.HeavyEvery != 1 || cfg.SSH.Become != "sudo" || cfg.SSH.Concurrency != 1 || cfg.Logs.Lines != 400 || cfg.Logs.Since != "-24h" || cfg.Helm.Timeout != 15*time.Second || cfg.SSH.KnownHosts != filepath.Join(home, "kh") {
-		t.Errorf("normalised: heavy=%d become=%q conc=%d logs=%+v helm=%s kh=%q", cfg.HeavyEvery, cfg.SSH.Become, cfg.SSH.Concurrency, cfg.Logs, cfg.Helm.Timeout, cfg.SSH.KnownHosts)
+		t.Errorf("normalized: heavy=%d become=%q conc=%d logs=%+v helm=%s kh=%q", cfg.HeavyEvery, cfg.SSH.Become, cfg.SSH.Concurrency, cfg.Logs, cfg.Helm.Timeout, cfg.SSH.KnownHosts)
 	}
 	// flags beat the file even for booleans
 	cfg, _ = Load([]string{"--config", file, "--no-ssh", "--ssh-user", "flaguser"})

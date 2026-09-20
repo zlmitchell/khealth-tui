@@ -130,7 +130,7 @@ type EtcdSnapshotRecord struct {
 	Source   string // crd | configmap
 }
 
-// S3SecretInfo summarises the rke2 etcd-s3-config-secret without exposing keys.
+// S3SecretInfo summarizes the rke2 etcd-s3-config-secret without exposing keys.
 type S3SecretInfo struct {
 	Name           string
 	Found          bool

@@ -228,7 +228,7 @@ func (a *App) logVisibleLines() []string {
 			return highlightLog(frag)
 		}
 		if lv.wrap {
-			// colour the whole line (so JSON/logfmt detection sees it intact),
+			// color the whole line (so JSON/logfmt detection sees it intact),
 			// then wrap with an escape-sequence-aware wrapper
 			indent := strings.Repeat(" ", ansiWidth(prefix))
 			width := w - ansiWidth(prefix)
@@ -250,8 +250,8 @@ func (a *App) logVisibleLines() []string {
 	return out
 }
 
-// wrapStyled wraps a coloured line and carries the open SGR style over the
-// break: ansi.Wrap keeps escape codes in place, but a colour opened on one
+// wrapStyled wraps a colored line and carries the open SGR style over the
+// break: ansi.Wrap keeps escape codes in place, but a color opened on one
 // fragment would otherwise stop at the newline and not resume on the next.
 func wrapStyled(s string, width int) []string {
 	frags := strings.Split(ansi.Wrap(s, width, ""), "\n")

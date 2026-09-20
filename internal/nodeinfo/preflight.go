@@ -136,7 +136,7 @@ type VirtInfo struct {
 	Vendor, Product string
 	VMTools         bool // vmtoolsd binary present
 	SRDevs          []string
-	CIData          string // block device labelled cidata (the NoCloud ISO)
+	CIData          string // block device labeled cidata (the NoCloud ISO)
 	WWNDisks        int    // /dev/disk/by-id/wwn-* entries (vSphere disk.EnableUUID)
 	IMDS            string // AWS: HTTP status of the IMDSv2 token request ("" when not probed)
 }

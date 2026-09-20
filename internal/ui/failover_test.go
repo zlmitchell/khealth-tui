@@ -51,8 +51,8 @@ func TestAPIFailover(t *testing.T) {
 	// the probe that discovered the peers triggers the attempt right away
 	probe := a.etcd["10.0.0.143"]
 	delete(a.etcd, "10.0.0.143")
-	a.seq = 1
-	_, cmd := a.Update(etcdMsg{seq: 1, probe: probe})
+	a.gen = 1
+	_, cmd := a.Update(etcdMsg{gen: 1, probe: probe})
 	if cmd == nil || !a.apiTrying {
 		t.Fatal("an etcd probe with peers should start the failover")
 	}

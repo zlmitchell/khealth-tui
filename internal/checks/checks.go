@@ -270,10 +270,10 @@ func Evaluate(in Input) []Finding {
 			}
 		}
 		if ni.NTPSynced != nil && !*ni.NTPSynced {
-			add(SevWarn, "node", name, "system clock not NTP-synchronised", "enable chrony/systemd-timesyncd")
+			add(SevWarn, "node", name, "system clock not NTP-synchronized", "enable chrony/systemd-timesyncd")
 		}
 		if d := ni.ClockOffset; d > thr.ClockSkewWarn || d < -thr.ClockSkewWarn {
-			add(SevWarn, "node", name, fmt.Sprintf("clock offset %s vs this machine", d), "certificates and etcd need synchronised clocks")
+			add(SevWarn, "node", name, fmt.Sprintf("clock offset %s vs this machine", d), "certificates and etcd need synchronized clocks")
 		}
 		for _, c := range ni.Certs {
 			left := c.NotAfter.Sub(in.Now)

@@ -391,11 +391,11 @@ type etcdSummary struct {
 	source          string // where members/health came from: "ssh" or "exec" (kubectl exec)
 }
 
-// etcdSummarise merges the SSH probes with the kubectl-exec probe: SSH probes
+// etcdSummarize merges the SSH probes with the kubectl-exec probe: SSH probes
 // give per-node /health + /metrics (quota, fsync), the exec probe gives the
 // member list, endpoint health and db sizes for the whole cluster. Either
 // alone is enough to fill the tiles.
-func (a *App) etcdSummarise() etcdSummary {
+func (a *App) etcdSummarize() etcdSummary {
 	sum := etcdSummary{dbPct: nan(), dbSize: nan(), frag: nan(), fsync: nan()}
 	errs := 0
 	for _, n := range sortedKeys(a.etcd) {
@@ -511,7 +511,7 @@ func memberSummary(p *etcdpkg.Probe) (info, leader string) {
 // etcdTiles renders the summary tiles at the top of the etcd tab.
 func (a *App) etcdTiles() []string {
 	thr := a.cfg.Thresholds
-	sum := a.etcdSummarise()
+	sum := a.etcdSummarize()
 	dbPct, dbSize, frag, fsync, dbNode := sum.dbPct, sum.dbSize, sum.frag, sum.fsync, sum.dbNode
 	memberInfo, leaderName, healthy, probed := sum.memberInfo, sum.leader, sum.healthy, sum.probed
 	var latest time.Time
@@ -681,7 +681,7 @@ func (a *App) addonsContent() content {
 	}
 
 	// cloud provider integration and CSI
-	add("", styleTitle.Render("Cloud provider (CPI)")+"  "+styleDim.Render("cloud-controller-manager, node initialisation, CSI drivers and their backends"))
+	add("", styleTitle.Render("Cloud provider (CPI)")+"  "+styleDim.Render("cloud-controller-manager, node initialization, CSI drivers and their backends"))
 	add(a.cloudLines(s)...)
 
 	// system add-ons
@@ -1392,6 +1392,30 @@ func (a *App) imagesDetail(node string) (string, []string) {
 // ---------- Security ----------
 
 func (a *App) securityContent() content {
+	if !a.secScanned {
+		// opt-in: nothing is evaluated or shown until the operator asks
+		c := content{empty: "Security scan not run yet", centered: true, sub: []string{
+			styleKey.Render("Shift+S") + " runs it: STIG/CIS rules from the API data, node hardening and the DISA OS STIG facts over SSH",
+			styleDim.Render("(sysctl -a, packages, audit rules, file sweep, config dumps; a few seconds per node; nothing runs on the nodes until you do)"),
+		}}
+		if l := a.sshOffLine("the node side of the scan"); l != "" {
+			c.sub = append(c.sub, "", l)
+		}
+		return c
+	}
+	if a.scan.running() && !a.scan.peek {
+		return a.scanProgressContent()
+	}
+	c := a.securitySubContent()
+	if a.scan.running() {
+		// peeking: the tables are there, but say what is still missing
+		c.header = append([]string{a.spinner.View() + " " + styleWarn.Render(fmt.Sprintf("security scan still running: %d%%, %d/%d nodes answered - node hardening and OS STIG rows are partial (esc/enter showed them early)", a.scan.percent(), a.scan.done(), len(a.scan.nodes)))}, c.header...)
+	}
+	return c
+}
+
+// securitySubContent is the selected Security sub-tab after a scan.
+func (a *App) securitySubContent() content {
 	switch a.subName() {
 	case "Node hardening":
 		return a.hardeningContent()
@@ -1412,7 +1436,10 @@ func (a *App) securityContent() content {
 	}
 	hdr := []string{
 		styleTitle.Render("STIG / CIS checks") + "  " + stacked(40, ssegs) + "  " + legend(ssegs) + "  " + kv("automated pass rate", gauge(score, 10, 200, 200)),
-		benchmarkLine(),
+		a.benchmarkLine(),
+	}
+	if l := a.sshOffLine("the node-level rules (sysctls, file modes, rke2 profile, etcd user)"); l != "" {
+		hdr = append(hdr, l)
 	}
 	for _, sc := range stig.Scores(clusterRes, false) {
 		hdr = append(hdr, scoreLine(sc, 0))
@@ -1436,11 +1463,81 @@ func (a *App) securityContent() content {
 	return c
 }
 
+// scanProgressContent replaces every Security sub-tab while a scan is in
+// flight: a checklist of what the scan does, with each node's progress
+// through the collection stages. Showing the API-side rules alone would
+// read as a finished scan before the nodes have answered.
+func (a *App) scanProgressContent() content {
+	sc := a.scan
+	c := content{empty: fmt.Sprintf("Security scan running: %d%%  -  %d/%d nodes answered", sc.percent(), sc.done(), len(sc.nodes)), centered: true, spin: true}
+	tick := styleOK.Render("✓")
+	wait := a.spinner.View()
+	c.sub = append(c.sub,
+		styleDim.Render("started "+age(sc.started)+" ago - the tab switches to the results when the last node answers; esc shows them early"),
+		"",
+		tick+" STIG/CIS rules from the API data "+styleDim.Render(fmt.Sprintf("(%d rules: component flags, kubelet config, PSA, RBAC)", len(a.stigRes))),
+	)
+	names := sc.nodes
+	more := 0
+	if len(names) > 10 {
+		more = len(names) - 10
+		names = names[:10]
+	}
+	total := len(sc.stages)
+	for _, n := range names {
+		done := sc.stage[n]
+		pct := 0
+		if total > 0 {
+			pct = 100 * done / total
+		}
+		prog := bar(float64(done)/float64(max(total, 1)), 12, styleInfo) + fmt.Sprintf(" %3d%%  %d/%d stages", pct, done, total)
+		switch {
+		case sc.failed[n] != "":
+			c.sub = append(c.sub, styleCrit.Render("✗")+" "+styleBold.Render(n)+"  "+prog+"  "+styleCrit.Render("failed at "+sc.failed[n]))
+		case sc.want[n]:
+			cur := ""
+			if done < total {
+				st := sc.stages[done]
+				cur = styleDim.Render(st.Name + ": " + st.Label)
+				if t := sc.at[n]; !t.IsZero() {
+					cur += styleDim.Render(fmt.Sprintf(" (%s)", time.Since(t).Round(time.Second)))
+				}
+			}
+			c.sub = append(c.sub, wait+" "+styleBold.Render(n)+"  "+prog+"  "+cur)
+		default:
+			c.sub = append(c.sub, tick+" "+styleBold.Render(n)+"  "+prog+"  "+styleDim.Render("done in "+sc.took[n].Round(100*time.Millisecond).String()))
+		}
+	}
+	if more > 0 {
+		c.sub = append(c.sub, styleDim.Render(fmt.Sprintf("  ... %d more nodes", more)))
+	}
+	var stages []string
+	for _, st := range sc.stages {
+		stages = append(stages, st.Name)
+	}
+	c.sub = append(c.sub,
+		styleDim.Render("stages per node: "+strings.Join(stages, " → ")+" - each its own SSH run, so a slow filesystem sweep does not hold the other facts back"),
+		styleDim.Render("○")+" evaluate the OS STIG rules per node "+styleDim.Render("(after the last node answers)"))
+	return c
+}
+
+// sshOffLine says why the node-side facts are missing and how to get them:
+// SSH never configured (no user / key), failed to set up, or toggled off.
+func (a *App) sshOffLine(what string) string {
+	switch {
+	case a.runner == nil && a.sshErr != "":
+		return styleWarn.Render("SSH disabled: "+a.sshErr) + styleDim.Render("  -  "+what+" needs SSH to the nodes: start khealth as  khealth root@<node>  or with --ssh-user/--ssh-key")
+	case !a.sshEnabled:
+		return styleWarn.Render("SSH collection is off (s toggles it)") + styleDim.Render("  -  "+what+" needs SSH to the nodes")
+	}
+	return ""
+}
+
 // hardeningContent shows per-node OS security facts (runtime vs boot config).
 func (a *App) hardeningContent() content {
 	hdr := []string{styleTitle.Render("Node OS hardening") + styleDim.Render("  each cell = runtime state / boot configuration; ") + styleWarn.Render("≠") + styleDim.Render(" marks a mismatch (a reboot changes the effective state). enter = node dashboard; the OS STIG sub-tab lists the rules.")}
-	if !a.sshEnabled {
-		hdr = append(hdr, styleWarn.Render("SSH collection is off - these facts come from the nodes."))
+	if l := a.sshOffLine("this view"); l != "" {
+		hdr = append(hdr, l)
 	}
 	hdr = append(hdr, a.osBenchmarkLine())
 	cols := []string{"MAC", "FIPS", "fapolicyd", "auditd", "firewall", "Secure Boot", "Kernel lockdown", "Reboot required", "OS STIG"}
@@ -1461,7 +1558,7 @@ func (a *App) hardeningContent() content {
 		counts, _ := stig.OSSummary(a.stigRes, n)
 		osCell := styleDim.Render("no STIG table")
 		if !ni.STIGProbed {
-			osCell = styleDim.Render("not collected (S on OS STIG)")
+			osCell = styleDim.Render("not collected (Shift+S)")
 		} else if len(counts) > 0 {
 			sc := stig.Score{Open: counts[stig.Fail], NotAFinding: counts[stig.Pass]}
 			txt := stig.OSSummaryText(counts)
@@ -1537,6 +1634,22 @@ func (a *App) osStigContent() content {
 	if d := counts[stig.Pass] + counts[stig.Fail]; d > 0 {
 		score = float64(counts[stig.Pass]) * 100 / float64(d)
 	}
+	if len(osRes) == 0 {
+		// nothing collected yet: no gauge or scorecard, just how to start
+		hdr := []string{styleTitle.Render("DISA OS STIG rules") + "  " + styleDim.Render("opt-in: nothing runs on the nodes until you ask"), a.osBenchmarkLine()}
+		c := content{header: hdr, empty: "no OS STIG results yet - Shift+S collects the facts from the nodes"}
+		switch {
+		case a.sshOffLine("") != "":
+			hdr = append(hdr, a.sshOffLine("the OS STIG scan"))
+			c.empty = "the OS STIG scan cannot run without SSH"
+		case a.scan.running():
+			c.empty = "collecting the OS STIG facts from the nodes (a few seconds per node)..."
+		default:
+			hdr = append(hdr, styleBold.Render("Shift+S runs the full OS STIG scan on all hosts")+styleDim.Render(" (sysctl -a, packages, audit rules, file sweep, config dumps; a few seconds per node; results stay until the next Shift+S)"))
+		}
+		c.header = hdr
+		return c
+	}
 	hdr := []string{
 		styleTitle.Render("DISA OS STIG rules") + "  " + stacked(40, ssegs) + "  " + legend(ssegs) + "  " + kv("automated pass rate", gauge(score, 10, 200, 200)),
 		a.osBenchmarkLine(),
@@ -1557,8 +1670,8 @@ func (a *App) osStigContent() content {
 		hdr = append(hdr, styleDim.Render(fmt.Sprintf("    ... %d more nodes: per-node scores are in the Node hardening OS STIG column", shown-8)))
 	}
 	hdr = append(hdr, styleDim.Render("score = Not a Finding / (Not a Finding + Open) as SCC / OpenSCAP report it (N/A and Not Reviewed excluded). MANUAL = Not Reviewed: needs a decision, evidence and the STIG check text in the detail (enter). 'a' hides passing, 'm' hides manual, '/' filters."))
-	if !a.sshEnabled {
-		hdr = append(hdr, styleWarn.Render("SSH collection is off - these facts come from the nodes."))
+	if l := a.sshOffLine("this view"); l != "" {
+		hdr = append(hdr, l)
 	}
 	var rows [][]string
 	var ids []string
@@ -1578,7 +1691,10 @@ func (a *App) osStigContent() content {
 	}
 	h, lines := renderTable(a.width, []column{{title: "STATUS"}, {title: "CAT"}, {title: "ID"}, {title: "STIG ID"}, {title: "STIG", max: 22}, {title: "RULE", max: 56}, {title: "DETAIL"}}, rows)
 	hdr = append(hdr, h)
-	c := content{header: hdr, selectable: true, empty: "no OS STIG results yet - press S to collect the facts from the nodes"}
+	c := content{header: hdr, selectable: true, empty: "no OS STIG results yet - Shift+S collects the facts from the nodes"}
+	if a.scan.running() {
+		c.empty = "collecting the OS STIG facts from the nodes (a few seconds per node)..."
+	}
 	for i, l := range lines {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
@@ -1632,17 +1748,20 @@ func (a *App) osBenchmarkLine() string {
 			oldest = ni.STIGCollected
 		}
 	}
-	when := styleWarn.Render("facts not collected yet - press S on the OS STIG sub-tab to run the probe (a few seconds per node)")
+	when := styleWarn.Render("facts not collected yet - Shift+S runs the scan (a few seconds per node)")
 	if !oldest.IsZero() {
-		when = styleDim.Render("facts collected " + age(oldest) + " ago (S re-collects)")
+		when = styleDim.Render("facts collected " + age(oldest) + " ago (Shift+S re-collects)")
 		if unprobed > 0 {
 			when += styleWarn.Render(fmt.Sprintf(", %d node(s) not collected", unprobed))
 		}
 	}
+	if a.scan.running() {
+		when = styleInfo.Render(fmt.Sprintf("collecting OS STIG facts: %d%%, %d/%d nodes answered %s", a.scan.percent(), a.scan.done(), len(a.scan.nodes), a.spinner.View()))
+	}
 	return kv("OS STIGs", strings.Join(parts, "  ·  ")) + "  " + when
 }
 
-// hardeningCell renders "runtime/boot" coloured by desirability and mismatch.
+// hardeningCell renders "runtime/boot" colored by desirability and mismatch.
 func hardeningCell(it nodeinfo.HardeningItem) string {
 	rt := it.Runtime
 	if it.Name == "SELinux" || it.Name == "AppArmor" {
@@ -1693,10 +1812,26 @@ func scoreLine(sc stig.Score, indent int) string {
 		styleDim.Render(fmt.Sprintf("n/a %d", sc.NotApplicable)) + "  " + styleWarn.Render(fmt.Sprintf("not reviewed %d", sc.NotReviewed)) + "  " + styleDim.Render(cats)
 }
 
-func benchmarkLine() string {
+// benchmarkLine names the references that produced at least one rule: the
+// Rancher MCM STIG only on the cluster that runs Rancher, the RKE2 STIG only
+// on rke2, and so on.
+func (a *App) benchmarkLine() string {
 	var parts []string
 	for _, b := range stig.Benchmarks {
+		used := false
+		for _, r := range a.stigRes {
+			if b.Matches(r.ID) {
+				used = true
+				break
+			}
+		}
+		if !used {
+			continue
+		}
 		parts = append(parts, styleBold.Render(b.Name)+" "+b.Version+styleDim.Render(" ["+strings.Join(b.Prefixes, "*,")+"*]"))
+	}
+	if len(parts) == 0 {
+		return kv("references", styleDim.Render("none evaluated yet"))
 	}
 	return kv("references", strings.Join(parts, "  ·  "))
 }
@@ -1828,7 +1963,7 @@ func errorsPerHour(ls *logs.Summary, n int) []float64 {
 func (a *App) logLinesContent(node string) content {
 	ls := a.logSum[node]
 	ni := a.nodes[node]
-	hdr := []string{styleTitle.Render("Logs: "+node) + styleDim.Render("  esc back to nodes · enter full line + explanation · a toggles info lines · / filters")}
+	hdr := []string{styleTitle.Render("Logs: "+node) + styleDim.Render("  esc back to nodes · enter full line + explanation (w wraps) · a toggles info lines · / filters")}
 	if ls == nil || ni == nil {
 		return content{header: hdr, empty: "no log data for this node yet (R for a full collection)"}
 	}
@@ -1863,6 +1998,20 @@ func (a *App) logLinesContent(node string) content {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
 	return c
+}
+
+// renderLogLine colors a journal / log-file line the way every log view
+// shows one: the journal timestamp/host/unit prefix dim, the message
+// highlighted by its format (JSON, logfmt, klog, plain). The lines table
+// puts the prefix in its own columns and calls highlightLog(logMessage(l))
+// directly; the detail views, which show whole lines, use this.
+func renderLogLine(line string) string {
+	// only the journal prefix: a klog header or logfmt time= is colored by
+	// the highlighter itself
+	if g := journalPrefix.FindString(line); g != "" {
+		return styleDim.Render(g) + highlightLog(line[len(g):])
+	}
+	return highlightLog(line)
 }
 
 // logMessage strips the journal timestamp/host/unit prefix for the table.
@@ -1912,7 +2061,7 @@ func (a *App) logsDetail(node string) (string, []string) {
 		if m.Pattern != nil {
 			name = m.Pattern.Name
 		}
-		add(classStyle(m.Class).Render(fmt.Sprintf("%-7s", m.Class.String())) + " " + styleDim.Render(fmt.Sprintf("%-18s", name)) + " " + trunc(m.Line, w-27))
+		add(classStyle(m.Class).Render(fmt.Sprintf("%-7s", m.Class.String())) + " " + styleDim.Render(fmt.Sprintf("%-18s", name)) + " " + renderLogLine(m.Line)) // full: the overlay cuts or wraps (w)
 		shown++
 		if shown >= 400 {
 			add(styleDim.Render("... truncated"))
@@ -1962,7 +2111,7 @@ func (a *App) logLineDetail(node, id string) (string, []string) {
 	}
 	m := ls.Matches[idx]
 	out := []string{classStyle(m.Class).Render(m.Class.String()) + "  " + kv("unit", m.Unit) + "  " + kv("time", m.Time.Format(time.RFC3339)), ""}
-	out = append(out, wrapStyled(highlightLog(m.Line), w)...)
+	out = append(out, wrapStyled(renderLogLine(m.Line), w)...) // the subject: always wrapped
 	if m.Pattern != nil {
 		out = append(out, "", styleTitle.Render("Pattern: "+m.Pattern.Name)+"  "+styleDim.Render("(seen "+fmt.Sprint(ls.ByName[m.Pattern.Name])+"x in this window)"))
 		out = append(out, wrap(m.Pattern.Explain, w)...)
@@ -1972,7 +2121,13 @@ func (a *App) logLineDetail(node, id string) (string, []string) {
 	} else {
 		out = append(out, "", styleDim.Render("No knowledge-base pattern matched this line."))
 	}
-	// context: the neighbouring lines from the same window
+	if v := logVerdict(ls, m); len(v) > 0 {
+		out = append(out, "", styleTitle.Render("Verdict"))
+		for _, l := range v {
+			out = append(out, wrap(l, w)...)
+		}
+	}
+	// context: the neighboring lines from the same window
 	out = append(out, "", styleTitle.Render("Context"))
 	for i := idx - 3; i <= idx+3; i++ {
 		if i < 0 || i >= len(ls.Matches) {
@@ -1982,7 +2137,7 @@ func (a *App) logLineDetail(node, id string) (string, []string) {
 		if i == idx {
 			prefix = styleBold.Render("> ")
 		}
-		out = append(out, prefix+trunc(ls.Matches[i].Line, w-2))
+		out = append(out, prefix+renderLogLine(ls.Matches[i].Line)) // full: the overlay cuts or wraps (w)
 	}
 	return "Log line on " + node, out
 }
@@ -1997,6 +2152,52 @@ func classStyle(c logs.Class) interface{ Render(...string) string } {
 		return styleInfo
 	}
 	return styleDim
+}
+
+// logVerdict answers the question a generic (unmatched) error raises: is
+// this something to fix? It looks at when the line was logged relative to
+// the node's startup windows and whether the same message shape keeps
+// coming back.
+func logVerdict(ls *logs.Summary, m logs.Match) []string {
+	if m.Pattern == nil || (m.Pattern.Name != "generic-error" && m.Pattern.Name != "generic-warn" && m.Pattern.Name != "startup-unmatched") {
+		return nil
+	}
+	r := ls.Recur(m)
+	clock := func(t time.Time) string { return t.Local().Format("15:04:05") }
+	var out []string
+	seen := fmt.Sprintf("This message shape was logged %dx in the collected window", r.Count)
+	if !r.First.IsZero() {
+		if r.Count > 1 {
+			seen += fmt.Sprintf(" (first %s, last %s, %s ago)", clock(r.First), clock(r.Last), age(r.Last))
+		} else {
+			seen += fmt.Sprintf(" (%s ago)", age(r.Last))
+		}
+	}
+	out = append(out, seen+".")
+	windows := ls.StartupWindows()
+	inStart := ls.InStartup(m.Time)
+	switch {
+	case m.Pattern.Name == "startup-unmatched":
+		w := windows[0]
+		for _, x := range windows {
+			if !m.Time.Before(x[0]) && !m.Time.After(x[1]) {
+				w = x
+			}
+		}
+		out = append(out, styleOK.Render("Startup race, not a fault: ")+fmt.Sprintf("logged %s after the node's start marker (starting %s, settled by %s) and never again after startup. Nothing to fix.", humanDur(m.Time.Sub(w[0])), clock(w[0]), clock(w[1])))
+	case inStart && r.Ongoing:
+		out = append(out, styleWarn.Render("Started as a startup race but is still recurring: ")+"the same message keeps appearing well after the node came up, so whatever it could not reach did not come back. Read the message for the target (an address, a lease, a container, a pod) and check that component; the other nodes' Logs tab shows whether it is node-specific.")
+	case inStart:
+		out = append(out, styleWarn.Render("Logged during startup but seen again later: ")+fmt.Sprintf("the last occurrence was %s ago, outside the startup window. If it stopped by itself it was a transient (a dependency restarting); if the timestamps cluster around one event, look at what happened on the node then (Nodes tab uptime, unit restarts above).", age(r.Last)))
+	case r.Ongoing:
+		out = append(out, styleCrit.Render("Ongoing: ")+"still being logged and not during a startup - actionable. The message names what failed; the same line on the other nodes means a cluster-wide dependency (apiserver, etcd, DNS, a registry), on this node only a local one (kubelet, containerd, the CNI, disk).")
+	case len(windows) == 0 && m.Pattern.Name == "generic-error":
+		out = append(out, styleDim.Render("No start marker in the collected window, so a startup race cannot be ruled out; press R after a node restart to collect the boot lines."))
+		fallthrough
+	default:
+		out = append(out, styleOK.Render("Past incident: ")+fmt.Sprintf("not seen for %s. Nothing to do unless it comes back; if it does, the recurrence above shows how often.", age(r.Last)))
+	}
+	return out
 }
 
 // stepLines renders numbered remediation steps, wrapped to width; lines that
@@ -2023,7 +2224,7 @@ func stepLines(steps []string, width int) []string {
 	return out
 }
 
-// raftLine summarises what the node's disk and etcd log say about raft state
+// raftLine summarizes what the node's disk and etcd log say about raft state
 // (readable even when etcd is down).
 func raftLine(p *etcdpkg.Probe) string {
 	var parts []string

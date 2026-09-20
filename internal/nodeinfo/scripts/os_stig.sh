@@ -1,7 +1,8 @@
 # OS STIG facts consumed by the ComplianceAsCode template evaluators
 # (internal/stig/ostemplates.go): generic sections only; the data-derived
 # stat/find/dump sections are appended by stigdata.ProbeScript(). Collected
-# once per node (first contact) and on R. Parsed by nodeinfo.parseOSStig.
+# on Shift+S (one scan stage) or as one script (perfbench). Parsed by
+# nodeinfo.parseOSStig.
 #
 # Sent to nodes over SSH by khealth as `sudo sh -s`; POSIX sh only (dash on
 # Ubuntu, busybox on Flatcar). Embedded into the Go binary with //go:embed -

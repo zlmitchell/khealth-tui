@@ -59,14 +59,18 @@ type Summary struct {
 	Counts   map[Class]int
 	ByName   map[string]int
 	Matches  []Match
-	Startup  time.Time // rke2/k3s "up and running" marker, if seen
+	Startup  time.Time   // rke2/k3s "up and running" marker, if seen
+	Starts   []time.Time // start markers (rke2/k3s/kubelet/containerd starting), in order
+	Ups      []time.Time // every "up and running" marker, in order
 	LastLine time.Time
+	Now      time.Time // when the window was collected
 }
 
 var patterns = []Pattern{
 	// ---- completion markers ----
 	{Name: "rke2-up", Class: ClassInfo, Re: regexp.MustCompile(`(rke2|k3s) is up and running`), Explain: "Startup completed: the supervisor finished bootstrapping."},
-	{Name: "kubelet-started", Class: ClassInfo, Re: regexp.MustCompile(`Started kubelet|Starting kubelet`), Explain: "kubelet process launched."},
+	{Name: "rke2-start", Class: ClassInfo, Re: regexp.MustCompile(`Starting (rke2|k3s) v|Starting rke2-(server|agent)|Started rke2-(server|agent)`), Explain: "The supervisor process started (boot, restart, upgrade). The minutes after it are the startup window: unmatched errors in it that do not recur are reported as startup noise."},
+	{Name: "kubelet-started", Class: ClassInfo, Re: regexp.MustCompile(`Started kubelet|Starting kubelet|starting containerd`), Explain: "kubelet / containerd process launched."},
 
 	// ---- rancher-system-agent (Rancher-provisioned downstream nodes) ----
 	// Rancher delivers node config as plans; the agent rewrites
@@ -80,6 +84,19 @@ var patterns = []Pattern{
 	{Name: "rancher-agent-start", Class: ClassInfo, Re: regexp.MustCompile(`Rancher System Agent version .* is starting`), Explain: "rancher-system-agent process started (boot, or Rancher upgraded the agent)."},
 	{Name: "rancher-connect", Class: ClassStartup, Re: regexp.MustCompile(`error while connecting to Rancher|\[K8s\] error while (listing|watching)|Waiting for (Rancher|the cattle)|cattle-cluster-agent .*(error|failed)|rancher2_connection_info`), Explain: "rancher-system-agent (re)connecting to Rancher to fetch plans. Brief at start; persistent = the node cannot reach the Rancher URL (agent-url on the RKE2 tab): proxy, DNS, CA or the cattle-cluster-agent tunnel.", Persist: 5 * time.Minute},
 
+	// ---- rke2 supervisor (rke2-server / rke2-agent journal) ----
+	// The supervisor on 9345 fronts the embedded controllers and proxies
+	// kubectl logs/exec and metrics traffic to the kubelets. Its errors at
+	// boot are almost all "the thing behind me is not up yet"; the same
+	// lines minutes after "up and running" point at what never came up.
+	{Name: "supervisor-not-ready", Class: ClassStartup, Re: regexp.MustCompile(`runtime core not ready|Sending HTTP/1\.1 503 response`), Explain: "The supervisor's embedded controllers (the 'runtime core': node/etcd-member reconcilers, the kubelet proxy) are not running yet, so it answers 503 and cannot list the etcd nodes. Normal for the first minutes after rke2-server starts; persistent = the apiserver or etcd static pod never became ready: check the etcd tab and `crictl ps` on this node.", Persist: 5 * time.Minute},
+	{Name: "supervisor-proxy-502", Class: ClassStartup, Re: regexp.MustCompile(`Sending HTTP/1\.1 502 response to .*(dial tcp [^ ]+:10250: (operation was canceled|connect: connection refused|i/o timeout)|context canceled|no such host)`), Explain: "The supervisor proxied a request (metrics-server scrape, kubectl logs/exec, the apiserver's egress tunnel) to a kubelet on 10250 that did not answer in time. Normal at boot while the kubelets and the tunnel come up; persistent = that node's kubelet is down or 10250 is blocked between the nodes (firewalld: open 10250/tcp for the node CIDR, or add the nodes to a trusted zone).", Persist: 5 * time.Minute},
+	{Name: "supervisor-peer-down", Class: ClassStartup, Re: regexp.MustCompile(`Unable to reconcile with remote datastore.*(no route to host|connection refused|i/o timeout)|dial tcp [0-9.]+:9345: connect: (no route to host|connection refused|i/o timeout)`), Explain: "This server could not reach the server it joined through (the `server:` address in config.yaml, port 9345). When every node boots together the peers are simply not up yet; persistent = that node is down, 9345/tcp is blocked, or `server:` names a single node that no longer exists - point it at a VIP / load balancer (or at least a live server) so a restart does not depend on one peer.", Persist: 5 * time.Minute},
+	{Name: "bootstrap-exists", Class: ClassInfo, Re: regexp.MustCompile(`Bootstrap key already exists`), Explain: "The restarting server found its bootstrap data already in the datastore. Normal on every restart of a joined server."},
+	{Name: "supervisor-proxy-eof", Class: ClassInfo, Re: regexp.MustCompile(`Proxy error: (write|read) failed: .*(broken pipe|connection reset by peer|use of closed network connection)`), Explain: "A client of the supervisor's kubelet proxy closed the connection mid-response (a kubectl logs/exec session ended, a metrics scrape timed out). Harmless unless it repeats every scrape interval - then the kubelet on the target node is slow to answer."},
+	{Name: "lease-lost", Class: ClassWarn, Re: regexp.MustCompile(`leaderelection lost|failed to renew lease|Error retrieving lease lock|error retrieving resource lock|failed to acquire lease`), Explain: "A control-plane component (kube-controller-manager, kube-scheduler, cloud-controller-manager, snapshot controller) could not renew its leader lease because the apiserver did not answer within the renew deadline; it exits and the kubelet restarts it (the restart counts on the Workloads tab). Causes: etcd disk latency (see etcd-slow-fsync), CPU steal on oversubscribed VMs, an apiserver restart. Fix the latency (SSD-backed etcd data dir, fewer vCPUs per host) or widen the tolerance in /etc/rancher/rke2/config.yaml: kube-controller-manager-arg / kube-scheduler-arg [leader-elect-lease-duration=60s, leader-elect-renew-deadline=40s, leader-elect-retry-period=10s]."},
+	{Name: "kcm-early-start", Class: ClassStartup, Re: regexp.MustCompile(`unable to load configmap based request-header-client-ca-file`), Explain: "kube-controller-manager started before the local apiserver answered (it reads extension-apiserver-authentication at start) and exited; the kubelet restarts it. One or two per boot is normal; many means the apiserver is slow to come up on this node.", Persist: 5 * time.Minute},
+
 	// ---- normal startup noise (only a problem if it persists) ----
 	{Name: "wait-apiserver", Class: ClassStartup, Re: regexp.MustCompile(`Waiting for API server to become available|Waiting to retrieve (kube-proxy|agent) configuration|Waiting for cloud-controller-manager privileges|Waiting for control-plane node .* startup`), Explain: "The supervisor is waiting for kube-apiserver / etcd. Normal for 30-120s after start; persistent = apiserver or etcd is not coming up (check etcd tab, container images, ports 6443/9345).", Persist: 5 * time.Minute},
 	{Name: "wait-etcd", Class: ClassStartup, Re: regexp.MustCompile(`Waiting for etcd server to become available|Waiting for etcd (to become|cluster)`), Explain: "Waiting for the local etcd member. Normal during boot; persistent = etcd cannot start or cannot reach peers on 2380.", Persist: 5 * time.Minute},
@@ -90,13 +107,19 @@ var patterns = []Pattern{
 	{Name: "image-pull-start", Class: ClassStartup, Re: regexp.MustCompile(`Pulling image|Importing images from|Imported images from`), Explain: "Loading airgap image tarballs or pulling system images. Normal; slow only on first boot or after upgrade."},
 	{Name: "static-pod-wait", Class: ClassStartup, Re: regexp.MustCompile(`Pod for (etcd|kube-apiserver|kube-scheduler|kube-controller-manager|cloud-controller-manager) not synced|static pod .* not (yet )?(running|ready)`), Explain: "Static pod manifests written, waiting for containerd to start them. Normal for the first minute.", Persist: 5 * time.Minute},
 	{Name: "temp-etcd", Class: ClassStartup, Re: regexp.MustCompile(`Starting temporary etcd|Reconciling bootstrap data|bootstrap data .* reconciled`), Explain: "Bootstrap reconciliation against the datastore. Normal on server start."},
+	// kubelet restart races (kubelet.log / journal on rke2 nodes)
+	{Name: "mirror-pod-exists", Class: ClassStartup, Re: regexp.MustCompile(`Failed creating a mirror pod.*already exists`), Explain: "The restarted kubelet tried to re-create the API mirror pods of its static pods (etcd, kube-apiserver, kube-scheduler, ...) that still exist from before the restart. Normal on every kubelet restart - one line per static pod, then the existing mirrors are adopted. Nothing to fix.", Persist: 5 * time.Minute},
+	{Name: "container-gone", Class: ClassStartup, Re: regexp.MustCompile(`ContainerStatus from runtime service failed.*NotFound|failed to get container status.*not found|container .* not found: not found`), Explain: "The kubelet asked containerd about a container that was already removed (a pod restarted or was cleaned up meanwhile, typically right after a restart). Transient; persistent = kubelet and containerd disagree about what is running: compare `crictl ps -a` with the pods on this node and check containerd restarts.", Persist: 5 * time.Minute},
+	{Name: "node-lease", Class: ClassStartup, Re: regexp.MustCompile(`Failed to update lease|failed to (update|renew) node lease|error updating node lease|Operation cannot be fulfilled on leases`), Explain: "The kubelet could not renew its node lease against the apiserver (127.0.0.1:6443 on a server, the supervisor tunnel on an agent). Normal while the apiserver starts or a conflicting update lands; persistent = the node goes NotReady after 40 s: apiserver down or overloaded, etcd latency (etcd-slow-fsync), or the tunnel to the servers is broken.", Persist: 3 * time.Minute},
+	{Name: "orphaned-volumes-cleanup", Class: ClassInfo, Re: regexp.MustCompile(`Cleaned up orphaned pod volumes dir|Orphaned pod .* found, removing`), Explain: "The kubelet removed the volume directory of a pod that no longer exists (left behind by a restart or a force-deleted pod). Normal housekeeping."},
+	{Name: "etcd-connect", Class: ClassStartup, Re: regexp.MustCompile(`Unable to connect to etcd: connection error|dial tcp [^ ]+:2379: connect: connection refused`), Explain: "The supervisor could not reach etcd on this node yet. Normal for the first minute after a server starts; persistent = the etcd static pod is not running (etcd tab, `crictl ps`) or 2379 is firewalled between the servers.", Persist: 5 * time.Minute},
 	{Name: "wait-node-ready", Class: ClassStartup, Re: regexp.MustCompile(`Node .* not ready yet|node not ready|waiting for node`), Explain: "Waiting on node readiness. Normal for the first minutes.", Persist: 5 * time.Minute},
 	{Name: "cert-rotate", Class: ClassInfo, Re: regexp.MustCompile(`certificate .* (renewed|rotated)|Rotating certificates|certificate is about to expire`), Explain: "Certificate rotation activity. rke2 rotates client certs on restart when within 90 days of expiry."},
 	{Name: "defrag", Class: ClassInfo, Re: regexp.MustCompile(`Defragmenting etcd|defrag(ment)? (completed|finished|started)`), Explain: "rke2 defragments the local etcd member on startup. Normal."},
 	{Name: "snapshot-ok", Class: ClassInfo, Re: regexp.MustCompile(`Saving etcd snapshot|Snapshot .* saved|etcd snapshot .* (complete|created)`), Explain: "Scheduled etcd snapshot ran."},
 
 	// ---- warnings ----
-	{Name: "etcd-slow-fsync", Class: ClassWarn, Re: regexp.MustCompile(`slow fdatasync|took too long|apply request took too long|waiting for ReadIndex response took too long|wal: sync duration`), Explain: "etcd disk latency. Sustained values mean the datastore disk is too slow (use SSD, isolate etcd from other IO)."},
+	{Name: "etcd-slow-fsync", Class: ClassWarn, Re: regexp.MustCompile(`slow fdatasync|took too long|apply request took too long|waiting for ReadIndex response took too long|wal: sync duration`), Explain: "etcd disk latency: a WAL fsync or backend commit took longer than etcd expects (p99 should stay under 10 ms). Sustained values mean the datastore disk is too slow: put the data dir (/var/lib/rancher/rke2/server/db) on SSD/NVMe-backed storage with host cache off, keep etcd off disks shared with images and logs, and on VMs check CPU steal. As a stop-gap on a lab cluster raise etcd-arg [heartbeat-interval=500, election-timeout=5000] in config.yaml so the members stop losing leadership over it."},
 	{Name: "leader-change", Class: ClassWarn, Re: regexp.MustCompile(`elected leader|lost leader|raft.node: .* (changed|lost) leader|became (leader|follower|candidate) at term`), Explain: "etcd leader election. Frequent elections indicate network or disk latency between control-plane nodes."},
 	{Name: "s3-upload-fail", Class: ClassError, Re: regexp.MustCompile(`(?i)(failed|error|unable).{0,60}(upload|s3 client|s3 config|snapshot to s3|s3 bucket)|s3.{0,80}(AccessDenied|SignatureDoesNotMatch|NoSuchBucket|InvalidAccessKeyId|certificate signed by unknown authority|no such host|connection refused|RequestTimeTooSkewed)`), Explain: "etcd snapshot upload to S3 failed. Local snapshots continue; check etcd-s3-* settings (endpoint, bucket, credentials, CA) and that the bucket accepts writes."},
 	{Name: "etcd-nospace", Class: ClassError, Re: regexp.MustCompile(`mvcc: database space exceeded|etcdserver: no space|alarm:NOSPACE|NOSPACE`), Explain: "etcd database hit its quota. Cluster is read-only until you compact, defrag and disarm the alarm."},
@@ -118,7 +141,7 @@ var patterns = []Pattern{
 	{Name: "generic-warn", Class: ClassWarn, Re: regexp.MustCompile(`level=warn(ing)?|\bW[0-9]{4} `), Explain: "Warning-level log line not matched by a specific rule."},
 
 	// ---- errors ----
-	{Name: "token-mismatch", Class: ClassError, Re: regexp.MustCompile(`token does not match|Failed to validate token|bootstrap data already found and encrypted with different token|invalid bearer token|Unauthorized`), Explain: "Join token mismatch: the node's `token:` does not match the server's /var/lib/rancher/rke2/server/token (or the cluster was re-initialised). Fix the token in config.yaml."},
+	{Name: "token-mismatch", Class: ClassError, Re: regexp.MustCompile(`token does not match|Failed to validate token|bootstrap data already found and encrypted with different token|invalid bearer token|Unauthorized`), Explain: "Join token mismatch: the node's `token:` does not match the server's /var/lib/rancher/rke2/server/token (or the cluster was re-initialized). Fix the token in config.yaml."},
 	{Name: "ca-mismatch", Class: ClassError, Re: regexp.MustCompile(`failed to get CA certs|certificate signed by unknown authority|x509: certificate is valid for|certificate verify failed`), Explain: "TLS trust failure between agent and server. Usually a rebuilt server with a new CA, a `server:` URL pointing at a different cluster, or a proxy intercepting TLS."},
 	{Name: "cluster-id", Class: ClassError, Re: regexp.MustCompile(`cluster ID mismatch|cluster-id mismatch|member .* has already been bootstrapped|etcd cluster join failed|failed to join etcd cluster`), Explain: "This etcd member's data belongs to a different cluster. Remove the node from the cluster and wipe /var/lib/rancher/rke2/server/db before rejoining."},
 	{Name: "etcd-member-missing", Class: ClassError, Re: regexp.MustCompile(`unable to find etcd member|etcdserver: member not found|etcd member .* is not in cluster|failed to (add|remove) member`), Explain: "etcd membership is out of sync with the nodes (stale member after a node was removed). Use etcdctl member list / member remove."},
@@ -138,6 +161,148 @@ var patterns = []Pattern{
 
 // Patterns returns the knowledge base (read-only).
 func Patterns() []Pattern { return patterns }
+
+// startupUnmatched replaces generic-error / generic-warn on lines logged
+// inside a startup window that never recur outside one.
+var startupUnmatched = Pattern{Name: "startup-unmatched", Class: ClassStartup, Explain: "An error-level line with no knowledge-base rule, logged while this node was starting (within 5 minutes of a start marker, or before the 'up and running' marker that followed it) and not seen again after: components racing each other - the kubelet before the apiserver answers, static pods before their mirror pods, controllers before the CNI is up. Nothing to fix unless the same message returns after startup; then read it for what could not be reached (an address, a lease, a container) and check that component."}
+
+// startupWindowLen is how long after a start marker a node is "starting"
+// when no "up and running" marker follows; startupSettle is the grace after
+// the marker itself (mirror pods, leases and the CNI settle a while later).
+const (
+	startupWindowLen = 5 * time.Minute
+	startupSettle    = 2 * time.Minute
+)
+
+// StartupWindows returns the periods this node was starting: from each
+// start marker to the "up and running" marker that followed it plus a
+// settle time, or startupWindowLen when none followed.
+func (s *Summary) StartupWindows() [][2]time.Time {
+	var out [][2]time.Time
+	for _, st := range s.Starts {
+		end := st.Add(startupWindowLen)
+		for _, up := range s.Ups {
+			if up.After(st) && up.Before(st.Add(2*startupWindowLen)) && up.Add(startupSettle).After(end) {
+				end = up.Add(startupSettle)
+			}
+		}
+		if n := len(out); n > 0 && !st.After(out[n-1][1]) {
+			// overlapping starts (rke2 then kubelet then containerd): one window
+			if end.After(out[n-1][1]) {
+				out[n-1][1] = end
+			}
+			continue
+		}
+		out = append(out, [2]time.Time{st, end})
+	}
+	return out
+}
+
+// InStartup reports whether t falls in one of the node's startup windows.
+func (s *Summary) InStartup(t time.Time) bool {
+	if t.IsZero() {
+		return false
+	}
+	for _, w := range s.StartupWindows() {
+		if !t.Before(w[0]) && !t.After(w[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// demoteStartupNoise turns unmatched errors and warnings that only appear
+// inside startup windows into startup noise: the operator wants to know
+// whether an unexplained error is something to fix, and one that a restart
+// produced and that never came back is not.
+func (s *Summary) demoteStartupNoise() {
+	windows := s.StartupWindows()
+	if len(windows) == 0 {
+		return
+	}
+	recurs := map[string]bool{}
+	for i := range s.Matches {
+		m := &s.Matches[i]
+		if !isGeneric(m.Pattern) || m.Time.IsZero() || s.InStartup(m.Time) {
+			continue
+		}
+		recurs[Signature(m.Line)] = true
+	}
+	for i := range s.Matches {
+		m := &s.Matches[i]
+		if !isGeneric(m.Pattern) || !s.InStartup(m.Time) || recurs[Signature(m.Line)] {
+			continue
+		}
+		s.Counts[m.Class]--
+		s.ByName[m.Pattern.Name]--
+		m.Pattern, m.Class = &startupUnmatched, ClassStartup
+		s.Counts[ClassStartup]++
+		s.ByName[startupUnmatched.Name]++
+	}
+}
+
+func isGeneric(p *Pattern) bool {
+	return p != nil && (p.Name == "generic-error" || p.Name == "generic-warn")
+}
+
+var (
+	sigQuoted = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+	sigDigits = regexp.MustCompile(`[0-9]+`)
+	sigKlog   = regexp.MustCompile(`^[IWEF]\d{4} \d\d:\d\d:\d\d\.\d+\s+\d+\s+`)
+	sigLogfmt = regexp.MustCompile(`^time="[^"]*"\s*`)
+)
+
+// Signature is the shape of a log line with what varies between
+// occurrences removed: prefixes, quoted strings and numbers. Two lines with
+// the same signature are the same message about different objects.
+func Signature(line string) string {
+	t := strings.TrimSpace(line)
+	if g := journalTime.FindStringIndex(t); g != nil {
+		t = strings.TrimSpace(t[g[1]:])
+		if i := strings.Index(t, ": "); i >= 0 && i < 12 {
+			t = t[i+2:] // "[pid]: "
+		}
+	}
+	t = sigKlog.ReplaceAllString(t, "")
+	t = sigLogfmt.ReplaceAllString(t, "")
+	t = sigQuoted.ReplaceAllString(t, `""`)
+	t = sigDigits.ReplaceAllString(t, "#")
+	if len(t) > 80 {
+		t = t[:80]
+	}
+	return t
+}
+
+// Recurrence describes how often a line's message shape appears in the
+// window: for the detail of an unmatched error, so the operator can tell a
+// past incident from an ongoing one.
+type Recurrence struct {
+	Count       int
+	First, Last time.Time
+	Ongoing     bool // seen in the 10 minutes before the collection
+}
+
+// Recur counts the matches that share m's signature.
+func (s *Summary) Recur(m Match) Recurrence {
+	sig := Signature(m.Line)
+	var r Recurrence
+	for _, o := range s.Matches {
+		if Signature(o.Line) != sig {
+			continue
+		}
+		r.Count++
+		if !o.Time.IsZero() {
+			if r.First.IsZero() || o.Time.Before(r.First) {
+				r.First = o.Time
+			}
+			if o.Time.After(r.Last) {
+				r.Last = o.Time
+			}
+		}
+	}
+	r.Ongoing = !r.Last.IsZero() && r.Last.After(s.Now.Add(-10*time.Minute))
+	return r
+}
 
 var journalTime = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:?\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s+\S+\s+([^\[:\s]+)`)
 
@@ -163,7 +328,7 @@ func Classify(lines []string, now time.Time) *Summary {
 // ClassifySources classifies several streams into one summary, ordered by
 // time so file and journal lines interleave.
 func ClassifySources(srcs []Source, now time.Time) *Summary {
-	s := &Summary{Counts: map[Class]int{}, ByName: map[string]int{}}
+	s := &Summary{Counts: map[Class]int{}, ByName: map[string]int{}, Now: now}
 	for _, src := range srcs {
 		for _, line := range src.Lines {
 			t := strings.TrimSpace(line)
@@ -193,6 +358,7 @@ func ClassifySources(srcs []Source, now time.Time) *Summary {
 		})
 	}
 	s.escalate(now)
+	s.demoteStartupNoise()
 	return s
 }
 
@@ -239,8 +405,18 @@ func (s *Summary) classify(m *Match) {
 		if p.Re.MatchString(t) {
 			m.Pattern = p
 			m.Class = p.Class
-			if p.Name == "rke2-up" && m.Time.After(s.Startup) {
-				s.Startup = m.Time
+			switch p.Name {
+			case "rke2-up":
+				if m.Time.After(s.Startup) {
+					s.Startup = m.Time
+				}
+				if !m.Time.IsZero() {
+					s.Ups = append(s.Ups, m.Time)
+				}
+			case "rke2-start", "kubelet-started":
+				if !m.Time.IsZero() {
+					s.Starts = append(s.Starts, m.Time)
+				}
 			}
 			break
 		}

@@ -170,7 +170,7 @@ leader when there is one).
 - Worker kubelets are not restarted (`systemctl restart kubelet` there if
   pods look stale).
 
-## Behaviours learnt on real clusters (all handled)
+## Behaviors learned on real clusters (all handled)
 
 - SELinux: a restore started from an SSH session writes `unconfined_u`
   files the confined etcd container is denied; rke2 waits 15 min and exits

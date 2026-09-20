@@ -47,7 +47,7 @@ under [etcd triage](#etcd-triage), the repair itself under
 | 7 | Addons | CNI (daemonsets + `/etc/cni/net.d` + rke2 `cni:`), CSI, CoreDNS/ingress/metrics-server/…, **Rancher management** (server URL, cluster-agent, fleet-agent, provisioned vs imported, `rancher-system-agent` per node, join topology via `server:`), **registries.yaml** vs containerd `certs.d`, registries actually used by pods, rke2 bundled HelmCharts + HelmChartConfig overrides |
 | 8 | Helm | releases decoded from `sh.helm.release.v1` secrets (chart, version, status, revision, history); Enter: **values applied** + history; update check against the `index.yaml` of your `helm repo` list (credentials included) and `helm.repos`; `u` upgrades to the newest known version, `b` rolls back to a chosen revision (runs the `helm` CLI after a confirmation, `--read-only` disables) |
 | 9 | Images | per node: image count/size, running containers, **unused images**, airgap tarballs (`/var/lib/rancher/rke2/agent/images/*.tar[.zst\|.gz]`, `.txt`) and which tarball images are running / which running images are not in any tarball |
-| 0 | Security | sub-tabs `Rules` / `Node hardening` / `OS STIG`; reference releases shown in the header; **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap) and etcd content (secrets-at-rest encryption is proven by sampling a stored Secret, not just by the apiserver flag); `OS STIG` lists every rule of the DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG matched per node, evaluated from node facts (ComplianceAsCode templates + native checks; decision-only rules MANUAL with evidence) - **on demand only: nothing is collected until you press `S` on that sub-tab** |
+| 0 | Security | **opt-in: nothing is evaluated or shown until `Shift+S` runs the scan** (STIG/CIS rules from the API data plus, over SSH, the node hardening and OS STIG facts). Sub-tabs `Rules` / `Node hardening` / `OS STIG`; reference releases that apply to this cluster shown in the header (the RKE2 STIG only on rke2/k3s, the Rancher MCM STIG only on the cluster that runs Rancher); **STIG / CIS** rules evaluated from apiserver/controller-manager/scheduler/etcd flags, kubelet configz, PSA labels, RBAC, privileged/host-namespace pods, plus node facts (rke2 `profile: cis`, sysctls, etcd user, file modes/ownership, SELinux, swap) and etcd content (secrets-at-rest encryption is proven by sampling a stored Secret, not just by the apiserver flag); `OS STIG` lists every rule of the DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG matched per node, evaluated from node facts (ComplianceAsCode templates + native checks; decision-only rules MANUAL with evidence) |
 | = | RKE2 | **control-plane isolation** (taints, user pods on servers, requests vs allocatable, whether apiserver/etcd static pods carry `control-plane-resource-requests`);  `config.yaml`(.d) per node, data-dir, `server/manifests` (user vs bundled, HelmChartConfig contents), static pod manifests, audit/PSS policies, config drift between nodes |
 | - | Logs | journal of rke2-server/agent, kubelet, containerd, rancher-system-agent **classified** into normal-startup noise / warnings / errors with explanations (token mismatch, CA mismatch, cluster-id mismatch, NOSPACE, PLEG, pull failures, protect-kernel-defaults, …); persistent startup noise is escalated |
 
@@ -58,7 +58,7 @@ sparklines inline. History is kept in memory for the session (90 samples).
 
 **Node preflight** (per node, over SSH; "Preflight" table in the node detail, findings on the Overview): what stops rke2/k3s from restarting or the node from being re-provisioned although it looks healthy. Swap active or still in `/etc/fstab` (vs the kubelet's `failSwapOn`; rke2 writes `false`), fapolicyd enforcing without rules for the data-dir / `/opt/cni` / `/run/k3s` / `/var/lib/kubelet` or for the CSI host dirs (Longhorn `/var/lib/longhorn/engine-binaries`, Portworx `/opt/pwx/bin`, FlexVolume `volumeplugins`), stale `compiled.rules`, rule-file ordering vs the catch-all deny, today's `FANOTIFY` denials; auditd `admin_space_left_action`/`disk_full_action=halt|single` against the free space on the audit partition (`keep_logs` noted); `noexec` on the mount holding the data-dir or `/opt/cni`; password/account expiry and `pam_faillock` lockouts for the SSH user and root (from shadow ages, never the hash); `HTTP_PROXY` without a `NO_PROXY` covering the node IPs; on VMware VMs, `modprobe.d` disabling `cdrom`/`sr_mod`/`isofs` while cloud-init reads its NoCloud seed from `/dev/sr0` (Rancher's vSphere driver delivers user-data as an ISO), cloud-init errors, `open-vm-tools` missing; firewalld with Canal/Calico, NetworkManager without `unmanaged-devices`, `nm-cloud-setup`, iptables 1.8.0-1.8.4, SELinux enforcing without `rke2-selinux`, `ip_forward=0`, low inotify limits; and `registries.yaml`: each mirror endpoint and configs key is probed with `curl` using the configured credentials and TLS files (plus the bearer token realm), missing `ca_file`/`cert_file`/`key_file`, and configs keys that differ from the endpoint by port (credentials never sent).
 
-**Cloud provider & CSI** (Addons tab, findings under `cloud`/`storage`): which cloud-controller-manager runs (vSphere CPI, AWS, Azure, OpenStack, Harvester, or only rke2's embedded stub) and whether it initialised every node (`uninitialized` taint, providerID scheme - an `rke2://` providerID on a vSphere/AWS cluster means the stub won and the CSI cannot map the node), kubelet `--cloud-provider` vs the installed CPI, both controllers running at once; per CSI driver (vSphere, Trident, EBS/EFS, Azure, Cinder, Longhorn, NFS/SMB, Ceph, Harvester): controller and node-plugin health with crash reasons, nodes missing the CSINode registration, StorageClasses/PVs, attach/mount/provision failure events of the last hour, `TridentBackend` state (offline/failed), the vSphere CPI `vsphere.conf` (vCenters, datacenters, credentials secret present). Node side: AWS IMDSv2 reachable, vSphere `disk.EnableUUID` (wwn disks), vCenter SDK reachable from each node, Trident host prerequisites by backend type (iscsid, `find_multipaths no`, `mount.nfs`), cloud-init unit results, `status.json`/`result.json`/`cloud-init.log` errors. Accounts: the cloud-init provisioning user (Rancher's) must not carry a password under STIG aging and must keep NOPASSWD sudo and keys; the `etcd` user must be a system account (nologin, no password) owning the etcd data dir.
+**Cloud provider & CSI** (Addons tab, findings under `cloud`/`storage`): which cloud-controller-manager runs (vSphere CPI, AWS, Azure, OpenStack, Harvester, or only rke2's embedded stub) and whether it initialized every node (`uninitialized` taint, providerID scheme - an `rke2://` providerID on a vSphere/AWS cluster means the stub won and the CSI cannot map the node), kubelet `--cloud-provider` vs the installed CPI, both controllers running at once; per CSI driver (vSphere, Trident, EBS/EFS, Azure, Cinder, Longhorn, NFS/SMB, Ceph, Harvester): controller and node-plugin health with crash reasons, nodes missing the CSINode registration, StorageClasses/PVs, attach/mount/provision failure events of the last hour, `TridentBackend` state (offline/failed), the vSphere CPI `vsphere.conf` (vCenters, datacenters, credentials secret present). Node side: AWS IMDSv2 reachable, vSphere `disk.EnableUUID` (wwn disks), vCenter SDK reachable from each node, Trident host prerequisites by backend type (iscsid, `find_multipaths no`, `mount.nfs`), cloud-init unit results, `status.json`/`result.json`/`cloud-init.log` errors. Accounts: the cloud-init provisioning user (Rancher's) must not carry a password under STIG aging and must keep NOPASSWD sudo and keys; the `etcd` user must be a system account (nologin, no password) owning the etcd data dir.
 
 **Distributions**: rke2, k3s and kubeadm/upstream (kubeadm detected from the
 `kubeadm-config` ConfigMap or the `kube-apiserver-<node>` static pods; EKS,
@@ -74,8 +74,8 @@ across nodes.
 **Node hardening** (per node, over SSH): SELinux runtime vs `/etc/selinux/config`, AppArmor, FIPS (`/proc/sys/crypto/fips_enabled` vs `fips=1` in grub / Ubuntu Pro), fapolicyd, auditd (+ rule count), firewalld/ufw (runtime vs unit-file / `ufw.conf`), Secure Boot, kernel lockdown, crypto policy, pending reboot. Runtime/boot mismatches are findings. The node detail (Enter on Nodes) opens with a dashboard of gauges and this table.
 
 Keys: `Tab`/`Shift+Tab` (or `[`/`]`, number keys) switch tabs, `←`/`→` or `h`/`l` switch sub-tabs inside a tab, `j/k` move, `Enter` detail, `n` namespace,
-`/` filter, `a` problems-only, `m` hide manual STIG rules, `r` refresh, `R` full refresh (logs/images), `S` collect OS STIG facts (OS STIG sub-tab),
-`s` toggle SSH, `P` footprint (what khealth itself costs), `?` help, `q` quit.
+`/` filter, `a` problems-only, `m` hide manual STIG rules, `r` refresh, `R` full refresh (logs/images), `Shift+S` security scan (Security tab),
+`s` toggle SSH, `P` footprint (what khealth itself costs), `w` wrap long lines in a detail view, `?` help, `q` quit.
 
 ## Install / build
 
@@ -124,7 +124,7 @@ The same works for upstream kubeadm clusters (`admin.conf`, `pki/apiserver.crt`,
 `apiServer.certSANs` in `kubeadm-config`; `kubeadm certs renew apiserver`
 reissues) and for k3s (`k3s.yaml`, `systemctl restart k3s`).
 
-The RKE2 tab (labelled **Config** on non-rke2/k3s clusters) shows the same
+The RKE2 tab (labeled **Config** on non-rke2/k3s clusters) shows the same
 comparison live: the kubeconfig server (VIP vs single node), each control-plane
 node's configured SANs (`tls-san`, or kubeadm `certSANs` + `controlPlaneEndpoint`)
 against its serving certificate, and whether the kubeconfig host is in the
@@ -193,13 +193,14 @@ config, manifests, registries, slow hardening commands) and the heavy
 collection (journal, `crictl images`, tarball manifests) run every
 `heavy_every` refreshes or on `R` and are carried forward in between.
 Tarball manifests are cached by path/size/mtime so large `.tar.zst` files
-are only read once. The OS STIG facts (`sysctl -a`, package lists, `find`
-scans, config dumps) are never collected unless you go to Security / OS STIG
-and press `S`; later cycles reuse them until the next `S`.
+are only read once. The Security tab is opt-in: the STIG/CIS rules are not
+evaluated and the OS STIG facts (`sysctl -a`, package lists, `find` scans,
+config dumps) are not collected until you press `Shift+S` there; later cycles
+reuse the facts until the next `Shift+S`.
 [docs/REFRESH.md](docs/REFRESH.md) lists every remote call and its cadence.
 
 The tool is meant to be run against clusters that are already in trouble,
-so it measures and minimises its own footprint: probes run under
+so it measures and minimizes its own footprint: probes run under
 `renice`/`ionice`, API lists come from the apiserver watch cache in
 protobuf (no etcd quorum reads), a node whose probe is slow or still
 running is skipped rather than stacked, and `P` shows what the last cycles
@@ -255,7 +256,7 @@ Every step, command and check is listed in [docs/RESCUE.md](docs/RESCUE.md).
 Live-tested on three-server
 rke2 (RHEL 9 STIG, `profile: cis`) and three-node kubeadm (Ubuntu 24.04
 STIG) control planes: restore from any server, rejoin of a broken server
-(details and what was learnt in the *Tested* section of that document).
+(details and what was learned in the *Tested* section of that document).
 
 `X` on the etcd tab repairs the control plane over SSH (needs SSH
 collection on, `actions.enabled`, and an rke2, k3s or kubeadm control
@@ -374,12 +375,15 @@ partially reviewed 100% for a complete one.
 probes (`sysctl -a`, package lists, `auditctl -l`, `sshd -T`, a `find` sweep
 over the local filesystems and ~60 config-file dumps - a few seconds of CPU
 per node), so it never runs on its own: not at launch, not on `r`/`R`, not
-when SSH is re-enabled. Go to **Security → OS STIG** and press **`S`**; the
-status line shows how many nodes are being collected, the rows appear as
-each node answers, and the header shows how old the facts are. Later
-refresh cycles carry the facts forward; press `S` again to re-collect (for
-example after remediation). Until then the sub-tab is empty and the Node
-hardening column reads "not collected".
+when SSH is re-enabled. Go to the **Security** tab and press **`Shift+S`**;
+the tab shows a checklist with each node's progress through the four
+collection stages (system facts, file modes, accounts, filesystem sweep;
+a few seconds each) and the header the overall percent (`scan 58% 1/3 nodes`),
+the results appear when the last node answers, and the OS STIG header shows how old the facts
+are. Later refresh cycles carry the facts forward; press `Shift+S` again to
+re-collect (for example after remediation). Until the first scan the whole
+tab shows only the opt-in notice; without SSH the scan evaluates the API-side
+rules only and every sub-tab says so.
 
 The OS STIGs are evaluated in full: every rule of the matched release is
 listed on the `OS STIG` sub-tab. Checks come from [ComplianceAsCode](https://github.com/ComplianceAsCode/content)
@@ -391,7 +395,7 @@ rules ComplianceAsCode checks with hand-written OVAL (account database,
 PAM/sudo/login.defs, audit and rsyslog configuration, crypto policy, boot
 loader, a filesystem sweep, ...). Every rule of RHEL 8/9/10 and Ubuntu
 22.04/24.04 that ComplianceAsCode maps is evaluated (98-100%); results that
-need an organisational decision are MANUAL with the evidence and the STIG's
+need an organizational decision are MANUAL with the evidence and the STIG's
 own check text in the detail view. RHEL rebuilds (Rocky, Alma, CentOS Stream, Oracle)
 use the RHEL STIG of the same major; other distributions fall back to generic
 `OS-*` IDs. `Node hardening` keeps the per-node runtime/boot facts and a

@@ -31,7 +31,7 @@ type ObjRef struct {
 // Key returns kind/ns/name for de-duplication.
 func (r ObjRef) Key() string { return r.Kind + "/" + r.Namespace + "/" + r.Name }
 
-// CRDInfo summarises an API resource type: a CustomResourceDefinition or a
+// CRDInfo summarizes an API resource type: a CustomResourceDefinition or a
 // built-in resource discovered from the API server.
 type CRDInfo struct {
 	Name        string // plural.group (plural for core)

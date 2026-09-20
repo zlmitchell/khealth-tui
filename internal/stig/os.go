@@ -41,7 +41,7 @@ func (b *OSBenchmark) Table() *stigdata.Table {
 	return t
 }
 
-// Coverage summarises how the table's rules are evaluated.
+// Coverage summarizes how the table's rules are evaluated.
 func (b *OSBenchmark) Coverage() (total, automated int) {
 	t := b.Table()
 	if t == nil {
@@ -129,7 +129,7 @@ func (b *OSBenchmark) String() string { return b.Name + " " + b.Version }
 // only part of it was verified.
 func evalTemplated(info *nodeinfo.Info, rule stigdata.Rule) (Status, string) {
 	if !info.STIGProbed {
-		return Manual, "OS STIG facts not collected (S on the OS STIG sub-tab)"
+		return Manual, "OS STIG facts not collected (Shift+S on the Security tab)"
 	}
 	var fails, manuals, custom []string
 	passes, nas := 0, 0
@@ -316,7 +316,7 @@ var osChecks = []osCheck{
 			return Fail, "usbguard " + info.ServiceState("usbguard")
 		}
 	}},
-	{key: "timesync", id: "OS-timesync", cat: "II", title: "Clock synchronised with an authoritative time source (chrony)", fix: "install chrony, point it at the approved NTP servers (maxpoll 16) and enable chronyd", eval: func(info *nodeinfo.Info) (Status, string) {
+	{key: "timesync", id: "OS-timesync", cat: "II", title: "Clock synchronized with an authoritative time source (chrony)", fix: "install chrony, point it at the approved NTP servers (maxpoll 16) and enable chronyd", eval: func(info *nodeinfo.Info) (Status, string) {
 		chrony := info.ServiceState("chronyd")
 		if chrony == "" {
 			chrony = info.ServiceState("chrony")
@@ -324,18 +324,18 @@ var osChecks = []osCheck{
 		if info.NTPSynced != nil {
 			if *info.NTPSynced {
 				if chrony == "" && info.ServiceState("systemd-timesyncd") != "" {
-					return Manual, "synchronised via systemd-timesyncd (STIG expects chrony)"
+					return Manual, "synchronized via systemd-timesyncd (STIG expects chrony)"
 				}
 				return Pass, ""
 			}
-			return Fail, "clock not synchronised"
+			return Fail, "clock not synchronized"
 		}
 		if chrony == "active" {
 			return Pass, ""
 		}
 		return Manual, "timedatectl not available and chronyd not active"
 	}},
-	sysctlEq("aslr", "kernel.randomize_va_space", "2", "OS-aslr", "Address space layout randomisation enabled", "II"),
+	sysctlEq("aslr", "kernel.randomize_va_space", "2", "OS-aslr", "Address space layout randomization enabled", "II"),
 	sysctlEq("dmesg", "kernel.dmesg_restrict", "1", "OS-dmesg", "Kernel message buffer restricted to root", "III"),
 	sysctlEq("kptr", "kernel.kptr_restrict", "1", "OS-kptr", "Kernel pointer addresses hidden", "II"),
 	sysctlEq("ptrace", "kernel.yama.ptrace_scope", "1", "OS-ptrace", "ptrace restricted to descendant processes", "II"),
@@ -354,11 +354,19 @@ var osChecks = []osCheck{
 // Nodes without a benchmark get the generic osChecks under OS-* IDs.
 func (e *evaluator) osRules() {
 	g := "os"
-	nodes := e.sshNodes()
+	ni := func(n string) *nodeinfo.Info { return e.in.Nodes[n] }
+	// The whole OS group waits for the on-demand collection (Shift+S on
+	// the Security tab): with even a couple of rows from the regular probe the
+	// sub-tab draws a score and a table that read as a finished scan.
+	var nodes []string
+	for _, n := range e.sshNodes() {
+		if ni(n).STIGProbed {
+			nodes = append(nodes, n)
+		}
+	}
 	if len(nodes) == 0 {
 		return
 	}
-	ni := func(n string) *nodeinfo.Info { return e.in.Nodes[n] }
 
 	groups := map[*OSBenchmark][]string{}
 	for _, n := range nodes {
@@ -376,21 +384,6 @@ func (e *evaluator) osRules() {
 	})
 	for _, b := range order {
 		members := groups[b]
-		// The OS STIG facts are collected on demand; until a node has them
-		// its table rules are not emitted at all (the sub-tab explains how
-		// to collect), so nodes without facts drop out of the group here.
-		if b != nil {
-			var probed []string
-			for _, n := range members {
-				if ni(n).STIGProbed {
-					probed = append(probed, n)
-				}
-			}
-			if len(probed) == 0 {
-				continue
-			}
-			members = probed
-		}
 		if b == nil {
 			for _, c := range osChecks {
 				e.perNode(c.id, c.title, c.cat, g, c.fix, members, func(n string) (Status, string) { return c.eval(ni(n)) })

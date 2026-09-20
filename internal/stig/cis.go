@@ -162,7 +162,7 @@ func (e *evaluator) cisClusterRules() {
 			subjects = append(subjects, fmt.Sprintf("%s/%s (via %s)", sub.Kind, sub.Name, b.Name))
 		}
 	}
-	r := Result{ID: "CIS-5.1.1", Title: "cluster-admin role bindings minimised", Cat: "II", Group: g, Status: Pass, Detail: "only system:masters", Fix: "review and remove unnecessary cluster-admin bindings"}
+	r := Result{ID: "CIS-5.1.1", Title: "cluster-admin role bindings minimized", Cat: "II", Group: g, Status: Pass, Detail: "only system:masters", Fix: "review and remove unnecessary cluster-admin bindings"}
 	if len(subjects) > 0 {
 		r.Status = Manual
 		r.Detail = fmt.Sprintf("%d subject(s): %s", len(subjects), truncList(subjects, 6))

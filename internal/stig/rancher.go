@@ -208,7 +208,7 @@ func (e *evaluator) rancherRules() {
 
 	// V-257292 helm values: privateCA true, ingress.tls.source secret
 	{
-		r := Result{ID: "V-257292", Title: "Rancher installed with privateCA=true and ingress.tls.source=secret", Cat: "II", Group: g, Fix: "helm upgrade rancher ... --set privateCA=true --set ingress.tls.source=secret with tls-rancher-ingress and tls-ca secrets from the organisational CA"}
+		r := Result{ID: "V-257292", Title: "Rancher installed with privateCA=true and ingress.tls.source=secret", Cat: "II", Group: g, Fix: "helm upgrade rancher ... --set privateCA=true --set ingress.tls.source=secret with tls-rancher-ingress and tls-ca secrets from the organizational CA"}
 		var vals map[string]any
 		found := false
 		for i := range s.HelmReleases {

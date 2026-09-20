@@ -214,7 +214,7 @@ func TestRescueProgressView(t *testing.T) {
 		t.Errorf("done: %v %q", r.phase, a.status)
 	}
 	v = ansi.Strip(a.View())
-	for _, w := range []string{"FAILED after", "boom", "Afterwards", "esc closes"} {
+	for _, w := range []string{"FAILED after", "boom", "Afterward", "esc closes"} {
 		if !strings.Contains(v, w) {
 			t.Errorf("done view lacks %q:\n%s", w, v)
 		}

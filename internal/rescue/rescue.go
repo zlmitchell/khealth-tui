@@ -43,7 +43,7 @@ type Runner interface {
 	Run(ctx context.Context, host, script string) sshrun.Result
 }
 
-// Kind is the control-plane flavour; it decides every command.
+// Kind is the control-plane flavor; it decides every command.
 type Kind string
 
 const (
@@ -168,7 +168,7 @@ type Plan struct {
 
 	Warnings []string // from Preflight
 	Skipped  []Node   // Others that failed preflight: neither stopped nor rejoined
-	Notes    []string // what to know afterwards (backup locations, drop-ins)
+	Notes    []string // what to know afterward (backup locations, drop-ins)
 
 	runner Runner
 	mu     sync.Mutex
@@ -235,7 +235,7 @@ var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9_./:@%=+,-]`)
 func clean(s string) string { return unsafeChars.ReplaceAllString(s, "") }
 
 // render returns the common prelude plus the named script with every
-// __KEY__ placeholder substituted (values sanitised to a safe character set).
+// __KEY__ placeholder substituted (values sanitized to a safe character set).
 func (p *Plan) render(name string, n Node, vars map[string]string) string {
 	common, _ := scripts.ReadFile("scripts/common.sh")
 	body, _ := scripts.ReadFile("scripts/" + name + ".sh")
@@ -791,7 +791,7 @@ func (p *Plan) targetUp(ctx context.Context, s *Step, t Node) error {
 		return err
 	}
 	p.logLine(s, "second cluster-reset needed: "+nr.reason)
-	p.note("a second cluster-reset was needed on " + t.Name + " (" + nr.reason + "): the restored member did not come up as a one-member cluster, a known rke2 behaviour of the combined restore + reset")
+	p.note("a second cluster-reset was needed on " + t.Name + " (" + nr.reason + "): the restored member did not come up as a one-member cluster, a known rke2 behavior of the combined restore + reset")
 	if _, err := p.exec(ctx, s, t, "stop", nil, 8*time.Minute, "stopped=ok"); err != nil {
 		return err
 	}
@@ -961,7 +961,7 @@ func (p *Plan) Run(ctx context.Context, events chan<- Event) {
 	emit(-1, true, failed)
 }
 
-// finishNotes records what the operator needs to know afterwards.
+// finishNotes records what the operator needs to know afterward.
 func (p *Plan) finishNotes(failed error) {
 	touched := append([]Node{p.Target}, p.Others...)
 	if p.Rejoin {

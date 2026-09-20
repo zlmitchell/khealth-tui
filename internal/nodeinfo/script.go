@@ -65,9 +65,9 @@ func Script(o Options) string {
 	}
 	b.WriteString(strings.ReplaceAll(pf, "__VCENTERS__", strings.Join(vcs, " ")))
 	if o.OSStig {
-		b.WriteString(osStigScript)
-		b.WriteString(stigdata.ProbeScript())
-		b.WriteString(osStigFactsScript)
+		for _, st := range stigStages {
+			b.WriteString(st.script())
+		}
 	}
 	if o.Heavy {
 		h := strings.ReplaceAll(heavyScript, "__LINES__", fmt.Sprint(lines))
@@ -93,6 +93,63 @@ var osStigScript string
 
 //go:embed scripts/os_stig_facts.sh
 var osStigFactsScript string
+
+//go:embed scripts/os_stig_sweep.sh
+var osStigSweepScript string
+
+// STIGStage is one slice of the OS STIG collection. The Security scan
+// (Shift+S) runs the stages one after the other per node, each as its own
+// script over SSH, so the checklist can show how far every node is and the
+// filesystem sweep (the slow part on a big node) gets a timeout of its own
+// instead of holding the sysctl/package/audit facts hostage. Options.OSStig
+// still concatenates all of them into one script (perfbench, headless tools).
+type STIGStage struct {
+	Name   string // system | files | accounts | sweep
+	Label  string // what the stage collects, for the checklist
+	Slow   bool   // may run for minutes on a large filesystem: gets the long probe timeout
+	script func() string
+}
+
+var stigStages = []STIGStage{
+	{Name: "system", Label: "sysctl -a, packages, units, mounts, sshd -T, audit rules, modules, boot args", script: func() string { return osStigScript }},
+	{Name: "files", Label: "file modes and owners, directory scans, config dumps", script: stigdata.ProbeScript},
+	{Name: "accounts", Label: "crypto policy, firewall, AIDE, GRUB, accounts and password ages", script: func() string { return osStigFactsScript }},
+	{Name: "sweep", Label: "filesystem sweep: world-writable, unowned, home directories, audit logs", Slow: true, script: func() string { return osStigSweepScript }},
+}
+
+// STIGStages lists the stages in run order.
+func STIGStages() []STIGStage {
+	out := make([]STIGStage, len(stigStages))
+	copy(out, stigStages)
+	return out
+}
+
+// STIGStageScript returns the script for one stage: the base prelude
+// (sec/mask helpers, data-dir detection), the stage's sections and the
+// perf footer. "" for an unknown stage.
+func STIGStageScript(name string) string {
+	for _, st := range stigStages {
+		if st.Name != name {
+			continue
+		}
+		var b strings.Builder
+		b.WriteString(scriptPrelude())
+		b.WriteString(st.script())
+		b.WriteString(perf.Footer)
+		b.WriteString("echo '===END'\n")
+		return b.String()
+	}
+	return ""
+}
+
+// scriptPrelude is the head of base.sh up to its first section: the sec
+// and mask helpers every script needs, defined once in base.sh.
+func scriptPrelude() string {
+	if i := strings.Index(baseScript, "sec DATADIR"); i > 0 {
+		return baseScript[:i]
+	}
+	return baseScript
+}
 
 //go:embed scripts/heavy.sh
 var heavyScript string

@@ -4,7 +4,7 @@
 # and kube-scheduler static pod manifests so kubelet stops the pods and does
 # not bring them back (the controllers too: left running they would reconnect
 # to the restored apiserver with caches and watches from resource versions
-# newer than the restored data). Any etcd container that lingers afterwards
+# newer than the restored data). Any etcd container that lingers afterward
 # is stopped explicitly.
 case "$KIND" in
   rke2|k3s)

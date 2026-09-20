@@ -526,7 +526,7 @@ func (a *App) handleRescueKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			a.rescue = nil
 			a.overlay = ovNone
-			a.setStatus("rescue cancelled, nothing was changed")
+			a.setStatus("rescue canceled, nothing was changed")
 		case "enter":
 			if strings.TrimSpace(strings.ToLower(r.input.Value())) != rescueWord {
 				a.setStatus("type " + rescueWord + " exactly to begin (esc cancels)")
@@ -929,7 +929,7 @@ func (a *App) renderRescueConfirm(w int) (string, []string) {
 	if len(others) == 0 {
 		others = []string{"(none)"}
 	}
-	add(kv("rejoin afterwards", strings.Join(others, ", ")))
+	add(kv("rejoin afterward", strings.Join(others, ", ")))
 	for _, s := range p.Skipped {
 		add(kv("left out", styleCrit.Render(s.Name+": "+s.Facts.Err)))
 	}
@@ -1059,7 +1059,7 @@ func (a *App) renderRescueProgress(w int) (string, []string) {
 		}
 	}
 	if r.phase == rescueDone {
-		add("", styleBold.Render("Afterwards"))
+		add("", styleBold.Render("Afterward"))
 		for _, n := range r.plan.Notes {
 			add(wrap("  - "+n, w)...)
 		}

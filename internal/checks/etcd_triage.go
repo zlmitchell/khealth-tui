@@ -38,7 +38,7 @@ type etcdTriage struct {
 	logs    map[string]int // journal pattern counts
 }
 
-// etcdQuorum summarises the cluster-wide picture for the steps text.
+// etcdQuorum summarizes the cluster-wide picture for the steps text.
 type etcdQuorum struct {
 	total, healthy int
 	haveMembers    bool // a member list exists (else total is the node count)
@@ -184,7 +184,7 @@ func triageEtcd(in Input, add func(Finding)) map[string]bool {
 			Hint:    "etcdctl member remove " + m.ID,
 			Steps: []string{
 				"Confirm: etcdctl member list -w table, and kubectl get nodes - the member's peer URL " + strings.Join(m.PeerURLs, ",") + " belongs to no node",
-				"A stale member counts towards quorum: with it present, one more real failure can take the cluster down",
+				"A stale member counts toward quorum: with it present, one more real failure can take the cluster down",
 				"Remove it on a healthy member: etcdctl member remove " + m.ID,
 				"rke2: if the node was removed with kubectl delete node while rke2-server was down, also clear the etcd node annotation before re-adding a node with that name",
 				q.String(),
@@ -361,7 +361,7 @@ func triageClusterDown(in Input, recs []*etcdTriage, members []etcd.Member, q et
 		}
 	}
 	f.Steps = append(f.Steps, rt.resetSteps(target, targetIP, latestSnapshotPath(in, recs), others)...)
-	f.Steps = append(f.Steps, "Afterwards: etcdctl endpoint status --cluster -w table must show one leader and matching raft indexes; take a fresh snapshot: "+rt.snapshotSave())
+	f.Steps = append(f.Steps, "Afterward: etcdctl endpoint status --cluster -w table must show one leader and matching raft indexes; take a fresh snapshot: "+rt.snapshotSave())
 	return f
 }
 

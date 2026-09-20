@@ -34,7 +34,7 @@ sec UPTIME; cat /proc/uptime
 sec LOAD; cat /proc/loadavg
 sec NPROC; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo
 sec STAT1; head -1 /proc/stat
-# CPU utilisation is the delta between this and the previous probe's
+# CPU utilization is the delta between this and the previous probe's
 # counters (Info.CPUFromPrev): no sleep on the node. Only the first contact
 # has nothing to diff against and samples over one second here.
 if [ "__CPUSAMPLE__" = 1 ]; then sleep 1; sec STAT2; head -1 /proc/stat; fi

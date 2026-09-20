@@ -28,8 +28,8 @@ var (
 	styleBold   = lipgloss.NewStyle().Bold(true)
 	styleTitle  = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	styleHeader = lipgloss.NewStyle().Bold(true).Foreground(colorDim).Underline(true)
-	// selection: a background band rather than reverse video so coloured cells
-	// (severity text, bars, sparklines) keep their colours on the selected row
+	// selection: a background band rather than reverse video so colored cells
+	// (severity text, bars, sparklines) keep their colors on the selected row
 	colorSelBg  = lipgloss.AdaptiveColor{Light: "#d0d7de", Dark: "#30363d"}
 	styleSel    = lipgloss.NewStyle().Background(colorSelBg).Bold(true)
 	colorTabBar = lipgloss.AdaptiveColor{Light: "#e4e6ea", Dark: "#21262d"}
@@ -41,7 +41,7 @@ var (
 	styleTabOff = lipgloss.NewStyle().Foreground(colorTabTxt).Background(colorTabBar)
 	styleTabKey = lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Background(colorTabBar)
 	// sub-tab strip: same band treatment as the main strip, one shade lighter,
-	// active item inverted in the info colour so the two levels read differently
+	// active item inverted in the info color so the two levels read differently
 	colorSubBar    = lipgloss.AdaptiveColor{Light: "#f0f2f5", Dark: "#161b22"}
 	styleSubBar    = lipgloss.NewStyle().Background(colorSubBar)
 	styleSubOn     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Background(colorInfo).Padding(0, 1)
@@ -173,7 +173,7 @@ func pad(s string, w int) string {
 	return s + strings.Repeat(" ", w-sw)
 }
 
-// selectRow highlights a (possibly coloured) row end to end. Inner colour
+// selectRow highlights a (possibly colored) row end to end. Inner color
 // resets would cancel the selection band part way through, so the band is
 // re-applied after each one.
 func selectRow(s string, width int) string {

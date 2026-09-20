@@ -65,7 +65,7 @@ current-context: test
 }
 
 // key sends one key through Update (the real entry point, not handleKey)
-// and renders the frame afterwards, so every state a key can leave the app
+// and renders the frame afterward, so every state a key can leave the app
 // in is also drawn once.
 func key(t *testing.T, a *App, k string) {
 	t.Helper()
@@ -325,7 +325,7 @@ func TestDriveWorkloadsAndHelm(t *testing.T) {
 // TestUpdateMessages feeds every asynchronous result message through
 // Update: a new snapshot (nodes gone, CRD counts reset), node and etcd
 // probe results (merged, pending cleared), S3, Helm, exec and CRD messages,
-// stale sequence numbers (ignored) and the apiserver failover outcome.
+// stale sequence / generation numbers (ignored) and the apiserver failover outcome.
 func TestUpdateMessages(t *testing.T) {
 	a := newDriveApp(t)
 	a.Update(tea.WindowSizeMsg{Width: 140, Height: 40})
@@ -334,14 +334,14 @@ func TestUpdateMessages(t *testing.T) {
 
 	// stale messages are ignored
 	stale := a.seq + 1
-	a.Update(nodeMsg{seq: stale, info: &nodeinfo.Info{Node: "cp-1", Err: errors.New("stale")}})
+	a.Update(nodeMsg{gen: a.gen + 1, info: &nodeinfo.Info{Node: "cp-1", Err: errors.New("stale")}})
 	if a.nodes["cp-1"].Err != nil || !a.pending["cp-1"] {
 		t.Errorf("a stale nodeMsg must be ignored")
 	}
-	a.Update(etcdMsg{seq: stale, probe: &etcd.Probe{Node: "cp-1"}})
-	a.Update(s3CheckMsg{seq: stale})
+	a.Update(etcdMsg{gen: a.gen + 1, probe: &etcd.Probe{Node: "cp-1"}})
+	a.Update(s3CheckMsg{gen: a.gen + 1})
 	a.Update(crdCountMsg{seq: stale, crds: []k8s.CRDInfo{{Name: "x"}}})
-	a.Update(etcdExecMsg{seq: stale, probe: &etcd.Probe{Node: "cp-1"}})
+	a.Update(etcdExecMsg{gen: a.gen + 1, probe: &etcd.Probe{Node: "cp-1"}})
 	a.Update(tickMsg{seq: stale})
 	if a.crdCounts != nil || a.etcdExec != nil {
 		t.Errorf("stale CRD / exec messages must be ignored")
@@ -349,23 +349,23 @@ func TestUpdateMessages(t *testing.T) {
 
 	// live probe results
 	info := nodeinfo.Parse("cp-1", "10.0.0.1", nodeSample, time.Now())
-	a.Update(nodeMsg{seq: a.seq, info: info, opts: nodeinfo.Options{}})
+	a.Update(nodeMsg{gen: a.gen, info: info, opts: nodeinfo.Options{}})
 	if a.pending["cp-1"] {
 		t.Errorf("nodeMsg should clear pending")
 	}
 	probe := etcd.Parse("cp-1", etcdSample)
-	a.Update(etcdMsg{seq: a.seq, probe: probe})
+	a.Update(etcdMsg{gen: a.gen, probe: probe})
 	if a.etcdPend["cp-1"] {
 		t.Errorf("etcdMsg should clear pending")
 	}
 	probe2 := etcd.Parse("cp-1", etcdSample)
 	probe2.RKE2Config = map[string]string{"etcd-s3-config-secret": "other-secret"}
-	a.Update(etcdMsg{seq: a.seq, probe: probe2})
+	a.Update(etcdMsg{gen: a.gen, probe: probe2})
 	a.Update(s3Msg{info: &k8s.S3SecretInfo{Name: "other-secret", Found: true, Endpoint: "s3.example.com", Bucket: "b"}})
 	if a.s3 == nil || a.s3.Name != "other-secret" {
 		t.Errorf("s3Msg should replace the S3 info")
 	}
-	a.Update(s3CheckMsg{seq: a.seq, check: etcd.S3Check{Node: "cp-1", OK: true}})
+	a.Update(s3CheckMsg{gen: a.gen, check: etcd.S3Check{Node: "cp-1", OK: true}})
 	if _, ok := a.s3Reach["cp-1"]; !ok {
 		t.Errorf("s3CheckMsg should record the check")
 	}
@@ -373,7 +373,7 @@ func TestUpdateMessages(t *testing.T) {
 	if a.helmLatest["default/web"].Version != "100.0.0" {
 		t.Errorf("helmMsg should replace the latest versions")
 	}
-	a.Update(etcdExecMsg{seq: a.seq, probe: probe})
+	a.Update(etcdExecMsg{gen: a.gen, probe: probe})
 	if a.etcdExec == nil {
 		t.Errorf("etcdExecMsg should be kept")
 	}

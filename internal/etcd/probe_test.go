@@ -173,7 +173,7 @@ func TestParseNoEtcd(t *testing.T) {
 func TestScriptSanitises(t *testing.T) {
 	s := Script(config.Etcd{BackupDirs: []string{"/backup/etcd", "/bad'; rm -rf /"}, Endpoint: "https://10.0.0.5:2379"}, false, true)
 	if !strings.Contains(s, "EXTRA_DIRS='/backup/etcd /badrm-rf/'") {
-		t.Errorf("dirs not sanitised: %s", s[:200])
+		t.Errorf("dirs not sanitized: %s", s[:200])
 	}
 	if !strings.Contains(s, "EP_OVERRIDE='https://10.0.0.5:2379'") {
 		t.Errorf("endpoint override missing")

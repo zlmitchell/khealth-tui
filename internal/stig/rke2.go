@@ -17,9 +17,19 @@ import (
 
 func (e *evaluator) rke2Rules() {
 	g := "node"
-	nodes := e.sshNodes()
 	ni := func(n string) *nodeinfo.Info { return e.in.Nodes[n] }
 	isRKE := func(n string) bool { d := ni(n).Dist; return d == "rke2" || d == "k3s" }
+	// The RKE2 STIG only applies where rke2/k3s runs: on a kubeadm cluster
+	// it is left out entirely rather than listed as N/A on every node.
+	var nodes []string
+	for _, n := range e.sshNodes() {
+		if isRKE(n) {
+			nodes = append(nodes, n)
+		}
+	}
+	if len(nodes) == 0 {
+		return
+	}
 
 	e.perNode("V-254555", "rke2 CIS/STIG profile enabled (profile: cis)", "II", g, "config.yaml: profile: cis (requires etcd user + sysctls before restart); STIG also expects audit-policy-file and audit-log-mode=blocking-strict", nodes, func(n string) (Status, string) {
 		if !isRKE(n) {

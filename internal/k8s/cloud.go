@@ -14,7 +14,7 @@ import (
 
 // Cloud provider integration (CPI / cloud-controller-manager) and CSI
 // drivers: which ones are installed, whether they run, whether the nodes
-// were initialised by them and whether volumes attach. Everything here is
+// were initialized by them and whether volumes attach. Everything here is
 // derived from the snapshot except TridentBackends and VSphereConf, which
 // Fetch reads (one CR list, one ConfigMap).
 

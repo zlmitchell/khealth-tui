@@ -10,7 +10,7 @@ SNAP='__SNAP__'; NAME='__NAME__'; PEER='__PEER__'; IMAGE='__IMAGE__'
 TARGET=$DATADIR; TMP=
 if [ -d "$DATADIR" ]; then
   # the data dir must not exist for the restore; on a mount point restore
-  # inside it and move the member directory up afterwards
+  # inside it and move the member directory up afterward
   TMP=$DATADIR/.rescue-restore-$STAMP; TARGET=$TMP; rm -rf "$TMP"
 fi
 SNAPDIR=$(dirname "$SNAP"); PARENT=$(dirname "$DATADIR")

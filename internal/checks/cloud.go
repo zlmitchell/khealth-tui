@@ -11,7 +11,7 @@ import (
 
 // evalCloud raises the cloud provider (CPI / cloud-controller-manager) and
 // CSI findings from the API snapshot: is the controller running, did it
-// initialise every node, do volumes attach, are the Trident backends online,
+// initialize every node, do volumes attach, are the Trident backends online,
 // is the vSphere CPI config complete. Node-side facts (kubelet
 // --cloud-provider, IMDS, disk.EnableUUID, vCenter reachability) are
 // cross-checked in evalCloudNode.
@@ -30,11 +30,11 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 			continue
 		}
 		if !c.OK() {
-			add(SevCrit, "cloud", c.Namespace+"/"+c.Name, fmt.Sprintf("%s not healthy: %d/%d ready%s - nodes are not initialised and cloud resources (node lifecycle, zones, load balancers) are not reconciled", c.Label, c.Ready, c.Desired, problemSuffix(c.Problem)), "kubectl -n "+c.Namespace+" logs "+c.Kind+"/"+c.Name+"; check the cloud credentials secret and API reachability from the nodes")
+			add(SevCrit, "cloud", c.Namespace+"/"+c.Name, fmt.Sprintf("%s not healthy: %d/%d ready%s - nodes are not initialized and cloud resources (node lifecycle, zones, load balancers) are not reconciled", c.Label, c.Ready, c.Desired, problemSuffix(c.Problem)), "kubectl -n "+c.Namespace+" logs "+c.Kind+"/"+c.Name+"; check the cloud credentials secret and API reachability from the nodes")
 		}
 	}
 	if stub != nil && external {
-		add(SevWarn, "cloud", "kube-system/cloud-controller-manager", "rke2's embedded cloud-controller runs alongside the "+ci.Provider+" cloud controller: both initialise nodes, and a node the stub reaches first gets an rke2:// providerID the "+ci.Provider+" CPI/CSI cannot use", "config.yaml on every server: disable-cloud-controller: true (Rancher sets it when the cloud provider is selected); restart rke2-server")
+		add(SevWarn, "cloud", "kube-system/cloud-controller-manager", "rke2's embedded cloud-controller runs alongside the "+ci.Provider+" cloud controller: both initialize nodes, and a node the stub reaches first gets an rke2:// providerID the "+ci.Provider+" CPI/CSI cannot use", "config.yaml on every server: disable-cloud-controller: true (Rancher sets it when the cloud provider is selected); restart rke2-server")
 	}
 
 	// ---- nodes ----
@@ -53,11 +53,11 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 			default:
 				hint += "check the " + ci.Provider + " cloud controller logs"
 			}
-			add(SevCrit, "cloud", n.Name, "node still carries the node.cloudprovider.kubernetes.io/uninitialized taint: the cloud controller ("+ci.Provider+") has not initialised it, so no workload pods schedule there", hint)
+			add(SevCrit, "cloud", n.Name, "node still carries the node.cloudprovider.kubernetes.io/uninitialized taint: the cloud controller ("+ci.Provider+") has not initialized it, so no workload pods schedule there", hint)
 		case external && n.ProviderID == "":
 			add(SevWarn, "cloud", n.Name, "node has no providerID although the "+ci.Provider+" cloud controller is installed: the kubelet did not start with --cloud-provider=external, so the CPI never adopted it (no zone labels, CSI cannot map it to an instance)", cv.CloudProvider(ci.Provider)+"; providerID is set once at registration")
 		case external && (scheme == "rke2" || scheme == "k3s"):
-			add(SevCrit, "cloud", n.Name, fmt.Sprintf("node was initialised by the embedded %s cloud-controller (providerID %s) instead of the %s CPI: the %s CSI cannot map it to its instance, so volumes never attach on this node", scheme, n.ProviderID, ci.Provider, ci.Provider), "providerID is immutable: set disable-cloud-controller: true and cloud-provider-name in config.yaml, then delete the Node object and restart rke2 on it to re-register")
+			add(SevCrit, "cloud", n.Name, fmt.Sprintf("node was initialized by the embedded %s cloud-controller (providerID %s) instead of the %s CPI: the %s CSI cannot map it to its instance, so volumes never attach on this node", scheme, n.ProviderID, ci.Provider, ci.Provider), "providerID is immutable: set disable-cloud-controller: true and cloud-provider-name in config.yaml, then delete the Node object and restart rke2 on it to re-register")
 		case external && scheme != "" && scheme != providerScheme(ci.Provider) && providerScheme(ci.Provider) != "":
 			add(SevWarn, "cloud", n.Name, fmt.Sprintf("providerID %s does not belong to the %s cloud controller", n.ProviderID, ci.Provider), "")
 		}

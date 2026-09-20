@@ -369,7 +369,7 @@ func TestRunContext(t *testing.T) {
 	if !errors.Is(res.Err, context.DeadlineExceeded) || time.Since(start) > time.Second {
 		t.Errorf("cancel: %v after %s", res.Err, time.Since(start))
 	}
-	// the semaphore honours a cancelled context too
+	// the semaphore honors a canceled context too
 	r.sem <- struct{}{}
 	done, cancel2 := context.WithCancel(context.Background())
 	cancel2()

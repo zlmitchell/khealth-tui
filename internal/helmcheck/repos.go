@@ -29,7 +29,7 @@ type Repo struct {
 }
 
 // HelmRepositoriesFile returns the helm CLI's repositories.yaml path,
-// honouring the same environment variables helm does.
+// honoring the same environment variables helm does.
 func HelmRepositoriesFile() string {
 	if v := os.Getenv("HELM_REPOSITORY_CONFIG"); v != "" {
 		return v
@@ -114,7 +114,7 @@ func parseHelmRepos(b []byte) ([]Repo, error) {
 	return out, nil
 }
 
-// httpClient builds a client honouring the repo's TLS options; the shared
+// httpClient builds a client honoring the repo's TLS options; the shared
 // default client when it has none.
 func (r Repo) httpClient(timeout time.Duration, def *http.Client) *http.Client {
 	if r.CAFile == "" && r.CertFile == "" && r.KeyFile == "" && !r.Insecure {

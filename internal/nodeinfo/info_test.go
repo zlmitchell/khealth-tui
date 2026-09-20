@@ -287,7 +287,7 @@ func TestScriptOptions(t *testing.T) {
 	}
 	s = Script(Options{Heavy: true, LogSince: "'; rm -rf /"})
 	if !strings.Contains(s, "--since '-24h'") {
-		t.Errorf("unsafe since not sanitised")
+		t.Errorf("unsafe since not sanitized")
 	}
 	if strings.Contains(Script(Options{}), "===JOURNAL") {
 		t.Errorf("light script should not include journal")
@@ -318,6 +318,81 @@ func TestOSStigOptionAndMerge(t *testing.T) {
 	fresh.MergeSTIG(first)
 	if fresh.STIGCollected == first.STIGCollected {
 		t.Errorf("a re-collection must keep its own facts")
+	}
+}
+
+// TestSTIGStages: the four stage scripts carry their own sections plus the
+// helpers and footer; the one-script probe is their concatenation; stage
+// output merges into an Info without claiming the facts complete until the
+// caller adopts them.
+func TestSTIGStages(t *testing.T) {
+	want := map[string][]string{
+		"system":   {"sec SYSCTLALL", "sec PKGS", "sec AUDITRULES", "sec GRUBCFG"},
+		"files":    {"sec STIGSTAT", "sec STIGVIOL", "sec STIGFILES"},
+		"accounts": {"sec STIGCMD", "sec PASSWD", "sec SHADOWMETA"},
+		"sweep":    {"sec STIGSWEEP"},
+	}
+	stages := STIGStages()
+	if len(stages) != 4 {
+		t.Fatalf("stages: %+v", stages)
+	}
+	full := Script(Options{OSStig: true})
+	for _, st := range stages {
+		s := STIGStageScript(st.Name)
+		for _, sec := range want[st.Name] {
+			if !strings.Contains(s, sec) {
+				t.Errorf("stage %s lacks %s", st.Name, sec)
+			}
+			if !strings.Contains(full, sec) {
+				t.Errorf("one-script probe lacks %s", sec)
+			}
+		}
+		for other, secs := range want {
+			if other == st.Name {
+				continue
+			}
+			for _, sec := range secs {
+				if strings.Contains(s, sec) {
+					t.Errorf("stage %s carries %s of stage %s", st.Name, sec, other)
+				}
+			}
+		}
+		for _, need := range []string{"sec() {", "mask() {", "sec PERF", "echo '===END'"} {
+			if !strings.Contains(s, need) {
+				t.Errorf("stage %s lacks %q", st.Name, need)
+			}
+		}
+		if strings.Contains(s, "sec HOST") || strings.Contains(s, "sec KUBELET") {
+			t.Errorf("stage %s carries the base probe", st.Name)
+		}
+	}
+	if STIGStageScript("nope") != "" {
+		t.Errorf("unknown stage must yield no script")
+	}
+	if !stages[3].Slow || stages[0].Slow {
+		t.Errorf("only the sweep is slow: %+v", stages)
+	}
+
+	info := &Info{Node: "n1"}
+	cost := ParseSTIGStage(info, "===SYSCTLALL\nkernel.dmesg_restrict = 1\n===PKGS\naide\n===PERF\n1.5 1.0 0.5 3/400 999\n0m0.020s 0m0.010s\n0m0.800s 0m0.300s\n===END\n")
+	ParseSTIGStage(info, "===STIGSTAT\n644|root|root|0|0|regular file|/etc/passwd\n===END\n")
+	ParseSTIGStage(info, "===STIGCMD\nefi=1\n===PASSWD\nroot:x:0:0:root:/root:/bin/bash\n===END\n")
+	if info.STIGProbed || info.SysctlAll["kernel.dmesg_restrict"] != "1" || !info.Packages["aide"] || info.STIGStat["/etc/passwd"].Mode != "644" || info.STIGCmd["efi"] != "1" || len(info.Passwd) != 1 {
+		t.Fatalf("stage merge: %+v", info)
+	}
+	if !cost.Parsed || cost.CPU() < 1 {
+		t.Errorf("stage cost not parsed: %+v", cost)
+	}
+	// a repeated stage replaces its own sections only
+	ParseSTIGStage(info, "===PKGS\nsudo\n===END\n")
+	if info.Packages["aide"] || !info.Packages["sudo"] || info.SysctlAll["kernel.dmesg_restrict"] != "1" {
+		t.Errorf("repeat merge: %+v", info.Packages)
+	}
+	at := time.Now()
+	node := Parse("n1", "h", "===HOST\nn1\n===END\n", at)
+	node.AdoptSTIG(info, at)
+	if !node.STIGProbed || node.STIGCollected != at || node.STIGCmd["efi"] != "1" || !node.Packages["sudo"] {
+		t.Errorf("adopt: %+v", node)
 	}
 }
 

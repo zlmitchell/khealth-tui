@@ -502,7 +502,7 @@ func (e *evaluator) clusterRules() {
 	r = Result{ID: "V-254800-ns", Title: "Namespaces enforce a Pod Security Standard", Cat: "I", Group: g, Status: Pass, Fix: "label namespaces: pod-security.kubernetes.io/enforce=restricted (or baseline), or use a cluster-wide admission config"}
 	switch {
 	case len(noPSA) == 0:
-		r.Detail = "all user namespaces labelled"
+		r.Detail = "all user namespaces labeled"
 	case psaCluster:
 		r.Status = Manual
 		r.Detail = fmt.Sprintf("cluster-wide PSA config present; %d namespace(s) rely on the default: %s", len(noPSA), truncList(noPSA, 6))

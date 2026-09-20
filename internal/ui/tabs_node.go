@@ -109,7 +109,7 @@ func (a *App) nodeDetail(name string) (string, []string) {
 	if hasSSH {
 		ntp := "unknown"
 		if ni.NTPSynced != nil {
-			ntp = okText(*ni.NTPSynced, "synchronised", "NOT synchronised")
+			ntp = okText(*ni.NTPSynced, "synchronized", "NOT synchronized")
 		}
 		facts = append(facts,
 			[]string{"hostname / dist", ni.Hostname + "  " + ni.Dist + "  " + styleDim.Render("data-dir "+ni.DataDir)},

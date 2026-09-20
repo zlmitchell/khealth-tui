@@ -57,7 +57,7 @@ func (a *App) beginCycle(heavy bool) {
 	f.cur = rec
 }
 
-// endCycle finalises the current record (local CPU delta, heap) and appends
+// endCycle finalizes the current record (local CPU delta, heap) and appends
 // it to the history and the log.
 func (a *App) endCycle() {
 	f := &a.fp

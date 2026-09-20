@@ -192,7 +192,7 @@ type GroupEntry struct {
 }
 
 // ShadowMeta is the non-secret part of an /etc/shadow entry: the hash prefix
-// ("$6$"), "locked" or "empty", and the password ageing fields.
+// ("$6$"), "locked" or "empty", and the password aging fields.
 type ShadowMeta struct {
 	Hash                       string
 	MinDays, MaxDays, Inactive string
@@ -446,7 +446,11 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 			}
 		}
 	}
-	parseOSStig(info, secs)
+	if _, ok := secs["SYSCTLALL"]; ok {
+		// the one-script probe (Options.OSStig): every stage in one answer
+		parseOSStig(info, secs)
+		info.STIGProbed, info.STIGCollected = true, info.Collected
+	}
 	parsePreflight(info, secs)
 	info.ConfigFiles = parseDumps(secs["RKE2CFG"])
 	info.ExtraFiles = parseDumps(secs["RKE2EXTRA"])
@@ -784,118 +788,178 @@ func parseSystemdTime(s string) time.Time {
 }
 
 // parseOSStig reads the OS STIG probe sections (see script.go osStigScript
-// and stigdata.ProbeScript).
+// and stigdata.ProbeScript) that are present in secs, leaving the others
+// untouched: the one-script probe carries all of them, a scan stage
+// (ParseSTIGStage) only its own. STIGProbed is the caller's call - the
+// facts are only complete when every stage has landed.
 func parseOSStig(info *Info, secs map[string]string) {
-	if _, ok := secs["SYSCTLALL"]; !ok {
-		return
-	}
-	info.STIGProbed = true
-	info.STIGCollected = info.Collected
-	info.SysctlAll = map[string]string{}
-	for _, l := range nonEmpty(secs["SYSCTLALL"]) {
-		if k, v, ok := strings.Cut(l, "="); ok {
-			info.SysctlAll[strings.TrimSpace(k)] = strings.TrimSpace(v)
-		}
-	}
-	info.Packages = map[string]bool{}
-	for _, l := range nonEmpty(secs["PKGS"]) {
-		info.Packages[strings.TrimSpace(l)] = true
-	}
-	info.UnitFiles = map[string]string{}
-	for _, l := range nonEmpty(secs["UNITFILES"]) {
-		if f := strings.Fields(l); len(f) >= 2 {
-			info.UnitFiles[f[0]] = f[1]
-		}
-	}
-	info.UnitStates = map[string]UnitState{}
-	for _, l := range nonEmpty(secs["UNITSALL"]) {
-		if f := strings.Fields(l); len(f) >= 4 {
-			info.UnitStates[f[0]] = UnitState{Load: f[1], Active: f[2], Sub: f[3]}
-		}
-	}
-	for _, l := range nonEmpty(secs["FINDMNT"]) {
-		if f := strings.Fields(l); len(f) >= 4 {
-			info.Findmnt = append(info.Findmnt, MountEntry{Target: f[0], Source: f[1], FSType: f[2], Options: strings.Split(f[3], ",")})
-		}
-	}
-	info.Fstab = nonEmpty(secs["FSTAB"])
-	info.SSHD = map[string][]string{}
-	for _, l := range nonEmpty(secs["SSHD"]) {
-		if k, v, ok := strings.Cut(l, " "); ok {
-			k = strings.ToLower(k)
-			info.SSHD[k] = append(info.SSHD[k], strings.TrimSpace(v))
-		}
-	}
-	info.AuditRules = nonEmpty(secs["AUDITRULES"])
-	info.AuditRuleFiles = nonEmpty(secs["AUDITRULESD"])
-	info.Modprobe = nonEmpty(secs["MODPROBE"])
-	info.LoadedModules = map[string]bool{}
-	for _, l := range nonEmpty(secs["LSMOD"]) {
-		info.LoadedModules[strings.TrimSpace(l)] = true
-	}
-	info.GrubArgs = nonEmpty(secs["GRUBCFG"])
-	info.STIGStat = map[string]Perm{}
-	for _, l := range nonEmpty(secs["STIGSTAT"]) {
-		if f := strings.SplitN(l, "|", 7); len(f) == 7 {
-			info.STIGStat[f[6]] = Perm{Mode: f[0], User: f[1], Group: f[2], UID: f[3], GID: f[4], Type: f[5], Path: f[6]}
-		}
-	}
-	info.STIGViol = map[string][]string{}
-	for _, l := range nonEmpty(secs["STIGVIOL"]) {
-		if f := strings.SplitN(l, "|", 3); len(f) == 3 && f[0] == "VIOL" {
-			info.STIGViol[f[1]] = append(info.STIGViol[f[1]], f[2])
-		}
-	}
-	info.STIGFiles = parseDumps(secs["STIGFILES"])
-
-	// facts for the named evaluators (os_stig_facts.sh)
-	info.STIGCmd = map[string]string{}
-	for _, l := range nonEmpty(secs["STIGCMD"]) {
-		if k, v, ok := strings.Cut(l, "="); ok {
-			info.STIGCmd[strings.TrimSpace(k)] = strings.TrimSpace(v)
-		}
-	}
-	info.STIGSweep = map[string][]string{}
-	for _, l := range nonEmpty(secs["STIGSWEEP"]) {
-		if k, v, ok := strings.Cut(l, "|"); ok {
-			info.STIGSweep[k] = append(info.STIGSweep[k], v)
-		}
-	}
-	for _, l := range nonEmpty(secs["PASSWD"]) {
-		f := strings.Split(strings.TrimSpace(l), ":")
-		if len(f) >= 7 {
-			uid, _ := strconv.Atoi(f[2])
-			gid, _ := strconv.Atoi(f[3])
-			info.Passwd = append(info.Passwd, PasswdEntry{Name: f[0], UID: uid, GID: gid, Home: f[5], Shell: f[6]})
-		}
-	}
-	for _, l := range nonEmpty(secs["GROUP"]) {
-		f := strings.Split(strings.TrimSpace(l), ":")
-		if len(f) >= 3 {
-			gid, _ := strconv.Atoi(f[2])
-			g := GroupEntry{Name: f[0], GID: gid}
-			if len(f) >= 4 && f[3] != "" {
-				g.Members = strings.Split(f[3], ",")
+	has := func(name string) bool { _, ok := secs[name]; return ok }
+	if has("SYSCTLALL") {
+		info.SysctlAll = map[string]string{}
+		for _, l := range nonEmpty(secs["SYSCTLALL"]) {
+			if k, v, ok := strings.Cut(l, "="); ok {
+				info.SysctlAll[strings.TrimSpace(k)] = strings.TrimSpace(v)
 			}
-			info.Groups = append(info.Groups, g)
 		}
 	}
-	info.ShadowMeta = map[string]ShadowMeta{}
-	for _, l := range nonEmpty(secs["SHADOWMETA"]) {
-		f := strings.Split(strings.TrimSpace(l), ":")
-		if len(f) >= 6 {
-			info.ShadowMeta[f[0]] = ShadowMeta{Hash: f[1], MinDays: f[2], MaxDays: f[3], Inactive: f[4], Expire: f[5]}
+	if has("PKGS") {
+		info.Packages = map[string]bool{}
+		for _, l := range nonEmpty(secs["PKGS"]) {
+			info.Packages[strings.TrimSpace(l)] = true
 		}
 	}
-	info.SSSDConf = map[string]string{}
-	for _, l := range nonEmpty(secs["SSSD"]) {
-		if k, v, ok := strings.Cut(l, "="); ok {
-			info.SSSDConf[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
+	if has("UNITFILES") {
+		info.UnitFiles = map[string]string{}
+		for _, l := range nonEmpty(secs["UNITFILES"]) {
+			if f := strings.Fields(l); len(f) >= 2 {
+				info.UnitFiles[f[0]] = f[1]
+			}
 		}
 	}
-	info.UFWStatus = strings.TrimSpace(secs["UFWSTATUS"])
-	info.SELinuxLogins = nonEmpty(secs["SEMANAGE"])
-	info.Lsblk = nonEmpty(secs["LSBLK"])
+	if has("UNITSALL") {
+		info.UnitStates = map[string]UnitState{}
+		for _, l := range nonEmpty(secs["UNITSALL"]) {
+			if f := strings.Fields(l); len(f) >= 4 {
+				info.UnitStates[f[0]] = UnitState{Load: f[1], Active: f[2], Sub: f[3]}
+			}
+		}
+	}
+	if has("FINDMNT") {
+		info.Findmnt = nil
+		for _, l := range nonEmpty(secs["FINDMNT"]) {
+			if f := strings.Fields(l); len(f) >= 4 {
+				info.Findmnt = append(info.Findmnt, MountEntry{Target: f[0], Source: f[1], FSType: f[2], Options: strings.Split(f[3], ",")})
+			}
+		}
+	}
+	if has("FSTAB") {
+		info.Fstab = nonEmpty(secs["FSTAB"])
+	}
+	if has("SSHD") {
+		info.SSHD = map[string][]string{}
+		for _, l := range nonEmpty(secs["SSHD"]) {
+			if k, v, ok := strings.Cut(l, " "); ok {
+				k = strings.ToLower(k)
+				info.SSHD[k] = append(info.SSHD[k], strings.TrimSpace(v))
+			}
+		}
+	}
+	if has("AUDITRULES") {
+		info.AuditRules = nonEmpty(secs["AUDITRULES"])
+	}
+	if has("AUDITRULESD") {
+		info.AuditRuleFiles = nonEmpty(secs["AUDITRULESD"])
+	}
+	if has("MODPROBE") {
+		info.Modprobe = nonEmpty(secs["MODPROBE"])
+	}
+	if has("LSMOD") {
+		info.LoadedModules = map[string]bool{}
+		for _, l := range nonEmpty(secs["LSMOD"]) {
+			info.LoadedModules[strings.TrimSpace(l)] = true
+		}
+	}
+	if has("GRUBCFG") {
+		info.GrubArgs = nonEmpty(secs["GRUBCFG"])
+	}
+	if has("STIGSTAT") {
+		info.STIGStat = map[string]Perm{}
+		for _, l := range nonEmpty(secs["STIGSTAT"]) {
+			if f := strings.SplitN(l, "|", 7); len(f) == 7 {
+				info.STIGStat[f[6]] = Perm{Mode: f[0], User: f[1], Group: f[2], UID: f[3], GID: f[4], Type: f[5], Path: f[6]}
+			}
+		}
+	}
+	if has("STIGVIOL") {
+		info.STIGViol = map[string][]string{}
+		for _, l := range nonEmpty(secs["STIGVIOL"]) {
+			if f := strings.SplitN(l, "|", 3); len(f) == 3 && f[0] == "VIOL" {
+				info.STIGViol[f[1]] = append(info.STIGViol[f[1]], f[2])
+			}
+		}
+	}
+	if has("STIGFILES") {
+		info.STIGFiles = parseDumps(secs["STIGFILES"])
+	}
+
+	// facts for the named evaluators (os_stig_facts.sh, os_stig_sweep.sh)
+	if has("STIGCMD") {
+		info.STIGCmd = map[string]string{}
+		for _, l := range nonEmpty(secs["STIGCMD"]) {
+			if k, v, ok := strings.Cut(l, "="); ok {
+				info.STIGCmd[strings.TrimSpace(k)] = strings.TrimSpace(v)
+			}
+		}
+	}
+	if has("STIGSWEEP") {
+		info.STIGSweep = map[string][]string{}
+		for _, l := range nonEmpty(secs["STIGSWEEP"]) {
+			if k, v, ok := strings.Cut(l, "|"); ok {
+				info.STIGSweep[k] = append(info.STIGSweep[k], v)
+			}
+		}
+	}
+	if has("PASSWD") {
+		info.Passwd = nil
+		for _, l := range nonEmpty(secs["PASSWD"]) {
+			f := strings.Split(strings.TrimSpace(l), ":")
+			if len(f) >= 7 {
+				uid, _ := strconv.Atoi(f[2])
+				gid, _ := strconv.Atoi(f[3])
+				info.Passwd = append(info.Passwd, PasswdEntry{Name: f[0], UID: uid, GID: gid, Home: f[5], Shell: f[6]})
+			}
+		}
+	}
+	if has("GROUP") {
+		info.Groups = nil
+		for _, l := range nonEmpty(secs["GROUP"]) {
+			f := strings.Split(strings.TrimSpace(l), ":")
+			if len(f) >= 3 {
+				gid, _ := strconv.Atoi(f[2])
+				g := GroupEntry{Name: f[0], GID: gid}
+				if len(f) >= 4 && f[3] != "" {
+					g.Members = strings.Split(f[3], ",")
+				}
+				info.Groups = append(info.Groups, g)
+			}
+		}
+	}
+	if has("SHADOWMETA") {
+		info.ShadowMeta = map[string]ShadowMeta{}
+		for _, l := range nonEmpty(secs["SHADOWMETA"]) {
+			f := strings.Split(strings.TrimSpace(l), ":")
+			if len(f) >= 6 {
+				info.ShadowMeta[f[0]] = ShadowMeta{Hash: f[1], MinDays: f[2], MaxDays: f[3], Inactive: f[4], Expire: f[5]}
+			}
+		}
+	}
+	if has("SSSD") {
+		info.SSSDConf = map[string]string{}
+		for _, l := range nonEmpty(secs["SSSD"]) {
+			if k, v, ok := strings.Cut(l, "="); ok {
+				info.SSSDConf[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
+			}
+		}
+	}
+	if has("UFWSTATUS") {
+		info.UFWStatus = strings.TrimSpace(secs["UFWSTATUS"])
+	}
+	if has("SEMANAGE") {
+		info.SELinuxLogins = nonEmpty(secs["SEMANAGE"])
+	}
+	if has("LSBLK") {
+		info.Lsblk = nonEmpty(secs["LSBLK"])
+	}
+}
+
+// ParseSTIGStage merges the output of one scan stage (STIGStageScript) into
+// info and returns what the stage cost the node. The facts are complete
+// once every stage has been merged: the caller then marks them collected
+// (AdoptSTIG).
+func ParseSTIGStage(info *Info, out string) perf.RemoteCost {
+	secs := splitSections(out)
+	parseOSStig(info, secs)
+	return perf.ParseSection(secs["PERF"])
 }
 
 // STIGFile returns a dumped config file's content and whether it was present.
@@ -1336,22 +1400,26 @@ func (i *Info) TarballKeys() []string {
 	return keys
 }
 
-// MergeHeavy copies heavy-mode results from a previous collection when the
-// current one did not include them.
 // MergeSTIG carries the OS STIG facts of a previous collection into this
-// one when the probe did not re-collect them (they are gathered on the first
-// collection and on demand, not every cycle).
+// one when the probe did not re-collect them (they are gathered on demand,
+// not every cycle).
 func (i *Info) MergeSTIG(prev *Info) {
 	if i.STIGProbed || prev == nil || !prev.STIGProbed {
 		return
 	}
-	i.STIGProbed, i.STIGCollected = true, prev.STIGCollected
-	i.SysctlAll, i.Packages, i.UnitFiles, i.UnitStates = prev.SysctlAll, prev.Packages, prev.UnitFiles, prev.UnitStates
-	i.Findmnt, i.Fstab, i.SSHD = prev.Findmnt, prev.Fstab, prev.SSHD
-	i.AuditRules, i.AuditRuleFiles, i.Modprobe, i.LoadedModules, i.GrubArgs = prev.AuditRules, prev.AuditRuleFiles, prev.Modprobe, prev.LoadedModules, prev.GrubArgs
-	i.STIGStat, i.STIGViol, i.STIGFiles = prev.STIGStat, prev.STIGViol, prev.STIGFiles
-	i.STIGCmd, i.STIGSweep, i.Passwd, i.Groups, i.ShadowMeta = prev.STIGCmd, prev.STIGSweep, prev.Passwd, prev.Groups, prev.ShadowMeta
-	i.SSSDConf, i.UFWStatus, i.SELinuxLogins, i.Lsblk = prev.SSSDConf, prev.UFWStatus, prev.SELinuxLogins, prev.Lsblk
+	i.AdoptSTIG(prev, prev.STIGCollected)
+}
+
+// AdoptSTIG takes the OS STIG facts of src (a finished staged collection or
+// a previous probe) as this node's, collected at the given time.
+func (i *Info) AdoptSTIG(src *Info, at time.Time) {
+	i.STIGProbed, i.STIGCollected = true, at
+	i.SysctlAll, i.Packages, i.UnitFiles, i.UnitStates = src.SysctlAll, src.Packages, src.UnitFiles, src.UnitStates
+	i.Findmnt, i.Fstab, i.SSHD = src.Findmnt, src.Fstab, src.SSHD
+	i.AuditRules, i.AuditRuleFiles, i.Modprobe, i.LoadedModules, i.GrubArgs = src.AuditRules, src.AuditRuleFiles, src.Modprobe, src.LoadedModules, src.GrubArgs
+	i.STIGStat, i.STIGViol, i.STIGFiles = src.STIGStat, src.STIGViol, src.STIGFiles
+	i.STIGCmd, i.STIGSweep, i.Passwd, i.Groups, i.ShadowMeta = src.STIGCmd, src.STIGSweep, src.Passwd, src.Groups, src.ShadowMeta
+	i.SSSDConf, i.UFWStatus, i.SELinuxLogins, i.Lsblk = src.SSSDConf, src.UFWStatus, src.SELinuxLogins, src.Lsblk
 }
 
 // MergeConfig carries the config tier forward from the previous probe when
@@ -1381,6 +1449,8 @@ func (i *Info) MergeConfig(prev *Info) {
 	}
 }
 
+// MergeHeavy copies heavy-mode results from a previous collection when the
+// current one did not include them.
 func (i *Info) MergeHeavy(prev *Info) {
 	if prev == nil || i.Heavy {
 		if prev != nil && i.Heavy {

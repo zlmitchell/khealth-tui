@@ -14,7 +14,7 @@ EXTRA_DIRS='__EXTRA_DIRS__'
 EP_OVERRIDE='__EP__'; CA_OVERRIDE='__CA__'; CERT_OVERRIDE='__CERT__'; KEY_OVERRIDE='__KEY__'
 DIST=unknown; CA=; CERT=; KEY=; EP=https://127.0.0.1:2379; CRICTL=; CRI_EP=; DATADIR=; SNAPDIR=; ETCDCTL=; SKIPPEERS=
 H=$(hostname)
-# rke2/k3s data-dir may be customised in config.yaml
+# rke2/k3s data-dir may be customized in config.yaml
 RKE2_DD=/var/lib/rancher/rke2; K3S_DD=/var/lib/rancher/k3s
 for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml; do
   [ -f "$f" ] || continue

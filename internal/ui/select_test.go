@@ -26,7 +26,7 @@ func TestSelectRowKeepsColours(t *testing.T) {
 	}
 	// the red cell survives and the band is re-applied after its reset
 	if !strings.Contains(out, red) {
-		t.Errorf("inner colour lost: %q", out)
+		t.Errorf("inner color lost: %q", out)
 	}
 	if !strings.Contains(out, "\x1b[0m"+on) {
 		t.Errorf("selection band not re-applied after an inner reset: %q", out)

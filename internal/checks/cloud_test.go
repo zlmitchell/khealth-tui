@@ -15,7 +15,7 @@ import (
 )
 
 // cloudInput: a vSphere cluster where one node was grabbed by the rke2 stub
-// controller, one is still uninitialised, the vSphere CSI controller crash
+// controller, one is still uninitialized, the vSphere CSI controller crash
 // loops, a Trident SAN backend failed and a StorageClass points at a driver
 // that is not installed.
 func cloudInput() Input {
@@ -66,7 +66,7 @@ func TestCloudFindings(t *testing.T) {
 	}{
 		{SevWarn, "cloud", "rke2's embedded cloud-controller runs alongside the vsphere cloud controller"},
 		{SevCrit, "cloud", "node still carries the node.cloudprovider.kubernetes.io/uninitialized taint"},
-		{SevCrit, "cloud", "node was initialised by the embedded rke2 cloud-controller (providerID rke2://cp-2)"},
+		{SevCrit, "cloud", "node was initialized by the embedded rke2 cloud-controller (providerID rke2://cp-2)"},
 		{SevCrit, "storage", "vSphere CSI controller not healthy: 0/1 ready (vsphere-csi-controller-x: CrashLoopBackOff)"},
 		{SevCrit, "storage", "Trident backend san-1 (ontap-san) is failed"},
 		{SevCrit, "cloud", "vsphere.conf references credentials secret kube-system/vsphere-cpi-creds which does not exist"},

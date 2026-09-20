@@ -57,7 +57,7 @@ func (a *App) overviewContent() content {
 			info++
 		}
 	}
-	etcdSum := a.etcdSummarise()
+	etcdSum := a.etcdSummarize()
 	etcdDB, etcdFsync, etcdNode := etcdSum.dbPct, etcdSum.fsync, etcdSum.dbNode
 	etcdHealthy, etcdProbed := etcdSum.healthy, etcdSum.probed
 	tw, n := tileWidths(a.width, 6)

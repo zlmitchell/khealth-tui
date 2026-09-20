@@ -92,7 +92,7 @@ func sparkline(vals []float64, width int, max float64) string {
 	return b.String()
 }
 
-// sparkStyled colours the sparkline by its latest value against thresholds.
+// sparkStyled colors the sparkline by its latest value against thresholds.
 func sparkStyled(vals []float64, width int, max float64, warn, crit int) string {
 	last := math.NaN()
 	if len(vals) > 0 {
@@ -119,7 +119,7 @@ func bar(frac float64, width int, st lipgloss.Style) string {
 	return st.Render(strings.Repeat("█", filled)) + styleDim.Render(strings.Repeat("░", width-filled))
 }
 
-// gauge renders a percentage bar coloured by thresholds, followed by the value.
+// gauge renders a percentage bar colored by thresholds, followed by the value.
 func gauge(pct float64, width int, warn, crit int) string {
 	if math.IsNaN(pct) || pct < 0 {
 		return bar(-1, width, styleDim) + styleDim.Render("   -")

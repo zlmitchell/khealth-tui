@@ -61,7 +61,10 @@ internal/stigdata/      embedded OS STIG tables + the probe fragment derived fro
 internal/nodeinfo/      SSH probe parser; the probes themselves are embedded .sh files:
   scripts/base.sh       light probe (every refresh)
   scripts/os_stig.sh    OS STIG generic facts (sysctl -a, packages, units, mounts, sshd -T, audit rules, ...)
-  scripts/os_stig_facts.sh  facts for the named evaluators (account database, filesystem sweep, short commands)
+  scripts/os_stig_facts.sh  facts for the named evaluators (account database, short commands, small dumps)
+  scripts/os_stig_sweep.sh  the filesystem sweep (world-writable, unowned, home directories, binaries, audit logs)
+                        os_stig.sh, stigdata.ProbeScript(), os_stig_facts.sh and os_stig_sweep.sh are the four
+                        Shift+S scan stages (nodeinfo.STIGStages), each its own SSH run per node
   scripts/heavy.sh      journal, images, tarballs, PV du
                         plus stigdata.ProbeScript() (stat / find / dump targets derived from the tables)
 tools/stiggen/gen.py    generator (DISA XCCDF x ComplianceAsCode -> data/<product>.json.gz)
@@ -120,7 +123,7 @@ CAC checks come in two kinds, and the engine handles both:
   kind once.
 - **custom OVAL** (hand-written in CAC): the table carries only the CAC
   rule name; `osnamed.go` / `osnamed_system.go` implement an evaluator
-  per rule name, fed by `scripts/os_stig_facts.sh` (account database,
+  per rule name, fed by `scripts/os_stig_facts.sh` / `os_stig_sweep.sh` (account database,
   one filesystem sweep, short commands) and the config-file dumps in
   `stigdata.FileDumps`. Because the key is the CAC rule name, one
   evaluator serves every product that maps a STIG rule to it.
@@ -137,7 +140,7 @@ Coverage at the time of writing (`go test -v -run TestEmbeddedTables
 | ubuntu2404 | 194 | 194 | |
 
 "Evaluated" means an evaluator exists; the result may still be MANUAL where
-the STIG's own check needs an organisational decision (authorised user
+the STIG's own check needs an organizational decision (authorized user
 list, PPSM CLSA, documented exceptions, temporary accounts) - those return
 MANUAL with the evidence an assessor would ask for. Rules with a
 templated part and an untemplated part that has no evaluator report MANUAL
@@ -214,7 +217,7 @@ bytes; `k8s:enc:<provider>:` proves the stored value is encrypted, raw
 protobuf proves it is not). The flag alone is Manual, because secrets
 written before encryption was enabled stay plaintext until rewritten.
 
-Use `Manual` when the rule needs judgement or data we do not collect;
+Use `Manual` when the rule needs judgment or data we do not collect;
 `NA` when it does not apply to this distribution; `Unknown` when we could
 not read the input (RBAC). Never emit FAIL for missing data.
 
@@ -284,7 +287,7 @@ OVAL only (<rule name>)":
 - The node script runs as root via `sudo`, `dzdo` or `doas` (`ssh.become`,
   probed per host; see README "What SSH needs"); `sshd -T`, `auditctl -l`,
   the account-database facts (`/etc/shadow` is reduced to hash type and
-  ageing fields, never the hash), the filesystem sweep (one `find` over the
+  aging fields, never the hash), the filesystem sweep (one `find` over the
   local filesystems, 120 s cap, 200 hits max),
   `stat` of `/etc/shadow` and the recursive `find` scans need root. Without
   it those rules report MANUAL, never FAIL.
@@ -292,8 +295,10 @@ OVAL only (<rule name>)":
   options, `sshd -T`); where the STIG also requires the setting to be
   persisted (fstab, grub, sysctl.d) the evaluator reports FAIL with a
   "lost on reboot" detail when only one side is set.
-- The OS STIG facts are collected only on request (`S` on the OS STIG
-  sub-tab); until then a node has no OS STIG rows at all rather than
+- The Security tab is opt-in (`Shift+S` runs the scan); the OS STIG facts
+  are collected by that same key over SSH, in four stages per node (system
+  facts, file modes, accounts, filesystem sweep) with per-node progress on
+  the tab. Until then a node has no OS STIG rows at all rather than
   hundreds of MANUAL ones, and the Node hardening column reads "not
   collected".
 - The union of all products' stat/find/dump targets is sent to every node;

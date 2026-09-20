@@ -115,7 +115,7 @@ func (r etcdRuntime) product() string {
 	return r.kind
 }
 
-// snapshotSave is the command that takes a fresh snapshot afterwards.
+// snapshotSave is the command that takes a fresh snapshot afterward.
 func (r etcdRuntime) snapshotSave() string {
 	switch r.kind {
 	case "rke2", "k3s":

@@ -159,7 +159,7 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 	return out, nil
 }
 
-// helmOrigin summarises where a chart most likely came from.
+// helmOrigin summarizes where a chart most likely came from.
 func helmOrigin(r *HelmRelease) string {
 	switch {
 	case r.ChartRepo != "":

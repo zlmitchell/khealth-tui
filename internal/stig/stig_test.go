@@ -108,7 +108,7 @@ func TestOSRulesPerBenchmark(t *testing.T) {
 		"ubu-1": {Node: "ubu-1", Dist: "rke2", STIGProbed: true, OS: nodeinfo.OSRelease{ID: "ubuntu", IDLike: "debian", VersionID: "22.04"}, NTPSynced: &synced,
 			Hardening: map[string]string{"fips": "0", "fips_boot": "no", "apparmor": "Y", "apparmor_enforced": "12", "svc_auditd": "loaded active enabled", "ufw": "active", "svc_chrony": "loaded active enabled"},
 			Sysctl:    map[string]string{"kernel.randomize_va_space": "2", "kernel.dmesg_restrict": "1"}},
-		"sles-1": {Node: "sles-1", Dist: "rke2", OS: nodeinfo.OSRelease{ID: "sles", IDLike: "suse", VersionID: "15.5"},
+		"sles-1": {Node: "sles-1", Dist: "rke2", STIGProbed: true, OS: nodeinfo.OSRelease{ID: "sles", IDLike: "suse", VersionID: "15.5"},
 			Hardening: map[string]string{"fips": "1", "fips_boot": "yes", "selinux": "Enforcing"}},
 	}
 	rs := Evaluate(Input{Snap: snap, Nodes: nodes})

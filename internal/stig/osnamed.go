@@ -7,7 +7,7 @@ package stig
 // nodeinfo/scripts/os_stig_facts.sh (STIGCmd, STIGSweep, Passwd, ShadowMeta,
 // ...) and the config-file dumps listed in stigdata.FileDumps.
 //
-// Where the STIG's own check needs an organisational decision (authorised
+// Where the STIG's own check needs an organizational decision (authorized
 // user lists, PPSM CLSA, documented exceptions) the evaluator returns Manual
 // with the evidence an assessor would ask for.
 //
@@ -417,13 +417,13 @@ func init() {
 			return failIf(bad, "home directories not group-owned by the user's primary group")
 		},
 		"file_permission_user_init_files_root": func(i *nodeinfo.Info) (Status, string) {
-			return failIf(sweep(i, "INITPERM"), "initialisation files more permissive than 0740")
+			return failIf(sweep(i, "INITPERM"), "initialization files more permissive than 0740")
 		},
 		"file_permission_user_init_files": func(i *nodeinfo.Info) (Status, string) {
-			return failIf(sweep(i, "INITPERM"), "initialisation files more permissive than 0740")
+			return failIf(sweep(i, "INITPERM"), "initialization files more permissive than 0740")
 		},
 		"accounts_user_dot_no_world_writable_programs": func(i *nodeinfo.Info) (Status, string) {
-			return failIf(sweep(i, "INITWW"), "world-writable initialisation files")
+			return failIf(sweep(i, "INITWW"), "world-writable initialization files")
 		},
 		"accounts_users_home_files_permissions": func(i *nodeinfo.Info) (Status, string) {
 			return failIf(sweep(i, "HOMEPERM"), "home directory files more permissive than 0750")
@@ -502,7 +502,7 @@ func init() {
 			for _, u := range interactiveUsers(i) {
 				names = append(names, u.Name)
 			}
-			return Manual, "compare against the authorised user list: " + orDash(truncList(names, 8))
+			return Manual, "compare against the authorized user list: " + orDash(truncList(names, 8))
 		},
 		"account_temp_expire_date": func(i *nodeinfo.Info) (Status, string) {
 			var exp []string
@@ -1099,7 +1099,7 @@ func init() {
 			return Fail, i.OS.Pretty + " left vendor standard support on " + eol.Format("2006-01-02")
 		},
 		"security_patches_up_to_date": func(i *nodeinfo.Info) (Status, string) {
-			d := "verify against the organisational patching policy"
+			d := "verify against the organizational patching policy"
 			if i.Hardening["reboot_required"] == "yes" {
 				d += "; a reboot is pending (updates applied but not active)"
 			}

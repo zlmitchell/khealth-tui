@@ -1,6 +1,7 @@
 package logs
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -147,5 +148,112 @@ func TestRancherSystemAgentPatterns(t *testing.T) {
 	}
 	if m := s.Last("nope"); !m.Time.IsZero() {
 		t.Errorf("Last unseen should be zero")
+	}
+}
+
+// TestSupervisorPatterns: the rke2 supervisor's boot-time errors are
+// startup noise with an explanation (escalated only when they persist), the
+// leader-lease and KCM early-start lines carry their fix, and none of them
+// fall through to the generic rules.
+func TestSupervisorPatterns(t *testing.T) {
+	now := time.Date(2026, 9, 20, 16, 30, 0, 0, time.UTC)
+	lines := []string{
+		`2026-09-20T12:15:09-0400 redhat9-test rke2[1236]: time="2026-09-20T12:15:09-04:00" level=error msg="Sending HTTP/1.1 503 response to 127.0.0.1:41984: runtime core not ready"`,
+		`2026-09-20T12:15:53-0400 redhat9-test rke2[1236]: time="2026-09-20T12:15:53-04:00" level=warning msg="Failed to list nodes with etcd role: runtime core not ready"`,
+		`2026-09-20T12:16:09-0400 redhat9-test rke2[1236]: time="2026-09-20T12:16:09-04:00" level=error msg="Sending HTTP/1.1 502 response to 127.0.0.1:55536: dial tcp 10.42.2.14:10250: operation was canceled"`,
+		`2026-09-20T12:14:50-0400 redhat9-test-2 rke2[1200]: time="2026-09-20T12:14:50-04:00" level=warning msg="Unable to reconcile with remote datastore: Get \"https://10.0.0.143:9345/v1-rke2/server-bootstrap\": dial tcp 10.0.0.143:9345: connect: no route to host"`,
+		`2026-09-20T12:15:09-0400 redhat9-test rke2[1236]: time="2026-09-20T12:15:09-04:00" level=warning msg="Bootstrap key already exists"`,
+		`2026-09-20T13:43:09-0400 redhat9-test rke2[1236]: time="2026-09-20T13:43:09-04:00" level=warning msg="Proxy error: write failed: write tcp 127.0.0.1:49390->127.0.0.1:10250: write: broken pipe"`,
+		`E0920 16:03:58.039783       1 leaderelection.go:452] "Error retrieving lease lock" err="Get \"https://127.0.0.1:6443/apis/coordination.k8s.io/v1/namespaces/kube-system/leases/kube-scheduler?timeout=5s\": context deadline exceeded"`,
+		`E0920 16:15:07.674131       1 run.go:72] "command failed" err="unable to load configmap based request-header-client-ca-file: Get \"https://127.0.0.1:6443/api/v1/namespaces/kube-system/configmaps/extension-apiserver-authentication\": dial tcp 127.0.0.1:6443: connect: connection refused"`,
+	}
+	s := Classify(lines, now)
+	want := []struct {
+		name  string
+		class Class
+	}{
+		{"supervisor-not-ready", ClassStartup}, {"supervisor-not-ready", ClassStartup}, {"supervisor-proxy-502", ClassStartup},
+		{"supervisor-peer-down", ClassStartup}, {"bootstrap-exists", ClassInfo}, {"supervisor-proxy-eof", ClassInfo},
+		{"lease-lost", ClassWarn}, {"kcm-early-start", ClassStartup},
+	}
+	for i, w := range want {
+		m := s.Matches[i]
+		if m.Pattern == nil || m.Pattern.Name != w.name || m.Class != w.class {
+			t.Errorf("line %d: got %v/%v want %s/%v", i, m.Pattern, m.Class, w.name, w.class)
+			continue
+		}
+		if !strings.Contains(m.Pattern.Explain, "config.yaml") && !strings.Contains(m.Pattern.Explain, "Normal") && !strings.Contains(m.Pattern.Explain, "Harmless") && !strings.Contains(m.Pattern.Explain, "normal") {
+			t.Errorf("line %d: explanation carries neither a fix nor a verdict: %q", i, m.Pattern.Explain)
+		}
+	}
+	if s.Counts[ClassError] != 0 {
+		t.Errorf("boot noise counted as errors: %+v", s.Counts)
+	}
+	// the same 502s an hour after the supervisor came up are a warning
+	late := []string{
+		`2026-09-20T12:16:45-0400 redhat9-test rke2[1236]: time="2026-09-20T12:16:45-04:00" level=info msg="rke2 is up and running"`,
+		`2026-09-20T13:30:00-0400 redhat9-test rke2[1236]: time="2026-09-20T13:30:00-04:00" level=error msg="Sending HTTP/1.1 502 response to 127.0.0.1:55536: dial tcp 10.42.2.14:10250: operation was canceled"`,
+	}
+	s = Classify(late, now)
+	if s.Matches[1].Class != ClassWarn {
+		t.Errorf("persistent 502 not escalated: %v", s.Matches[1].Class)
+	}
+}
+
+// TestStartupNoise: the kubelet restart races have rules; an unmatched
+// error inside a startup window that never recurs becomes startup noise,
+// while the same shape seen again after the window stays a generic error
+// with a recurrence the detail can show.
+func TestStartupNoise(t *testing.T) {
+	now := time.Date(2026, 9, 20, 18, 0, 0, 0, time.UTC)
+	kubelet := []string{
+		`I0920 12:02:40.000000  887086 kubelet.go:100] "Starting kubelet"`,
+		`E0920 12:02:43.048339  887086 kubelet.go:3355] "Failed creating a mirror pod" err="pods \"kube-scheduler-redhat9-test\" already exists" pod="kube-system/kube-scheduler-redhat9-test"`,
+		`W0920 12:02:44.000000  887086 kubelet_volumes.go:161] "Cleaned up orphaned pod volumes dir" podUID="5b30e113ffd0614a9756ecad79a77d1a" path="/var/lib/kubelet/pods/5b30e113"`,
+		`E0920 12:02:45.000000  887086 log.go:32] "ContainerStatus from runtime service failed" err="rpc error: code = NotFound desc = an error occurred when try to find container \"abc\": not found" containerID="abc"`,
+		`E0920 12:03:49.000000  887086 controller.go:251] "Failed to update lease" err="Put \"https://127.0.0.1:6443/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/redhat9-test?timeout=10s\": context deadline exceeded"`,
+		`E0920 12:03:50.000000  887086 something.go:10] "Widget reconcile failed" err="widget \"a\" is on fire" widget="a"`,
+		`E0920 12:03:51.000000  887086 other.go:10] "Gadget reconcile failed" err="gadget \"b\" is on fire" gadget="b"`,
+		`E0920 12:40:00.000000  887086 other.go:10] "Gadget reconcile failed" err="gadget \"c\" is on fire" gadget="c"`,
+	}
+	journal := []string{
+		`2026-09-20T12:02:38+00:00 redhat9-test rke2[1236]: time="2026-09-20T12:02:38Z" level=info msg="Starting rke2 v1.35.8+rke2r1 (0fec82ea)"`,
+		`2026-09-20T12:04:30+00:00 redhat9-test rke2[1236]: time="2026-09-20T12:04:30Z" level=info msg="rke2 is up and running"`,
+	}
+	s := ClassifySources([]Source{{Lines: journal}, {Unit: "kubelet", Lines: kubelet}}, now)
+	if w := s.StartupWindows(); len(w) != 1 || !w[0][0].Equal(time.Date(2026, 9, 20, 12, 2, 38, 0, time.UTC)) || !w[0][1].Equal(time.Date(2026, 9, 20, 12, 7, 40, 0, time.UTC)) {
+		t.Fatalf("startup windows: %v", w)
+	}
+	byLine := map[string]Match{}
+	for _, m := range s.Matches {
+		byLine[m.Line] = m
+	}
+	want := map[int]struct {
+		name  string
+		class Class
+	}{
+		1: {"mirror-pod-exists", ClassStartup}, 2: {"orphaned-volumes-cleanup", ClassInfo}, 3: {"container-gone", ClassStartup},
+		4: {"node-lease", ClassStartup}, 5: {"startup-unmatched", ClassStartup}, 6: {"generic-error", ClassError}, 7: {"generic-error", ClassError},
+	}
+	for i, w := range want {
+		m := byLine[kubelet[i]]
+		if m.Pattern == nil || m.Pattern.Name != w.name || m.Class != w.class {
+			t.Errorf("kubelet line %d: got %v/%v want %s/%v", i, m.Pattern, m.Class, w.name, w.class)
+		}
+	}
+	if s.Counts[ClassError] != 2 || s.ByName["generic-error"] != 2 || s.ByName["startup-unmatched"] != 1 {
+		t.Errorf("counts: %v byName generic=%d unmatched=%d", s.Counts, s.ByName["generic-error"], s.ByName["startup-unmatched"])
+	}
+	r := s.Recur(byLine[kubelet[6]])
+	if r.Count != 2 || r.First.Minute() != 3 || r.Last.Minute() != 40 || r.Ongoing {
+		t.Errorf("recurrence: %+v", r)
+	}
+	if Signature(kubelet[6]) != Signature(kubelet[7]) || Signature(kubelet[5]) == Signature(kubelet[6]) {
+		t.Errorf("signatures: %q %q %q", Signature(kubelet[5]), Signature(kubelet[6]), Signature(kubelet[7]))
+	}
+	// no start marker: nothing is demoted
+	s = ClassifySources([]Source{{Unit: "kubelet", Lines: kubelet[5:6]}}, now)
+	if s.Matches[0].Pattern.Name != "generic-error" {
+		t.Errorf("without a start marker the line must stay generic: %v", s.Matches[0].Pattern.Name)
 	}
 }

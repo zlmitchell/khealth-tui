@@ -71,6 +71,7 @@ const (
 	ovNamespace
 	ovDetail
 	ovConfirm
+	ovScanPeek // esc on the running security scan: partial results?
 	ovRevisions
 	ovInspect
 	ovPodLogs
@@ -90,6 +91,12 @@ type content struct {
 	rows       []row
 	selectable bool
 	empty      string
+	// centered draws the empty message in the middle of the body instead of
+	// top-left (first load, opt-in tabs); sub goes under it, spin adds the
+	// spinner while something is in flight
+	centered bool
+	spin     bool
+	sub      []string
 }
 
 // App is the root model.
@@ -122,7 +129,14 @@ type App struct {
 	resolved   []resolvedFinding       // findings that went away, shown for resolvedKeep
 	hist       map[string]*series
 
+	// seq numbers one refresh: a stale tick or snapshot (a refresh that
+	// was superseded by r / R / a context switch) is ignored. gen numbers the
+	// cluster the app is attached to and only moves on a context switch:
+	// node and etcd answers carry it, so a probe that straddles a refresh
+	// tick still lands (a 20 s STIG probe or a slow node must not be thrown
+	// away, and with it the node's pending flag).
 	seq         int
+	gen         int
 	cycle       int
 	heavyNext   bool
 	refreshing  bool
@@ -130,8 +144,18 @@ type App struct {
 	spinner     spinner.Model
 	problemOnly bool
 	hideManual  bool // Security: hide MANUAL rules (m)
-	stigNext    bool // collect the OS STIG facts on the next SSH cycle (S on the OS STIG sub-tab)
+	// secScanned: the Security tab is opt-in. Nothing is evaluated or shown
+	// there until Shift+S runs a scan; after that the rules stay live.
+	secScanned bool
+	// scan is the current (or last) Shift+S security scan: the checklist the
+	// tab shows until every node has answered
+	scan *secScan
 
+	// frame is the content of the current tab, rebuilt only when a message
+	// may have changed it: building a tab (highlighting every log line,
+	// measuring every table cell) costs tens of milliseconds on a busy
+	// node's log view, and View runs on every spinner tick and keypress.
+	frame    frameCache
 	cursor   [tabCount]int
 	scroll   [tabCount]int
 	filters  [tabCount]string
@@ -144,7 +168,9 @@ type App struct {
 	ctxList      []k8s.ContextInfo // context picker (c)
 	ctxCursor    int
 	detailTitle  string
-	detailLines  []string
+	detailRaw    []string // the detail as produced: long lines intact
+	detailLines  []string // detailRaw laid out for the overlay (wrapped when detailWrap)
+	detailWrap   bool     // w in the overlay; remembered for the session
 	detailScroll int
 	status       string
 	statusAt     time.Time
@@ -258,26 +284,61 @@ type snapshotMsg struct {
 	snap *k8s.Snapshot
 }
 type nodeMsg struct {
-	seq  int
+	gen  int
 	info *nodeinfo.Info
 	opts nodeinfo.Options // what the probe included (cost accounting)
 }
 type etcdMsg struct {
-	seq   int
+	gen   int
 	probe *etcd.Probe
 }
 type s3Msg struct{ info *k8s.S3SecretInfo }
 
 type s3CheckMsg struct {
-	seq   int
+	gen   int
 	check etcd.S3Check
 }
 type helmMsg struct{ latest map[string]helmcheck.Latest }
 type etcdExecMsg struct {
-	seq   int
+	gen   int
 	probe *etcd.Probe
 }
 type tickMsg struct{ seq int }
+
+// frameCache holds the last built content of a tab and the rows the filter
+// left of it. It is served again only while the frame is "hot": nothing
+// but spinner ticks and cursor keys arrived since it was built (Update
+// clears hot on every other message) and it is under a second old, so
+// "N s ago" texts still move.
+type frameCache struct {
+	hot    bool
+	valid  bool
+	tab    tab
+	sub    int
+	width  int
+	height int
+	at     time.Time
+	c      content
+	filter string
+	rows   []row
+	rowsOK bool
+}
+
+// cursorKeys are the keys that only move the cursor / scroll a view: the
+// tab's content is the same before and after them.
+var cursorKeys = map[string]bool{"j": true, "k": true, "up": true, "down": true, "pgup": true, "pgdown": true, "home": true, "end": true, "g": true, "G": true, "ctrl+u": true, "ctrl+d": true}
+
+// frameHot reports whether msg leaves the current tab's content as it was:
+// a spinner tick, or a key that only moves the cursor / scroll of a view.
+func (a *App) frameHot(msg tea.Msg) bool {
+	switch m := msg.(type) {
+	case spinner.TickMsg:
+		return true
+	case tea.KeyMsg:
+		return cursorKeys[m.String()] && a.overlay == ovNone && !a.filterOn
+	}
+	return false
+}
 
 // apiFailoverMsg is the outcome of trying other control-plane apiservers.
 type apiFailoverMsg struct {
@@ -376,7 +437,7 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 	heavy := a.heavyNext || a.cycle%a.cfg.HeavyEvery == 0
 	a.heavyNext = false
 	var cmds []tea.Cmd
-	seq := a.seq
+	gen := a.gen
 	runner := a.runner
 	timeout := 3 * a.cfg.SSH.Timeout
 	if heavy {
@@ -419,13 +480,12 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 		if snap.VSphereConf != nil {
 			opts.VCenters = snap.VSphereConf.VCenters
 		}
-		// OS STIG facts are collected only when asked for (S on the OS STIG
-		// sub-tab): sysctl -a, package lists, find scans and config dumps are
-		// the most expensive part of the probe and never run unrequested. The
-		// config tier (certs, sysctls, config files, slow hardening commands)
-		// rides on the heavy cycles for the same reason.
+		// The OS STIG facts (sysctl -a, package lists, find scans, config
+		// dumps) are the most expensive part and never ride on a refresh: they
+		// are the Shift+S scan's own staged probes (stigStageCmd). The config
+		// tier (certs, sysctls, config files, slow hardening commands) rides
+		// on the heavy cycles for the same reason.
 		prev := a.nodes[name]
-		opts.OSStig = a.stigNext
 		opts.Config = heavy || prev == nil || !prev.ConfigProbed
 		opts.CPUSample = prev == nil || prev.Err != nil || prev.CPUStat.Total == 0
 		if prev != nil && prev.Err == nil {
@@ -434,25 +494,7 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 		if prev != nil {
 			opts.KnownTarballs = prev.TarballKeys()
 		}
-		a.pending[name] = true
-		cmds = append(cmds, func() tea.Msg {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-			res := runner.Run(ctx, host, nodeinfo.Script(opts))
-			info := nodeinfo.Parse(name, host, res.Stdout, res.Started)
-			info.HostKey = res.HostKey
-			info.Duration = res.Finished.Sub(res.Started)
-			info.ScriptSize = res.ScriptSize
-			info.STIGRun = opts.OSStig
-			if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
-				msg := res.Err.Error()
-				if s := strings.TrimSpace(res.Stderr); s != "" {
-					msg += ": " + firstLine(s)
-				}
-				info.Err = fmt.Errorf("%s", msg)
-			}
-			return nodeMsg{seq: seq, info: info, opts: opts}
-		})
+		cmds = append(cmds, a.nodeProbeCmd(name, host, opts, timeout))
 		if offline || k8s.IsEtcdNode(nodes, n) {
 			a.etcdPend[name] = true
 			script := etcdScript
@@ -467,12 +509,221 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 				if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
 					p.Err = fmt.Errorf("%s", firstLine(res.Err.Error()+" "+res.Stderr))
 				}
-				return etcdMsg{seq: seq, probe: p}
+				return etcdMsg{gen: gen, probe: p}
 			})
 		}
 	}
-	a.stigNext = false
 	return tea.Batch(cmds...)
+}
+
+// nodeProbeCmd runs one node probe script and delivers its nodeMsg.
+func (a *App) nodeProbeCmd(name, host string, opts nodeinfo.Options, timeout time.Duration) tea.Cmd {
+	gen, runner := a.gen, a.runner
+	a.pending[name] = true
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		res := runner.Run(ctx, host, nodeinfo.Script(opts))
+		info := nodeinfo.Parse(name, host, res.Stdout, res.Started)
+		info.HostKey = res.HostKey
+		info.Duration = res.Finished.Sub(res.Started)
+		info.ScriptSize = res.ScriptSize
+		info.STIGRun = opts.OSStig
+		if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
+			msg := res.Err.Error()
+			if s := strings.TrimSpace(res.Stderr); s != "" {
+				msg += ": " + firstLine(s)
+			}
+			info.Err = fmt.Errorf("%s", msg)
+		}
+		return nodeMsg{gen: gen, info: info, opts: opts}
+	}
+}
+
+// secScan is one Shift+S security scan. The OS STIG facts are the slow
+// part: every node runs the collection stages (nodeinfo.STIGStages) one
+// after the other, each its own SSH script, and the tab shows a checklist
+// with per-node progress until the last node has answered. The stages are
+// the scan's own probes - they do not ride on the refresh cycle, so a
+// pending regular probe, the backoff or a refresh tick never hold them up.
+type secScan struct {
+	started time.Time
+	nodes   []string                  // targets, in order
+	hosts   map[string]string         // node -> ssh address
+	want    map[string]bool           // nodes that still owe stages
+	failed  map[string]string         // node -> error of the stage that failed
+	stage   map[string]int            // node -> stages finished
+	facts   map[string]*nodeinfo.Info // node -> facts merged so far (adopted by the node's Info when complete)
+	took    map[string]time.Duration  // node -> wall time of the finished stages
+	doneAt  map[string]time.Time      // node -> when its last stage landed
+	at      map[string]time.Time      // node -> when the running stage started
+	stages  []nodeinfo.STIGStage
+	peek    bool // esc + enter: show the partial results while it runs
+}
+
+func newSecScan(nodes []string, hosts map[string]string) *secScan {
+	sc := &secScan{started: time.Now(), nodes: nodes, hosts: hosts, want: map[string]bool{}, failed: map[string]string{},
+		stage: map[string]int{}, facts: map[string]*nodeinfo.Info{}, took: map[string]time.Duration{}, at: map[string]time.Time{}, doneAt: map[string]time.Time{}, stages: nodeinfo.STIGStages()}
+	for _, n := range nodes {
+		sc.want[n] = true
+		sc.facts[n] = &nodeinfo.Info{Node: n, Host: hosts[n]}
+	}
+	return sc
+}
+
+// running reports whether any node still owes its facts.
+func (sc *secScan) running() bool { return sc != nil && len(sc.want) > 0 }
+
+// done is the number of nodes that have answered.
+func (sc *secScan) done() int { return len(sc.nodes) - len(sc.want) }
+
+// complete reports whether a node's facts are all in.
+func (sc *secScan) complete(n string) bool {
+	return sc != nil && sc.failed[n] == "" && sc.stage[n] >= len(sc.stages) && sc.facts[n] != nil
+}
+
+// percent is the scan's overall progress: stages finished over stages
+// planned (a failed node counts as finished - it will not progress).
+func (sc *secScan) percent() int {
+	if sc == nil || len(sc.nodes) == 0 || len(sc.stages) == 0 {
+		return 0
+	}
+	done := 0
+	for _, n := range sc.nodes {
+		if sc.failed[n] != "" {
+			done += len(sc.stages)
+		} else {
+			done += sc.stage[n]
+		}
+	}
+	return 100 * done / (len(sc.nodes) * len(sc.stages))
+}
+
+// stigStageMsg is one finished stage of one node.
+type stigStageMsg struct {
+	gen   int
+	node  string
+	stage string
+	out   string
+	err   error
+	dur   time.Duration
+	size  int
+}
+
+// startScan opts the Security tab in and, with SSH, starts the first
+// collection stage on every target node.
+func (a *App) startScan() tea.Cmd {
+	a.secScanned = true
+	if a.runner == nil || !a.sshEnabled {
+		a.scan = nil
+		a.recompute() // no node facts to wait for: the rules show at once
+		a.setStatus("security scan: STIG/CIS rules from the API only - SSH is disabled, no node facts")
+		return nil
+	}
+	nodes, _ := a.sshTargets(a.snap)
+	only := map[string]bool{}
+	for _, n := range a.cfg.SSH.Nodes {
+		only[n] = true
+	}
+	var names []string
+	hosts := map[string]string{}
+	for i := range nodes {
+		n := &nodes[i]
+		if len(only) == 0 || only[n.Name] {
+			names = append(names, n.Name)
+			hosts[n.Name] = a.nodeAddress(n)
+		}
+	}
+	sc := newSecScan(names, hosts)
+	a.scan = sc
+	a.setStatus(fmt.Sprintf("security scan started on %d node(s)", len(names)))
+	cmds := []tea.Cmd{a.scheduleRecompute()}
+	for _, n := range names {
+		cmds = append(cmds, a.stigStageCmd(n, 0))
+	}
+	return tea.Batch(cmds...)
+}
+
+// stigStageCmd runs stage idx of the OS STIG collection on a node.
+func (a *App) stigStageCmd(name string, idx int) tea.Cmd {
+	sc := a.scan
+	if sc == nil || idx >= len(sc.stages) || a.runner == nil {
+		return nil
+	}
+	st := sc.stages[idx]
+	gen, runner, host := a.gen, a.runner, sc.hosts[name]
+	timeout := 3 * a.cfg.SSH.Timeout
+	if st.Slow {
+		timeout = 6 * a.cfg.SSH.Timeout
+	}
+	script := nodeinfo.STIGStageScript(st.Name)
+	sc.at[name] = time.Now()
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		res := runner.Run(ctx, host, script)
+		m := stigStageMsg{gen: gen, node: name, stage: st.Name, out: res.Stdout, dur: res.Finished.Sub(res.Started), size: res.ScriptSize}
+		if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
+			msg := res.Err.Error()
+			if s := strings.TrimSpace(res.Stderr); s != "" {
+				msg += ": " + firstLine(s)
+			}
+			m.err = fmt.Errorf("%s", msg)
+		}
+		return m
+	}
+}
+
+// handleStage merges a finished stage into the node's facts and starts the
+// next one; the last stage hands the facts to the node's Info and, once
+// every node is in, the tab switches to the results.
+func (a *App) handleStage(m stigStageMsg) tea.Cmd {
+	sc := a.scan
+	if sc == nil || !sc.want[m.node] {
+		return nil
+	}
+	sc.took[m.node] += m.dur
+	rec := perf.ProbeRecord{Node: m.node, Kind: "stig:" + m.stage, WallMS: m.dur.Milliseconds(), OutBytes: len(m.out), ScriptSize: m.size}
+	if m.err != nil {
+		rec.Err = m.err.Error()
+		a.addProbe(rec)
+		sc.failed[m.node] = m.stage + ": " + m.err.Error()
+		delete(sc.want, m.node)
+		return a.scanSettled()
+	}
+	cost := nodeinfo.ParseSTIGStage(sc.facts[m.node], m.out)
+	rec.RemoteCPU, rec.RemoteUser, rec.RemoteSys, rec.Load1 = cost.CPU(), cost.User, cost.Sys, cost.Load1
+	a.addProbe(rec)
+	sc.stage[m.node]++
+	if sc.stage[m.node] < len(sc.stages) {
+		return a.stigStageCmd(m.node, sc.stage[m.node])
+	}
+	delete(sc.want, m.node)
+	sc.doneAt[m.node] = time.Now()
+	a.adoptSTIG(m.node)
+	return a.scanSettled()
+}
+
+// scanSettled is what follows a node answering: the status line when it
+// was the last one, and the rules re-evaluated either way.
+func (a *App) scanSettled() tea.Cmd {
+	if sc := a.scan; !sc.running() {
+		a.setStatus(fmt.Sprintf("security scan finished: %d node(s), %d failed", len(sc.nodes), len(sc.failed)))
+	}
+	return a.scheduleRecompute()
+}
+
+// adoptSTIG hands a node's completed scan facts to its Info. Called when
+// the last stage lands and again with every regular probe answer, so a
+// node whose Info was replaced (or missing) while the scan ran still gets
+// them.
+func (a *App) adoptSTIG(name string) {
+	sc := a.scan
+	ni := a.nodes[name]
+	if ni == nil || !sc.complete(name) || (ni.STIGProbed && !ni.STIGCollected.Before(sc.started)) {
+		return
+	}
+	ni.AdoptSTIG(sc.facts[name], sc.doneAt[name])
 }
 
 // sshTargetNames is sshTargets filtered by ssh.nodes, names only.
@@ -635,7 +886,7 @@ func (a *App) etcdExecCmd(snap *k8s.Snapshot) tea.Cmd {
 	if len(pods) == 0 {
 		return nil
 	}
-	seq := a.seq
+	gen := a.gen
 	client := a.client
 	dist := snap.Distribution
 	// encryption-at-rest sample: once, then only on R (heavyNext)
@@ -655,7 +906,7 @@ func (a *App) etcdExecCmd(snap *k8s.Snapshot) tea.Cmd {
 		var last *etcd.Probe
 		if err, denied := client.Denied("pods/exec"); denied {
 			// pods/exec refused earlier: do not exec into every etcd pod again
-			return etcdExecMsg{seq: seq, probe: &etcd.Probe{Node: names[0], Collected: time.Now(), Dist: dist, Err: err, EtcdctlDiag: err.Error()}}
+			return etcdExecMsg{gen: gen, probe: &etcd.Probe{Node: names[0], Collected: time.Now(), Dist: dist, Err: err, EtcdctlDiag: err.Error()}}
 		}
 		for _, n := range names {
 			p := etcd.ExecProbeOpts(ctx, client, n, podNames[n], dist, sampleEnc)
@@ -670,7 +921,7 @@ func (a *App) etcdExecCmd(snap *k8s.Snapshot) tea.Cmd {
 		if last != nil && last.Encryption == nil && prevEnc != nil {
 			last.Encryption = prevEnc // sampled earlier; the value does not change
 		}
-		return etcdExecMsg{seq: seq, probe: last}
+		return etcdExecMsg{gen: gen, probe: last}
 	}
 }
 
@@ -734,7 +985,7 @@ func (a *App) s3CheckCmd(node string) tea.Cmd {
 	host := a.nodeAddress(n)
 	url := c.URL()
 	script := etcd.S3CheckScript(url, c.CAFile, c.CAPEM, c.SkipSSLVerify)
-	runner, seq, timeout := a.runner, a.seq, a.cfg.SSH.Timeout
+	runner, gen, timeout := a.runner, a.gen, a.cfg.SSH.Timeout
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
@@ -743,7 +994,7 @@ func (a *App) s3CheckCmd(node string) tea.Cmd {
 		if res.Err != nil && strings.TrimSpace(out) == "" {
 			out = "ssh: " + firstLine(res.Err.Error())
 		}
-		return s3CheckMsg{seq: seq, check: etcd.ParseS3Check(node, url, out)}
+		return s3CheckMsg{gen: gen, check: etcd.ParseS3Check(node, url, out)}
 	}
 }
 
@@ -758,7 +1009,10 @@ func (a *App) recompute() {
 			a.logSum[name] = logs.ClassifySources(srcs, time.Now())
 		}
 	}
-	a.stigRes = stig.Evaluate(stig.Input{Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec})
+	a.stigRes = nil
+	if a.secScanned {
+		a.stigRes = stig.Evaluate(stig.Input{Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec})
+	}
 	a.findings = checks.Evaluate(checks.Input{
 		Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec, S3: a.s3, S3Reach: a.s3Reach, Logs: a.logSum, Stig: a.stigRes,
 		HelmLatest: a.helmLatest, SSHEnabled: a.sshEnabled, SSHErr: a.sshErr, Cfg: a.cfg, Now: time.Now(), APIServer: a.apiServer(),
@@ -888,10 +1142,21 @@ func (a *App) setStatus(s string) {
 }
 
 // Update handles messages.
+// Update handles a message; afterwards the frame cache is hot only when
+// the message could not have changed the tab (see frameCache).
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	model, cmd := a.update(msg)
+	a.frame.hot = a.frameHot(msg)
+	return model, cmd
+}
+
+func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = m.Width, m.Height
+		if a.overlay == ovDetail && a.detailWrap {
+			a.layoutDetail()
+		}
 		return a, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -970,7 +1235,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case nodeMsg:
-		if m.seq != a.seq {
+		if m.gen != a.gen {
 			return a, nil
 		}
 		m.info.CPUFromPrev(a.nodes[m.info.Node])
@@ -979,12 +1244,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.info.MergeConfig(a.nodes[m.info.Node])
 		a.nodes[m.info.Node] = m.info
 		delete(a.pending, m.info.Node)
+		a.adoptSTIG(m.info.Node)
 		a.recordNodeProbe(m.info, m.opts)
 		a.noteProbeDuration(m.info.Node, m.info.Duration)
 		a.recordNode(m.info)
 		return a, a.scheduleRecompute()
+	case stigStageMsg:
+		if m.gen != a.gen {
+			return a, nil
+		}
+		return a, a.handleStage(m)
 	case etcdMsg:
-		if m.seq != a.seq {
+		if m.gen != a.gen {
 			return a, nil
 		}
 		m.probe.Merge(a.etcd[m.probe.Node])
@@ -1009,7 +1280,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, tea.Batch(cmds...)
 	case s3CheckMsg:
-		if m.seq == a.seq {
+		if m.gen == a.gen {
 			a.s3Reach[m.check.Node] = m.check
 			return a, a.scheduleRecompute()
 		}
@@ -1024,7 +1295,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case rescueMsg:
 		return a, a.handleRescueMsg(m)
 	case etcdExecMsg:
-		if m.seq != a.seq {
+		if m.gen != a.gen {
 			return a, nil
 		}
 		a.etcdExec = m.probe
@@ -1050,6 +1321,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// handleKey is Update for one key (tests call it directly). Afterwards the
+// frame cache is hot only for a cursor key.
 func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := m.String()
 	if key == "ctrl+c" {
@@ -1057,6 +1330,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	before := a.viewSignature()
 	model, cmd := a.handleKeyInner(m)
+	a.frame.hot = a.frameHot(m)
 	if a.viewSignature() != before {
 		// the frame layout changed (tab, sub-tab, inspector depth, overlay):
 		// repaint from scratch so no stale rows survive on any terminal
@@ -1176,10 +1450,7 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.fp.logger.Close()
 		return a, tea.Quit
 	case "P":
-		a.detailTitle = "Footprint: what khealth costs the cluster and this host"
-		a.detailLines = a.perfLines()
-		a.detailScroll = 0
-		a.overlay = ovDetail
+		a.setDetail("Footprint: what khealth costs the cluster and this host", a.perfLines())
 	case "tab", "]":
 		a.tab = (a.tab + 1) % tabCount
 		if a.onCRDs() {
@@ -1223,20 +1494,20 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, a.refreshCmd()
 		}
 	case "S":
-		// OS STIG collection is explicit: only from its own sub-tab
-		if a.tab == tabSecurity && a.subName() == "OS STIG" {
-			switch {
-			case a.runner == nil:
-				a.setStatus("SSH unavailable: " + a.sshErr)
-			case !a.sshEnabled:
-				a.setStatus("enable SSH collection first (s)")
-			case a.snap == nil:
-				a.setStatus("waiting for the first API snapshot")
-			default:
-				a.stigNext = true
-				a.setStatus(fmt.Sprintf("collecting OS STIG facts from %d node(s)", len(a.sshTargetNames(a.snap))))
-				return a, a.collectCmds(a.snap)
-			}
+		// The security scan is explicit and only from the Security tab: it
+		// evaluates the STIG/CIS rules and, with SSH, collects the OS STIG
+		// facts from every node (the expensive part)
+		if a.tab != tabSecurity {
+			a.setStatus("Shift+S runs the security scan from the Security tab (0)")
+			break
+		}
+		switch {
+		case a.snap == nil:
+			a.setStatus("waiting for the first API snapshot")
+		case a.scan.running():
+			a.setStatus(fmt.Sprintf("security scan already running: %d%%, %d/%d nodes done", a.scan.percent(), a.scan.done(), len(a.scan.nodes)))
+		default:
+			return a, a.startScan()
 		}
 	case "s":
 		if a.runner == nil {
@@ -1268,6 +1539,11 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.filter.SetValue(a.filters[a.tab])
 		return a, a.filter.Focus()
 	case "esc":
+		// leaving the scan checklist early: warn that the rules are partial
+		if a.tab == tabSecurity && a.scan.running() && !a.scan.peek && a.filters[a.tab] == "" {
+			a.overlay = ovScanPeek
+			return a, nil
+		}
 		if a.tab == tabLogs && a.logsNode != "" && a.filters[a.tab] == "" {
 			a.logsNode = ""
 			a.cursor[a.tab], a.scroll[a.tab] = 0, 0
@@ -1276,10 +1552,7 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.filters[a.tab] = ""
 	case "?":
 		// help uses the scrollable detail overlay (j/k, PgUp/PgDn, esc)
-		a.detailTitle = "Help"
-		a.detailLines = helpLines()
-		a.detailScroll = 0
-		a.overlay = ovDetail
+		a.setDetail("Help", helpLines(a.width-4))
 	case "enter":
 		if a.tab == tabLogs && a.logsNode == "" {
 			if id := a.selectedID(); id != "" {
@@ -1422,6 +1695,13 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch a.overlay {
 	case ovConfirm, ovRevisions:
 		return a.handleActionOverlayKey(key)
+	case ovScanPeek:
+		if key == "enter" && a.scan != nil {
+			a.scan.peek = true
+			a.setStatus("showing partial results - the scan keeps running")
+		}
+		a.overlay = ovNone
+		return a, nil
 	case ovInspect:
 		return a.handleInspectKey(key)
 	case ovPodLogs:
@@ -1497,6 +1777,9 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.detailScroll = 0
 		case "G", "end":
 			a.detailScroll = len(a.detailLines)
+		case "w":
+			a.detailWrap = !a.detailWrap
+			a.layoutDetail()
 		}
 		if a.detailScroll > len(a.detailLines)-visible {
 			a.detailScroll = len(a.detailLines) - visible
@@ -1531,6 +1814,7 @@ func (a *App) switchContext(c k8s.ContextInfo) tea.Cmd {
 	a.cfg.Kubeconfig, a.cfg.Context = kubeconfig, c.Name
 	a.snap, a.snapErr, a.knownNodes = nil, "", nil
 	a.nodes, a.pending = map[string]*nodeinfo.Info{}, map[string]bool{}
+	a.scan, a.secScanned = nil, false
 	a.etcd, a.etcdPend, a.etcdExec = map[string]*etcd.Probe{}, map[string]bool{}, nil
 	a.s3, a.s3Reach = nil, map[string]etcd.S3Check{}
 	a.logSum, a.stigRes, a.helmLatest, a.findings = map[string]*logs.Summary{}, nil, map[string]helmcheck.Latest{}, nil
@@ -1571,6 +1855,7 @@ func (a *App) switchContext(c k8s.ContextInfo) tea.Cmd {
 	}
 	a.heavyNext, a.cycle, a.refreshing = true, 0, false
 	a.seq++
+	a.gen++ // answers from the previous cluster's probes are not this one's
 	a.setStatus("switched to context " + c.Name + " (" + c.Server + ")")
 	return a.refreshCmd()
 }
@@ -1671,8 +1956,27 @@ func (a *App) bodyHeight() int {
 }
 
 func (a *App) currentContent() content {
+	fc := &a.frame
+	if fc.hot && fc.valid && fc.tab == a.tab && fc.sub == a.sub[a.tab] && fc.width == a.width && fc.height == a.height && time.Since(fc.at) < time.Second {
+		return fc.c
+	}
+	c := a.buildContent()
+	*fc = frameCache{hot: fc.hot, valid: true, tab: a.tab, sub: a.sub[a.tab], width: a.width, height: a.height, at: time.Now(), c: c}
+	return c
+}
+
+// buildContent renders the current tab from the data (uncached).
+func (a *App) buildContent() content {
 	if a.snap == nil {
-		return content{empty: "loading cluster state..."}
+		c := content{empty: "loading cluster state...", centered: true, spin: true}
+		if a.client != nil {
+			where := a.client.Host
+			if a.client.Context != "" {
+				where = a.client.Context + "  " + styleDim.Render(where)
+			}
+			c.sub = []string{where}
+		}
+		return c
 	}
 	switch a.tab {
 	case tabOverview:
@@ -1708,11 +2012,18 @@ func (a *App) filteredRows(c content) []row {
 	if f == "" {
 		return c.rows
 	}
+	fc := &a.frame
+	if fc.valid && fc.rowsOK && fc.filter == f && len(fc.c.rows) == len(c.rows) && (len(c.rows) == 0 || &fc.c.rows[0] == &c.rows[0]) {
+		return fc.rows
+	}
 	var out []row
 	for _, r := range c.rows {
 		if strings.Contains(strings.ToLower(ansi.Strip(r.text)), f) {
 			out = append(out, r)
 		}
+	}
+	if fc.valid && len(fc.c.rows) == len(c.rows) && (len(c.rows) == 0 || &fc.c.rows[0] == &c.rows[0]) {
+		fc.filter, fc.rows, fc.rowsOK = f, out, true
 	}
 	return out
 }
@@ -1730,15 +2041,34 @@ func (a *App) selectedID() string {
 	return ""
 }
 
+// setDetail fills the detail overlay. Lines longer than the box are cut
+// unless wrapping is on (w toggles it; the choice sticks for the session).
+func (a *App) setDetail(title string, lines []string) {
+	a.detailTitle, a.detailRaw, a.detailScroll = title, lines, 0
+	a.layoutDetail()
+	a.overlay = ovDetail
+}
+
+// layoutDetail derives the overlay's lines from the raw detail.
+func (a *App) layoutDetail() {
+	if !a.detailWrap {
+		a.detailLines = a.detailRaw
+		return
+	}
+	w := a.width - 4
+	out := make([]string, 0, len(a.detailRaw))
+	for _, l := range a.detailRaw {
+		out = append(out, wrapStyled(l, w)...)
+	}
+	a.detailLines = out
+}
+
 func (a *App) openDetail() {
 	title, lines := a.detailFor(a.tab, a.selectedID())
 	if len(lines) == 0 {
 		return
 	}
-	a.detailTitle = title
-	a.detailLines = lines
-	a.detailScroll = 0
-	a.overlay = ovDetail
+	a.setDetail(title, lines)
 }
 
 // View renders the screen.
@@ -1766,6 +2096,50 @@ func (a *App) View() string {
 	b.WriteString("\n")
 	b.WriteString(a.renderFooter())
 	return fitScreen(b.String(), a.width, a.height)
+}
+
+// renderCentered fills the body with msg and the lines under it centered
+// both ways (spinner in front while something is in flight), then the
+// status line.
+func (a *App) renderCentered(msg string, spin bool, sub ...string) string {
+	h := a.bodyHeight()
+	head := styleBold.Render(msg)
+	if spin {
+		head = a.spinner.View() + " " + head
+	}
+	block := append([]string{head}, sub...)
+	top := (h - len(block)) / 2
+	if top < 0 {
+		top = 0
+	}
+	lines := make([]string, 0, h+1)
+	for i := 0; i < top; i++ {
+		lines = append(lines, "")
+	}
+	// the block is centered as a whole and its lines left-aligned within it,
+	// so a checklist reads as a list rather than a ragged column
+	widest := 0
+	for _, l := range block {
+		if w := ansi.StringWidth(l); w > widest {
+			widest = w
+		}
+	}
+	left := (a.width - widest) / 2
+	if left < 0 {
+		left = 0
+	}
+	for _, l := range block {
+		lines = append(lines, strings.Repeat(" ", left)+l)
+	}
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	lines = lines[:h]
+	status := ""
+	if a.status != "" && time.Since(a.statusAt) < 5*time.Second {
+		status = styleInfo.Render(a.status)
+	}
+	return strings.Join(lines, "\n") + "\n" + trunc(status, a.width)
 }
 
 // fitScreen guarantees the frame is exactly height lines of at most width
@@ -1824,7 +2198,7 @@ func (a *App) renderHeader() string {
 			ssh = fmt.Sprintf("%d/%d", len(a.snap.Nodes)-len(a.pending), len(a.snap.Nodes))
 		}
 	} else if a.sshErr != "" {
-		ssh = styleWarn.Render("error")
+		ssh = styleWarn.Render("disabled")
 	}
 	parts = append(parts, kv("ssh", ssh))
 	state := ""
@@ -1835,6 +2209,8 @@ func (a *App) renderHeader() string {
 		state = a.spinner.View() + " " + styleWarn.Render("helm action running")
 	case a.refreshing:
 		state = a.spinner.View() + " refreshing"
+	case a.scan.running():
+		state = a.spinner.View() + " " + styleWarn.Render(fmt.Sprintf("scan %d%% %d/%d nodes", a.scan.percent(), a.scan.done(), len(a.scan.nodes)))
 	case len(a.pending) > 0 || len(a.etcdPend) > 0:
 		state = a.spinner.View() + fmt.Sprintf(" collecting %d", len(a.pending)+len(a.etcdPend))
 	case !a.lastRefresh.IsZero():
@@ -1940,6 +2316,9 @@ func (a *App) renderBody() string {
 		lines = append(lines, trunc(l, a.width))
 	}
 	rows := a.filteredRows(c)
+	if len(rows) == 0 && c.empty != "" && c.centered {
+		return a.renderCentered(c.empty, c.spin, c.sub...)
+	}
 	if len(rows) == 0 && c.empty != "" {
 		lines = append(lines, styleDim.Render(c.empty))
 	}
@@ -2029,7 +2408,7 @@ func (a *App) renderOverlay() string {
 	switch a.overlay {
 	case ovHelp:
 		title = "Help"
-		lines = helpLines()
+		lines = helpLines(a.width - 4)
 	case ovNamespace:
 		title = "Select namespace"
 		lines = append(lines, a.nsInput.View(), styleDim.Render("PSA = pod-security.kubernetes.io/enforce label (warn/audit in brackets); PRIV = running pods with privileged containers / host namespaces"), "")
@@ -2060,6 +2439,15 @@ func (a *App) renderOverlay() string {
 		}
 	case ovConfirm, ovRevisions:
 		title, lines = a.renderActionOverlay()
+	case ovScanPeek:
+		title = "Security scan still running"
+		pend := 0
+		if a.scan != nil {
+			pend = len(a.scan.want)
+		}
+		lines = append(lines, styleBold.Render(fmt.Sprintf("%d node(s) have not returned their facts yet.", pend)), "")
+		lines = append(lines, wrap("Enter shows the results so far: the STIG/CIS rules from the API data and the nodes that have answered. Node hardening and OS STIG rows for the other nodes are missing until they answer - the scan keeps running and the tab fills in as they do.", a.width-6)...)
+		lines = append(lines, "", styleKey.Render("enter")+" show partial results    "+styleKey.Render("esc")+" keep waiting")
 	case ovInspect:
 		title, lines = a.renderInspect()
 	case ovPodLogs:
@@ -2110,9 +2498,9 @@ func (a *App) renderOverlay() string {
 		}
 		lines = append(lines, a.detailLines[a.detailScroll:end]...)
 		if len(a.detailLines) > visible {
-			lines = append(lines, styleDim.Render(fmt.Sprintf("-- %d-%d of %d (j/k, PgUp/PgDn, esc closes) --", a.detailScroll+1, end, len(a.detailLines))))
+			lines = append(lines, styleDim.Render(fmt.Sprintf("-- %d-%d of %d (j/k, PgUp/PgDn, w wrap, esc closes) --", a.detailScroll+1, end, len(a.detailLines))))
 		} else {
-			lines = append(lines, styleDim.Render("-- esc closes --"))
+			lines = append(lines, styleDim.Render("-- w wrap, esc closes --"))
 		}
 	}
 	inner := a.width - 4
@@ -2131,74 +2519,113 @@ func (a *App) renderOverlay() string {
 	return strings.Join(boxLines, "\n")
 }
 
-func helpLines() []string {
-	return []string{
-		styleBold.Render("Navigation"),
-		"  tab / shift+tab / [ ]    next / previous tab        1-9 0 - =   jump to tab",
-		"  left / right or h / l    previous / next sub-tab inside the current tab",
-		"  j/k or arrows            move selection / scroll    g / G     top / bottom",
-		"  PgUp / PgDn / space      page                       enter     open detail for the selected row",
-		"  C                        switch cluster context (kubeconfig contexts + ~/.kube/khealth-*.yaml)",
-		"  esc                      close overlay / clear filter",
-		"",
-		styleBold.Render("Everywhere"),
-		"  n      choose namespace (shows PSA level + privileged pods; filters Inspect, Events, Storage, Helm)",
-		"  /      filter rows on the current tab (substring)          esc   clear filter / step back",
-		"  a      toggle problems-only view (Overview, Inspect, Events, Security, Resources)",
-		"  r      refresh now (API + light SSH collection)             R     full refresh: journal logs, images, tarballs, PV du (not the OS STIG)",
-		"  s      toggle SSH collection on/off                        q     quit (steps back first when inside an object/log view)",
-		"  P      footprint: what khealth itself costs the API server, the nodes (remote CPU per probe) and this host",
-		"",
-		styleBold.Render("Tab-specific keys"),
-		"  Inspect    enter  open the object (references, YAML)      t   rollout restart (Deployment/DaemonSet/StatefulSet, confirmed)",
-		"             L      tail logs of the selected pod / controller's pods   p   jump to the Pods sub-tab",
-		"  Helm       enter  values + history                        u   upgrade to newest known version (confirmed)   b   rollback (pick revision, confirmed)",
-		"  Nodes      enter  node dashboard: gauges, security runtime-vs-boot, services, filesystems, certs",
-		"  etcd       enter  raw probe output and config dumps          X   rescue: rejoin one broken server (quorum fine) or restore a snapshot",
-		"                    onto the whole control plane (SSH + actions enabled; preflight, warnings and a typed confirmation first)",
-		"  Logs       enter  node lines, enter again = full line + explanation; a = include info lines",
-		"  Events     enter  open the involved object in the inspector",
-		"  Security   ←/→    Rules / Node hardening / OS STIG        enter  rule detail, fix and the STIG's own check procedure",
-		"             scorecards per benchmark (and per node): score = not a finding / (not a finding + open), as SCC / OpenSCAP report",
-		"             a      hide passing rules                      m      hide MANUAL rules",
-		"             S      OS STIG sub-tab only: run the DISA OS STIG collection on the nodes (sysctl -a, packages, audit rules,",
-		"                    file sweep, config dumps; a few seconds per node). Never runs on its own - not at launch, not on r/R.",
-		"                    Results stay until the next S; the header shows how old they are",
-		"",
-		styleBold.Render("Log viewer (L)"),
-		"  [ ] / tab  switch container    { }  next/prev pod    p  previous instance    f  follow    w  wrap    T  timestamps short/off/full    H  highlighting    r  reload    esc  close",
-		"             JSON, logfmt (key=value) and klog lines are colour-coded automatically: keys dim, level by severity, messages bold",
-		"",
-		styleBold.Render("Tabs"),
-		"  Overview   cluster summary, API health, ranked findings with first-seen age; findings that went away stay listed as resolved for 15m",
-		"  Nodes      conditions + live CPU/mem/disk/load from SSH (or metrics-server), certs, services",
-		"  Inspect    controllers (deploy/ds/sts/job/cronjob) then pods not owned by one; p = all pods; t = rollout restart;",
-		"             enter opens the Object sub-tab: owner/child/secret/configmap/PVC/SA references, enter again drills down, esc back",
-		"             L = tail logs of the selected pod (or the controller's first pod): [ ] switch container, { } switch pod,",
-		"                 p previous instance, f follow on/off, w wrap, r reload, / not needed - lines stream live",
-		"             Resources sub-tab: every API type (built-in + CRDs) with instance counts; enter lists instances, enter again inspects one",
-		"  etcd       members, health, db size/quota/fragmentation, fsync latency, config source, snapshots/backups;",
-		"             X = rescue: stop rke2-server/k3s (or park the kubeadm static pods) on every server, move each etcd data dir into",
-		"                 a timestamped rescue dir, cluster-reset/restore the chosen snapshot on the chosen node, fix owner/mode, start it,",
-		"                 rejoin the other servers one at a time with an etcd member/health/leader check after each, take a fresh snapshot",
-		"  Storage    StorageClasses, CSI drivers, PVs/PVCs and node filesystems",
-		"  Events     warning events",
-		"  Addons     CNI, CSI, DNS/ingress/metrics, registry mirrors (registries.yaml on rke2/k3s, containerd certs.d elsewhere),",
-		"             Rancher management + join topology (rke2/k3s, or a cluster registered in Rancher), rke2 HelmCharts",
-		"  Helm       releases (enter = values applied), optional update check;",
-		"             u = helm upgrade to the newest known chart version, b = helm rollback to a chosen revision (both confirm first;",
-		"             need the helm CLI; --read-only disables them; rke2-bundled charts are refused)",
-		"  Images     per-node image inventory, unused images, airgap tarball contents vs running",
-		"  Security   Rules: DISA Kubernetes / RKE2 / Rancher MCM STIG + CIS checks from component flags, kubelet config, PSA, RBAC, node facts",
-		"             Node hardening: per-node runtime vs boot facts (SELinux, FIPS, auditd, firewall...) and the OS STIG summary",
-		"             OS STIG: every rule of the node's DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG - empty until you press S",
-		"  Logs       rke2/kubelet/containerd/rancher-system-agent logs classified into startup-noise / warnings / errors (Rancher plan events flag config rewrites)",
-		"             enter on a node lists its lines; enter on a line shows the full text + explanation; esc goes back; a shows info lines",
-		"  RKE2/k3s   config.yaml(.d), data-dir, server/manifests (HelmChartConfig etc.), static pod manifests, audit/PSS policies, config drift, API endpoint vs tls-san vs cert",
-		"  kubeadm    (same tab on upstream clusters) kubeadm-config ClusterConfiguration, API endpoint vs certSANs vs apiserver.crt",
-		"",
-		styleDim.Render("Config: ~/.config/k8s-health-tui/config.yaml (khealth --init-config writes the annotated example)"),
+// helpLines renders the ? overlay for a content width: key tables per
+// section (key column sized to fit, the description wraps in the rest).
+func helpLines(width int) []string {
+	if width < 40 {
+		width = 40
 	}
+	key := func(k string) string { return styleKey.Render(k) }
+	keyCols := []column{{title: "KEY"}, {title: "ACTION"}}
+	tabKeyCols := []column{{title: "TAB"}, {title: "KEY"}, {title: "ACTION"}}
+	tabCols := []column{{title: "TAB"}, {title: "WHAT IT SHOWS"}}
+	var lines []string
+	section := func(title string, cols []column, rows [][]string) {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, styleBold.Render(title))
+		for _, l := range wrapTable(width-2, cols, rows) {
+			lines = append(lines, "  "+l)
+		}
+	}
+	note := func(s string) {
+		for _, l := range wrap(s, width-2) {
+			lines = append(lines, "  "+styleDim.Render(l))
+		}
+	}
+
+	section("Navigation", keyCols, [][]string{
+		{key("tab / shift+tab / [ ]"), "next / previous tab"},
+		{key("1-9 0 - ="), "jump to a tab"},
+		{key("← → / h l"), "previous / next sub-tab inside the current tab"},
+		{key("↑ ↓ / j k"), "move selection / scroll"},
+		{key("g / G"), "top / bottom"},
+		{key("PgUp / PgDn / space"), "page"},
+		{key("enter"), "open detail for the selected row (j/k scroll, w wraps long lines, esc closes)"},
+		{key("C"), "switch cluster context (kubeconfig contexts + ~/.kube/khealth-*.yaml)"},
+		{key("esc"), "close overlay / clear filter / step back"},
+	})
+
+	section("Everywhere", keyCols, [][]string{
+		{key("n"), "choose namespace (shows PSA level + privileged pods; filters Inspect, Events, Storage, Helm)"},
+		{key("/"), "filter rows on the current tab (substring); esc clears"},
+		{key("a"), "toggle problems-only view (Overview, Inspect, Events, Security, Resources)"},
+		{key("r"), "refresh now (API + light SSH collection)"},
+		{key("R"), "full refresh: journal logs, images, tarballs, PV du (not the OS STIG)"},
+		{key("s"), "toggle SSH collection on/off"},
+		{key("P"), "footprint: what khealth itself costs the API server, the nodes (remote CPU per probe) and this host"},
+		{key("?"), "this help"},
+		{key("q"), "quit (steps back first when inside an object/log view)"},
+	})
+
+	section("Tab-specific keys", tabKeyCols, [][]string{
+		{"Inspect", key("enter"), "open the object (references, YAML)"},
+		{"", key("L"), "tail logs of the selected pod / the controller's pods"},
+		{"", key("p"), "jump to the Pods sub-tab"},
+		{"", key("t"), "rollout restart (Deployment/DaemonSet/StatefulSet, confirmed)"},
+		{"Helm", key("enter"), "values + history"},
+		{"", key("u"), "upgrade to the newest known version (confirmed)"},
+		{"", key("b"), "rollback (pick revision, confirmed)"},
+		{"Nodes", key("enter"), "node dashboard: gauges, security runtime-vs-boot, services, filesystems, certs"},
+		{"etcd", key("enter"), "raw probe output and config dumps"},
+		{"", key("X"), "rescue: rejoin one broken server (quorum fine) or restore a snapshot onto the whole control plane (SSH + actions enabled; preflight, warnings and a typed confirmation first)"},
+		{"Logs", key("enter"), "node lines; enter again = full line + explanation"},
+		{"", key("a"), "include info lines"},
+		{"Events", key("enter"), "open the involved object in the inspector"},
+		{"Security", key("← →"), "Rules / Node hardening / OS STIG"},
+		{"", key("enter"), "rule detail, fix and the STIG's own check procedure"},
+		{"", key("a"), "hide passing rules"},
+		{"", key("m"), "hide MANUAL rules"},
+		{"", key("shift+S"), "run the security scan: STIG/CIS rules from the API data plus, over SSH, the full DISA OS STIG collection in four stages per node (system facts, file modes, accounts, filesystem sweep; a few seconds each). Per-node progress shows on the tab, the percent in the header. Never runs on its own - not at launch, not on r/R; the OS facts stay until the next Shift+S"},
+	})
+	note("Security scorecards per benchmark (and per node): score = not a finding / (not a finding + open), as in an SCC / OpenSCAP report")
+
+	section("Log viewer (L)", keyCols, [][]string{
+		{key("[ ] / tab"), "switch container"},
+		{key("{ }"), "next / previous pod"},
+		{key("p"), "previous instance of the container"},
+		{key("f"), "follow on/off"},
+		{key("w"), "wrap on/off"},
+		{key("T"), "timestamps short / off / full"},
+		{key("H"), "highlighting on/off"},
+		{key("r"), "reload"},
+		{key("esc"), "close"},
+	})
+	note("JSON, logfmt (key=value) and klog lines are color-coded automatically: keys dim, level by severity, messages bold. Lines stream live; / is not needed.")
+
+	section("Tabs", tabCols, [][]string{
+		{"Overview", "cluster summary, API health, ranked findings with first-seen age; findings that went away stay listed as resolved for 15m"},
+		{"Nodes", "conditions + live CPU/mem/disk/load from SSH (or metrics-server), certs, services"},
+		{"Inspect", "controllers (deploy/ds/sts/job/cronjob) then pods not owned by one; p = all pods; t = rollout restart. enter opens the Object sub-tab: owner/child/secret/configmap/PVC/SA references, enter again drills down, esc back. Resources sub-tab: every API type (built-in + CRDs) with instance counts; enter lists instances, enter again inspects one"},
+		{"etcd", "members, health, db size/quota/fragmentation, fsync latency, config source, snapshots/backups. X = rescue: stop rke2-server/k3s (or park the kubeadm static pods) on every server, move each etcd data dir into a timestamped rescue dir, cluster-reset/restore the chosen snapshot on the chosen node, fix owner/mode, start it, rejoin the other servers one at a time with an etcd member/health/leader check after each, take a fresh snapshot"},
+		{"Storage", "StorageClasses, CSI drivers, PVs/PVCs and node filesystems"},
+		{"Events", "warning events"},
+		{"Addons", "CNI, CSI, DNS/ingress/metrics, registry mirrors (registries.yaml on rke2/k3s, containerd certs.d elsewhere), Rancher management + join topology (rke2/k3s, or a cluster registered in Rancher), rke2 HelmCharts"},
+		{"Helm", "releases (enter = values applied), optional update check; u = helm upgrade to the newest known chart version, b = helm rollback to a chosen revision (both confirm first; need the helm CLI; --read-only disables them; rke2-bundled charts are refused)"},
+		{"Images", "per-node image inventory, unused images, airgap tarball contents vs running"},
+		{"Security", "Rules: DISA Kubernetes / RKE2 / Rancher MCM STIG + CIS checks from component flags, kubelet config, PSA, RBAC, node facts. Node hardening: per-node runtime vs boot facts (SELinux, FIPS, auditd, firewall...) and the OS STIG summary. OS STIG: every rule of the node's DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG. The whole tab is opt-in: empty until Shift+S runs the scan"},
+		{"Logs", "rke2/kubelet/containerd/rancher-system-agent logs classified into startup-noise / warnings / errors (Rancher plan events flag config rewrites); enter on a node lists its lines, enter on a line shows the full text + explanation, esc goes back, a shows info lines"},
+		{"RKE2/k3s", "config.yaml(.d), data-dir, server/manifests (HelmChartConfig etc.), static pod manifests, audit/PSS policies, config drift, API endpoint vs tls-san vs cert"},
+		{"kubeadm", "(same tab on upstream clusters) kubeadm-config ClusterConfiguration, API endpoint vs certSANs vs apiserver.crt"},
+	})
+
+	lines = append(lines, "")
+	for _, l := range wrap("Config: ~/.config/k8s-health-tui/config.yaml (khealth --init-config writes the annotated example)", width) {
+		lines = append(lines, styleDim.Render(l))
+	}
+	lines = append(lines, styleDim.Render("khealth "+config.Version+" - created by Zach Mitchell"))
+	return lines
 }
 
 func firstLine(s string) string {

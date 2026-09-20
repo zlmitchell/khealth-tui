@@ -4,6 +4,7 @@ package config
 
 import (
 	_ "embed"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -263,6 +264,7 @@ func Load(args []string) (Config, error) {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "khealth - Kubernetes / RKE2 cluster health TUI\n\nUsage: khealth [flags] [[user@]server-node ...]\n\n  With no kubeconfig, name a server node (e.g. khealth root@10.0.0.143): the admin kubeconfig is fetched over SSH,\n  written under ~/.kube and used. Same as --bootstrap-kubeconfig user@host.\n\n")
 		fs.PrintDefaults()
+		fmt.Fprintf(fs.Output(), "\nkhealth %s - created by Zach Mitchell. Press ? inside the TUI for the key reference.\n", Version)
 	}
 	// flags and positional [user@]host arguments may be mixed (khealth
 	// root@10.0.0.1 --no-ssh): the flag package stops at the first
@@ -270,6 +272,9 @@ func Load(args []string) (Config, error) {
 	var positional []string
 	for rest := args; ; {
 		if err := fs.Parse(rest); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				os.Exit(0)
+			}
 			return cfg, err
 		}
 		if fs.NArg() == 0 {

@@ -265,7 +265,7 @@ func IsSystemNamespace(ns string) bool {
 	return false
 }
 
-// CPIsolation summarises how well a control-plane/etcd node is isolated from
+// CPIsolation summarizes how well a control-plane/etcd node is isolated from
 // user workloads and whether the control-plane static pods have requests.
 type CPIsolation struct {
 	Node         string
