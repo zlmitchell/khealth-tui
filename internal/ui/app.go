@@ -4,6 +4,8 @@ package ui
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -73,6 +75,7 @@ const (
 	ovInspect
 	ovPodLogs
 	ovContext
+	ovRescue
 )
 
 // row is one selectable/scrollable line of a tab.
@@ -150,6 +153,13 @@ type App struct {
 	revRelease    *k8s.HelmRelease
 	revCursor     int
 	actionRunning bool
+	rescue        *rescueView // etcd snapshot restore in progress (X on the etcd tab)
+
+	// apiserver failover: the kubeconfig's server is down, another control
+	// plane node's apiserver is used instead (same kubeconfig CA and user)
+	apiOverride string          // server URL in use when not the kubeconfig's
+	apiTried    map[string]bool // hosts tried since the API was last seen
+	apiTrying   bool
 
 	logs        *logView
 	inspect     []inspectLevel
@@ -266,6 +276,15 @@ type etcdExecMsg struct {
 	probe *etcd.Probe
 }
 type tickMsg struct{ seq int }
+
+// apiFailoverMsg is the outcome of trying other control-plane apiservers.
+type apiFailoverMsg struct {
+	seq    int
+	client *k8s.Client
+	server string
+	tried  []string
+	err    string
+}
 
 // New creates the application model.
 func New(cfg config.Config) (*App, error) {
@@ -469,6 +488,89 @@ func (a *App) sshTargetNames(snap *k8s.Snapshot) []string {
 	return out
 }
 
+// apiFailoverCmd tries the apiserver of other control-plane nodes when
+// the current one cannot be reached: the peers the etcd probes found on
+// disk (healthy etcd members first), the last node list, ssh.hosts. Each
+// host is tried once until the API is seen again.
+func (a *App) apiFailoverCmd() tea.Cmd {
+	if a.snap == nil || len(a.snap.Nodes) > 0 || a.apiTrying || !k8s.Unreachable(a.snap.Errors) {
+		return nil
+	}
+	cur, _ := url.Parse(a.client.Host)
+	port := "6443"
+	if cur != nil && cur.Port() != "" {
+		port = cur.Port()
+	}
+	curHost := ""
+	if cur != nil {
+		curHost = cur.Hostname()
+	}
+	var hosts []string
+	seen := map[string]bool{curHost: true}
+	add := func(h string) {
+		if h == "" || seen[h] || a.apiTried[h] {
+			return
+		}
+		seen[h] = true
+		hosts = append(hosts, h)
+	}
+	// etcd-healthy servers first: their apiserver is the most likely to answer
+	for _, pass := range []bool{true, false} {
+		for _, n := range sortedKeys(a.etcd) {
+			p := a.etcd[n]
+			healthy := p.Err == nil && p.Health != nil && p.Health.Healthy
+			if healthy != pass {
+				continue
+			}
+			for _, pr := range p.Peers {
+				add(pr.Host)
+			}
+		}
+	}
+	for i := range a.knownNodes {
+		n := &a.knownNodes[i]
+		if k8s.IsControlPlane(n) {
+			add(a.nodeIP(n))
+		}
+	}
+	for _, h := range sortedKeys(a.cfg.SSH.Hosts) {
+		hp := a.cfg.SSH.Hosts[h]
+		if x, _, err := net.SplitHostPort(hp); err == nil {
+			hp = x
+		}
+		add(hp)
+	}
+	if len(hosts) == 0 {
+		return nil
+	}
+	a.apiTrying = true
+	seq, kubeconfig, ctxName, opts := a.seq, a.cfg.Kubeconfig, a.client.Context, a.client.Opts
+	return func() tea.Msg {
+		var tried []string
+		lastErr := ""
+		for _, h := range hosts {
+			server := "https://" + net.JoinHostPort(h, port)
+			tried = append(tried, h)
+			o := opts
+			o.Server = server
+			c, err := k8s.NewWithOptions(kubeconfig, ctxName, o)
+			if err != nil {
+				lastErr = err.Error()
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			_, err = c.Ping(ctx)
+			cancel()
+			if err != nil {
+				lastErr = server + ": " + firstLine(err.Error())
+				continue
+			}
+			return apiFailoverMsg{seq: seq, client: c, server: server, tried: tried}
+		}
+		return apiFailoverMsg{seq: seq, tried: tried, err: lastErr}
+	}
+}
+
 // sshTargets returns the nodes to collect from. When the API returned no
 // nodes (apiserver/etcd down) it falls back to the last good list, then to
 // the ssh.hosts map, and reports offline=true so every host gets the etcd
@@ -477,14 +579,47 @@ func (a *App) sshTargets(snap *k8s.Snapshot) ([]corev1.Node, bool) {
 	if len(snap.Nodes) > 0 {
 		return snap.Nodes, false
 	}
-	if len(a.knownNodes) > 0 {
-		return a.knownNodes, true
-	}
 	var out []corev1.Node
-	for _, name := range sortedKeys(a.cfg.SSH.Hosts) {
-		out = append(out, corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	if len(a.knownNodes) > 0 {
+		out = append(out, a.knownNodes...)
+	} else {
+		for _, name := range sortedKeys(a.cfg.SSH.Hosts) {
+			out = append(out, corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}})
+		}
 	}
-	return out, true
+	return a.withPeers(out), true
+}
+
+// withPeers adds the cluster members the etcd probes found on disk (the
+// members bucket of a node's db, its initial-cluster) that no node in the
+// list covers yet: with the apiserver down, one reachable server is enough
+// to learn the whole control plane and probe it over its peer addresses.
+func (a *App) withPeers(nodes []corev1.Node) []corev1.Node {
+	seen := map[string]bool{}
+	for i := range nodes {
+		seen[a.nodeAddress(&nodes[i])] = true
+		seen[nodes[i].Name] = true
+		for _, ad := range nodes[i].Status.Addresses {
+			seen[ad.Address] = true
+		}
+	}
+	for _, n := range sortedKeys(a.etcd) {
+		for _, pr := range a.etcd[n].Peers {
+			name := pr.NodeName()
+			if name == "" {
+				name = pr.Host
+			}
+			if pr.Host == "" || seen[pr.Host] || seen[name] {
+				continue
+			}
+			seen[pr.Host], seen[name] = true, true
+			nodes = append(nodes, corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"node-role.kubernetes.io/etcd": "true", "node-role.kubernetes.io/control-plane": "true"}},
+				Status:     corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: pr.Host}}},
+			})
+		}
+	}
+	return nodes
 }
 
 // etcdExecCmd runs etcdctl inside an etcd static pod through the API
@@ -781,6 +916,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.crdCounts = nil
 		a.crdCounting = false
+		if len(a.snap.Nodes) > 0 {
+			a.apiTried = nil // the API answers: forget the failover attempts
+		}
 		a.timedRecompute()
 		a.recordSnapshot()
 		if a.fp.logger != nil && a.status == "" {
@@ -792,7 +930,32 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.onCRDs() {
 			crdCmd = a.crdCountCmd()
 		}
-		return a, tea.Batch(a.collectCmds(a.snap), a.helmCmd(a.snap), a.etcdExecCmd(a.snap), crdCmd, a.tickCmd())
+		return a, tea.Batch(a.collectCmds(a.snap), a.helmCmd(a.snap), a.etcdExecCmd(a.snap), crdCmd, a.apiFailoverCmd(), a.tickCmd())
+	case apiFailoverMsg:
+		a.apiTrying = false
+		if m.seq != a.seq {
+			return a, nil
+		}
+		if a.apiTried == nil {
+			a.apiTried = map[string]bool{}
+		}
+		for _, h := range m.tried {
+			a.apiTried[h] = true
+		}
+		if m.client == nil {
+			if m.err != "" {
+				a.setStatus("apiserver " + a.client.Host + " unreachable; no other control-plane apiserver answered: " + m.err)
+			}
+			return a, nil
+		}
+		a.client = m.client
+		a.apiOverride = m.server
+		a.client.ResetDenied()
+		a.setStatus("apiserver unreachable: switched to " + m.server + " (another control-plane node, same kubeconfig)")
+		if !a.refreshing {
+			return a, a.refreshCmd()
+		}
+		return a, nil
 	case nodeMsg:
 		if m.seq != a.seq {
 			return a, nil
@@ -814,13 +977,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.probe.Merge(a.etcd[m.probe.Node])
 		a.etcd[m.probe.Node] = m.probe
 		delete(a.etcdPend, m.probe.Node)
+		a.rescueRefresh()
 		a.recordEtcdProbe(m.probe)
 		a.noteProbeDuration(m.probe.Node, m.probe.Duration)
 		a.recordEtcd(m.probe)
+		// peers found on this node's disk are apiserver candidates: try them
+		// now rather than on the next refresh tick
+		failover := a.apiFailoverCmd()
 		if name := m.probe.RKE2Config["etcd-s3-config-secret"]; name != "" && (a.s3 == nil || a.s3.Name != name) {
-			return a, tea.Batch(a.scheduleRecompute(), a.s3Cmd(name))
+			return a, tea.Batch(a.scheduleRecompute(), a.s3Cmd(name), failover)
 		}
-		return a, tea.Batch(a.scheduleRecompute(), a.s3CheckCmd(m.probe.Node))
+		return a, tea.Batch(a.scheduleRecompute(), a.s3CheckCmd(m.probe.Node), failover)
 	case s3Msg:
 		a.s3 = m.info
 		cmds := []tea.Cmd{a.scheduleRecompute()}
@@ -839,6 +1006,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.scheduleRecompute()
 	case actionDoneMsg:
 		return a, a.handleActionDone(m)
+	case rescuePreflightMsg:
+		return a, a.handleRescuePreflight(m)
+	case rescueMsg:
+		return a, a.handleRescueMsg(m)
 	case etcdExecMsg:
 		if m.seq != a.seq {
 			return a, nil
@@ -960,6 +1131,9 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 	}
+	if a.tab == tabEtcd && key == "X" {
+		return a, a.openRescue()
+	}
 	if a.tab == tabHelm && a.snap != nil {
 		switch key {
 		case "u":
@@ -980,6 +1154,10 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key {
 	case "q":
+		if r := a.rescue; r != nil && r.phase == rescueRunning {
+			a.setStatus("an etcd rescue is running: X shows it, x there aborts after the current step; ctrl+c quits regardless (the step in progress is cut off)")
+			return a, nil
+		}
 		a.closePodLogs()
 		a.endCycle()
 		a.fp.logger.Close()
@@ -1219,7 +1397,7 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := m.String()
 	// tab switching is disabled while a modal view is open: say so instead
 	// of silently swallowing the key (pod logs use tab/[ ] for containers)
-	if a.overlay != ovPodLogs && a.overlay != ovNamespace {
+	if a.overlay != ovPodLogs && a.overlay != ovNamespace && a.overlay != ovRescue {
 		switch key {
 		case "tab", "shift+tab", "[", "]", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "left", "right", "h", "l":
 			if a.overlay != ovInspect || key == "tab" || key == "shift+tab" {
@@ -1235,6 +1413,8 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleInspectKey(key)
 	case ovPodLogs:
 		return a.handleLogKey(key)
+	case ovRescue:
+		return a.handleRescueKey(m)
 	case ovContext:
 		switch key {
 		case "esc", "q", "C":
@@ -1334,6 +1514,7 @@ func (a *App) switchContext(c k8s.ContextInfo) tea.Cmd {
 	}
 	a.closePodLogs()
 	a.client = client
+	a.apiOverride, a.apiTried, a.apiTrying = "", nil, false
 	a.cfg.Kubeconfig, a.cfg.Context = kubeconfig, c.Name
 	a.snap, a.snapErr, a.knownNodes = nil, "", nil
 	a.nodes, a.pending = map[string]*nodeinfo.Info{}, map[string]bool{}
@@ -1361,6 +1542,8 @@ func (a *App) switchContext(c k8s.ContextInfo) tea.Cmd {
 			if h.Become != "" && !a.cfg.Flags["become"] {
 				a.cfg.SSH.Become = h.Become
 			}
+			a.cfg.SSH.Hosts = nil // the previous cluster's fallback host is not this cluster's
+			a.cfg.SSH.AddFallbackHost(h.Host)
 		}
 		// the runner caches connections per host; the new cluster has its own
 		if a.runner != nil {
@@ -1592,6 +1775,9 @@ func (a *App) renderHeader() string {
 	parts := []string{styleTitle.Render(" khealth") + styleDim.Render(" "+config.Version)}
 	if a.snap != nil {
 		parts = append(parts, kv("ctx", a.client.Context), kv("k8s", a.snap.Version), kv("dist", a.snap.Distribution))
+		if a.apiOverride != "" {
+			parts = append(parts, kv("api", styleWarn.Render(strings.TrimPrefix(a.apiOverride, "https://")+" (failover)")))
+		}
 		ready := 0
 		for i := range a.snap.Nodes {
 			if k8s.NodeReady(&a.snap.Nodes[i]) {
@@ -1629,6 +1815,8 @@ func (a *App) renderHeader() string {
 	parts = append(parts, kv("ssh", ssh))
 	state := ""
 	switch {
+	case a.rescueHeader() != "":
+		state = a.spinner.View() + " " + styleWarn.Render(a.rescueHeader())
 	case a.actionRunning:
 		state = a.spinner.View() + " " + styleWarn.Render("helm action running")
 	case a.refreshing:
@@ -1799,6 +1987,18 @@ func (a *App) renderFooter() string {
 		keys = []string{"esc back", "enter drill down", "j/k move", "q close", "(tabs resume after esc)"}
 	case ovPodLogs:
 		keys = []string{"esc close", "[ ]/tab container", "{ } pod", "p previous", "f follow", "w wrap", "T timestamps", "H highlight", "r reload"}
+	case ovRescue:
+		keys = []string{"esc cancel/back", "j/k choose", "enter next"}
+		if r := a.rescue; r != nil {
+			switch r.phase {
+			case rescueConfirm:
+				keys = []string{"esc cancel", "enter begin (after typing " + rescueWord + ")", "↑/↓ PgUp/PgDn scroll"}
+			case rescueRunning:
+				keys = []string{"esc hide (keeps running)", "x abort after current step", "j/k PgUp/PgDn scroll", "f follow"}
+			case rescueDone:
+				keys = []string{"esc close + refresh", "j/k scroll", "g/G top/bottom"}
+			}
+		}
 	}
 	var parts []string
 	for _, k := range keys {
@@ -1850,6 +2050,8 @@ func (a *App) renderOverlay() string {
 		title, lines = a.renderInspect()
 	case ovPodLogs:
 		title, lines = a.renderPodLogs()
+	case ovRescue:
+		title, lines = a.renderRescue()
 	case ovContext:
 		title = "Switch cluster context"
 		lines = append(lines, styleDim.Render("contexts of the kubeconfig in use plus every ~/.kube/khealth-*.yaml written by `khealth user@host`; enter switches and starts a fresh first-contact cycle"), "")
@@ -1938,7 +2140,8 @@ func helpLines() []string {
 		"             L      tail logs of the selected pod / controller's pods   p   jump to the Pods sub-tab",
 		"  Helm       enter  values + history                        u   upgrade to newest known version (confirmed)   b   rollback (pick revision, confirmed)",
 		"  Nodes      enter  node dashboard: gauges, security runtime-vs-boot, services, filesystems, certs",
-		"  etcd       enter  raw probe output and config dumps",
+		"  etcd       enter  raw probe output and config dumps          X   rescue: rejoin one broken server (quorum fine) or restore a snapshot",
+		"                    onto the whole control plane (SSH + actions enabled; preflight, warnings and a typed confirmation first)",
 		"  Logs       enter  node lines, enter again = full line + explanation; a = include info lines",
 		"  Events     enter  open the involved object in the inspector",
 		"  Security   ←/→    Rules / Node hardening / OS STIG        enter  rule detail, fix and the STIG's own check procedure",
@@ -1960,7 +2163,10 @@ func helpLines() []string {
 		"             L = tail logs of the selected pod (or the controller's first pod): [ ] switch container, { } switch pod,",
 		"                 p previous instance, f follow on/off, w wrap, r reload, / not needed - lines stream live",
 		"             Resources sub-tab: every API type (built-in + CRDs) with instance counts; enter lists instances, enter again inspects one",
-		"  etcd       members, health, db size/quota/fragmentation, fsync latency, config source, snapshots/backups",
+		"  etcd       members, health, db size/quota/fragmentation, fsync latency, config source, snapshots/backups;",
+		"             X = rescue: stop rke2-server/k3s (or park the kubeadm static pods) on every server, move each etcd data dir into",
+		"                 a timestamped rescue dir, cluster-reset/restore the chosen snapshot on the chosen node, fix owner/mode, start it,",
+		"                 rejoin the other servers one at a time with an etcd member/health/leader check after each, take a fresh snapshot",
 		"  Storage    StorageClasses, CSI drivers, PVs/PVCs and node filesystems",
 		"  Events     warning events",
 		"  Addons     CNI, CSI, DNS/ingress/metrics, Rancher management, registries.yaml, rke2 HelmCharts",

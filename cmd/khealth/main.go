@@ -287,6 +287,7 @@ func applySSHHint(cfg *config.Config, h k8s.SSHHint) {
 	if h.Become != "" && !cfg.Flags["become"] {
 		cfg.SSH.Become = h.Become
 	}
+	cfg.SSH.AddFallbackHost(h.Host)
 }
 
 func sshNote(cfg *config.Config, h k8s.SSHHint) string {

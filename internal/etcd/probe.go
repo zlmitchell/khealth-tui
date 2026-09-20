@@ -71,6 +71,35 @@ type Probe struct {
 	SnapshotDirs []SnapshotDir
 	BackupHints  []string
 	Raw          string
+
+	// Peers is the cluster membership as this node's disk knows it (members
+	// bucket of the bbolt db, initial-cluster of the generated config or
+	// manifest): readable with etcd down, which is when the rescue needs it.
+	Peers        []Peer
+	SelfName     string // this member's name (data dir "name" file)
+	PeersSkipped bool   // not scanned this cycle (healthy member, light cycle)
+}
+
+// Peer is one member seen on disk, keyed by its peer address.
+type Peer struct {
+	Host    string // peer URL host (the address the rescue reaches it on)
+	PeerURL string
+	Name    string // member name (rke2: <hostname>-<8 hex>)
+	ID      string // member id, hex ("" when only the config knew it)
+	Source  string // db | config | db+config
+}
+
+// NodeName is the Kubernetes node name a member name most likely belongs
+// to: rke2/k3s append "-<8 hex>" to the hostname, kubeadm uses the node
+// name as is.
+func (pr Peer) NodeName() string {
+	return memberNodeName(pr.Name)
+}
+
+var memberSuffixRe = regexp.MustCompile(`-[0-9a-f]{8}$`)
+
+func memberNodeName(member string) string {
+	return memberSuffixRe.ReplaceAllString(member, "")
 }
 
 // LeaderEvent is one "X became/elected leader at term N" line from the etcd log.
@@ -308,6 +337,7 @@ func Parse(node, out string) *Probe {
 	}
 	parseEtcdctl(p, secs["ETCDCTL"])
 	parseLeaderLog(p, secs["LEADERLOG"])
+	parsePeers(p, secs["PEERS"])
 	p.Raft = parseRaft(secs["RAFT"])
 	dd := lines(secs["DATADIR"])
 	if len(dd) > 1 {
@@ -399,6 +429,87 @@ func parseLeaderLog(p *Probe, raw string) {
 	}
 }
 
+var (
+	peerJSONRe    = regexp.MustCompile(`\{"id":(\d+),"peerURLs":\[([^\]]*)\],"name":"([^"]*)"`)
+	peerURLHostRe = regexp.MustCompile(`^https?://(\[[^\]]+\]|[^:/]+)`)
+)
+
+// parsePeers merges the db and config evidence into Probe.Peers, one entry
+// per peer address (a freed bbolt page may still hold a member removed
+// since; the config line is the freshest name for an address).
+func parsePeers(p *Probe, raw string) {
+	byHost := map[string]*Peer{}
+	var order []string
+	add := func(host, url, name, id, src string) {
+		if host == "" {
+			return
+		}
+		pr, ok := byHost[host]
+		if !ok {
+			pr = &Peer{Host: host, PeerURL: url}
+			byHost[host] = pr
+			order = append(order, host)
+		}
+		if pr.PeerURL == "" {
+			pr.PeerURL = url
+		}
+		switch src {
+		case "config":
+			pr.Name = name // the config is the freshest name for the address
+		case "db":
+			if pr.Name == "" {
+				pr.Name = name
+			}
+			if id != "" {
+				pr.ID = id
+			}
+		}
+		if pr.Source == "" || pr.Source == src {
+			pr.Source = src
+		} else {
+			pr.Source = "db+config"
+		}
+	}
+	for _, l := range lines(raw) {
+		switch {
+		case l == "skipped=healthy":
+			p.PeersSkipped = true
+			return
+		case strings.HasPrefix(l, "self: "):
+			p.SelfName = strings.TrimPrefix(l, "self: ")
+		case strings.HasPrefix(l, "db: "):
+			g := peerJSONRe.FindStringSubmatch(l)
+			if g == nil {
+				continue
+			}
+			for _, u := range strings.Split(g[2], ",") {
+				u = strings.Trim(strings.TrimSpace(u), `"`)
+				add(peerURLHost(u), u, g[3], hexID(g[1]), "db")
+			}
+		case strings.HasPrefix(l, "config: initial-cluster:"):
+			list := strings.TrimSpace(strings.TrimPrefix(l, "config: initial-cluster:"))
+			for _, ent := range strings.Split(list, ",") {
+				name, u, ok := strings.Cut(strings.TrimSpace(ent), "=")
+				if !ok {
+					continue
+				}
+				add(peerURLHost(u), u, name, "", "config")
+			}
+		}
+	}
+	for _, h := range order {
+		p.Peers = append(p.Peers, *byHost[h])
+	}
+}
+
+func peerURLHost(u string) string {
+	g := peerURLHostRe.FindStringSubmatch(u)
+	if g == nil {
+		return ""
+	}
+	return strings.Trim(g[1], "[]")
+}
+
 func parseRaft(raw string) *RaftOnDisk {
 	var r *RaftOnDisk
 	for _, l := range lines(raw) {
@@ -443,6 +554,9 @@ func (p *Probe) Merge(prev *Probe) {
 		if len(p.LeaderEvents) == 0 {
 			p.LeaderEvents = prev.LeaderEvents
 		}
+	}
+	if p.PeersSkipped && !prev.PeersSkipped {
+		p.Peers, p.SelfName, p.PeersSkipped = prev.Peers, prev.SelfName, false
 	}
 	if p.FullSkipped && !prev.FullSkipped {
 		p.Sources, p.ConfigDump, p.SnapshotDirs, p.BackupHints = prev.Sources, prev.ConfigDump, prev.SnapshotDirs, prev.BackupHints
@@ -681,7 +795,7 @@ func parseEtcdctl(p *Probe, raw string) {
 			p.EtcdctlDiag = firstLine(s)
 		}
 	}
-	if s := strings.TrimSpace(parts["STATUS"]); s != "" {
+	if s := jsonArray(parts["STATUS"]); s != "" {
 		var doc []map[string]any
 		if err := decodeNumbers(s, &doc); err == nil {
 			for _, e := range doc {
@@ -724,6 +838,9 @@ func parseEtcdctl(p *Probe, raw string) {
 			p.Alarms = append(p.Alarms, Alarm{MemberID: hexID(numStr(m["memberID"])), Type: t})
 		}
 	}
+	if s := strings.TrimSpace(parts["HEALTH"]); s != "" {
+		p.EndpointHealth = parseEndpointHealth(s)
+	}
 	if enc := strings.TrimSpace(parts["ENCSAMPLE"]); enc != "" {
 		if p.Encryption == nil {
 			p.Encryption = &Encryption{}
@@ -741,6 +858,33 @@ func parseEtcdctl(p *Probe, raw string) {
 	}
 }
 
+// ParseCtl parses etcdctl output in the probe's sectioned form
+// (---MEMBERS / ---HEALTH / ---STATUS / ---ALARMS, each followed by the
+// `-w json` output of the matching etcdctl command) into a Probe carrying
+// only the cluster-state fields. Used by the etcd rescue between its steps.
+func ParseCtl(node, raw string) *Probe {
+	p := &Probe{Node: node, Collected: time.Now(), RKE2Config: map[string]string{}}
+	parseEtcdctl(p, raw)
+	return p
+}
+
+// Leader returns the member id every endpoint status agrees is the leader,
+// or "" when there is none or they disagree.
+func (p *Probe) Leader() string {
+	leader := ""
+	for _, st := range p.Statuses {
+		if st.Leader == "" {
+			return ""
+		}
+		if leader == "" {
+			leader = st.Leader
+		} else if st.Leader != leader {
+			return ""
+		}
+	}
+	return leader
+}
+
 // statusFrom converts an etcdctl or gRPC-gateway status object (numbers may
 // be JSON numbers or strings) into an EndpointStatus.
 func statusFrom(st map[string]any) EndpointStatus {
@@ -755,6 +899,20 @@ func statusFrom(st map[string]any) EndpointStatus {
 	}
 	es.Errors = strList(st["errors"])
 	return es
+}
+
+// jsonArray cuts an etcdctl `-w json` output down to its JSON array: with a
+// member down, `endpoint health/status --cluster` prints client warnings
+// before the array and "Error: unhealthy cluster" after it, on the same
+// stream, and the array in between is the answer for the members that are
+// up.
+func jsonArray(raw string) string {
+	i := strings.Index(raw, "[")
+	j := strings.LastIndex(raw, "]")
+	if i < 0 || j <= i {
+		return ""
+	}
+	return raw[i : j+1]
 }
 
 // decodeNumbers unmarshals JSON keeping integers exact (etcd IDs are uint64).

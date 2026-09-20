@@ -302,3 +302,60 @@ func TestLightProbeMergesFullAndEtcdctl(t *testing.T) {
 		t.Fatal("merge overwrote fresh results")
 	}
 }
+
+func TestParsePeers(t *testing.T) {
+	out := "===DIST\nrke2\n===PATHS\ndatadir=/var/lib/rancher/rke2/server/db/etcd\n===PEERS\n" +
+		"db: {\"id\":11634413510652969317,\"peerURLs\":[\"https://10.0.0.143:2380\"],\"name\":\"redhat9-test-c01d5123\"\n" +
+		"db: {\"id\":1819112585307070008,\"peerURLs\":[\"https://10.0.0.235:2380\"],\"name\":\"redhat9-test-2-39b1f557\"\n" +
+		"db: {\"id\":842084608408843261,\"peerURLs\":[\"https://10.0.0.223:2380\"],\"name\":\"redhat9-test-3-60c619d8\"\n" +
+		"db: {\"id\":99,\"peerURLs\":[\"https://10.0.0.143:2380\"],\"name\":\"redhat9-test-deadbeef\"\n" + // a freed page: older member for the same address
+		"config: initial-cluster: redhat9-test-2-39b1f557=https://10.0.0.235:2380,redhat9-test-c01d5123=https://10.0.0.143:2380\n" +
+		"self: redhat9-test-c01d5123\n===END\n"
+	p := Parse("cp-1", out)
+	if p.PeersSkipped || p.SelfName != "redhat9-test-c01d5123" || len(p.Peers) != 3 {
+		t.Fatalf("peers: skipped=%v self=%q %+v", p.PeersSkipped, p.SelfName, p.Peers)
+	}
+	byHost := map[string]Peer{}
+	for _, pr := range p.Peers {
+		byHost[pr.Host] = pr
+	}
+	if pr := byHost["10.0.0.143"]; pr.Name != "redhat9-test-c01d5123" || pr.Source != "db+config" || pr.NodeName() != "redhat9-test" || pr.PeerURL != "https://10.0.0.143:2380" {
+		t.Errorf("143: %+v", pr)
+	}
+	if pr := byHost["10.0.0.223"]; pr.Name != "redhat9-test-3-60c619d8" || pr.Source != "db" || pr.ID != "bafb0b0fb96a4fd" && pr.ID == "" || pr.NodeName() != "redhat9-test-3" {
+		t.Errorf("223: %+v", pr)
+	}
+	if pr := byHost["10.0.0.235"]; pr.ID == "" || pr.Source != "db+config" {
+		t.Errorf("235: %+v", pr)
+	}
+	// a light cycle on a healthy member keeps the previous scan
+	light := Parse("cp-1", "===DIST\nrke2\n===PEERS\nskipped=healthy\n===END\n")
+	if !light.PeersSkipped {
+		t.Fatal("not marked skipped")
+	}
+	light.Merge(p)
+	if light.PeersSkipped || len(light.Peers) != 3 || light.SelfName == "" {
+		t.Errorf("merge: %+v", light.Peers)
+	}
+	// kubeadm: only the manifest's initial-cluster
+	k := Parse("cp-1", "===DIST\nkubeadm\n===PEERS\nconfig: initial-cluster: cp-1=https://10.0.0.1:2380,cp-2=https://10.0.0.2:2380\n===END\n")
+	if len(k.Peers) != 2 || k.Peers[1].Host != "10.0.0.2" || k.Peers[1].NodeName() != "cp-2" || k.Peers[1].Source != "config" {
+		t.Errorf("kubeadm peers: %+v", k.Peers)
+	}
+	if memberNodeName("host-with-dash-1") != "host-with-dash-1" || memberNodeName("[fd00::1]") != "[fd00::1]" {
+		t.Error("memberNodeName strips more than the rke2 suffix")
+	}
+}
+
+// With a member down etcdctl prints the JSON array for the members that
+// answer, surrounded by client warnings and "Error: unhealthy cluster".
+func TestParseCtlUnhealthyCluster(t *testing.T) {
+	raw := "---MEMBERS\n{\"members\":[{\"ID\":1,\"name\":\"a\",\"peerURLs\":[\"https://10.0.0.1:2380\"],\"clientURLs\":[\"https://10.0.0.1:2379\"]},{\"ID\":2,\"name\":\"b\",\"peerURLs\":[\"https://10.0.0.2:2380\"],\"clientURLs\":[\"https://10.0.0.2:2379\"]}]}\n\n" +
+		"---HEALTH\n{\"level\":\"warn\",\"ts\":\"2026-09-20T02:30:04.494120Z\",\"logger\":\"client\",\"caller\":\"v3/retry_interceptor.go:63\",\"msg\":\"retrying of unary invoker failed\"}\n" +
+		"[{\"endpoint\":\"https://10.0.0.1:2379\",\"health\":true,\"took\":\"4ms\"},{\"endpoint\":\"https://10.0.0.2:2379\",\"health\":false,\"error\":\"context deadline exceeded\"}]\nError: unhealthy cluster\n\n" +
+		"---STATUS\n{\"level\":\"warn\",\"msg\":\"retrying\"}\n[{\"Endpoint\":\"https://10.0.0.1:2379\",\"Status\":{\"header\":{\"member_id\":1},\"leader\":1,\"raftIndex\":10,\"raftTerm\":2,\"version\":\"3.5.15\",\"dbSize\":1}}]\nFailed to get the status of endpoint https://10.0.0.2:2379 (context deadline exceeded)\n\n---ALARMS\n{}\n"
+	p := ParseCtl("a", raw)
+	if len(p.Members) != 2 || len(p.EndpointHealth) != 2 || !p.EndpointHealth[0].Healthy || p.EndpointHealth[1].Healthy || len(p.Statuses) != 1 || p.Leader() != "1" {
+		t.Errorf("members %d health %+v statuses %+v leader %q", len(p.Members), p.EndpointHealth, p.Statuses, p.Leader())
+	}
+}

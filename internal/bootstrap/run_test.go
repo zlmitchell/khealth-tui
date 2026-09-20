@@ -201,6 +201,17 @@ func TestRunNothingVerifies(t *testing.T) {
 	if _, err := os.Stat(out); err != nil {
 		t.Errorf("file not written: %v", err)
 	}
+	// the SSH host is in the certificate but the apiserver is down (etcd
+	// quorum lost): the SSH host is still written so khealth starts offline
+	cert = servingCert(t, []string{"kubernetes"}, []string{"127.0.0.1"})
+	down := node(t, nodeOutput(nodeKubeconfig("1", base64.StdEncoding.EncodeToString([]byte(cert))), cert), srv)
+	res, err = Run(context.Background(), r, Options{Hosts: []string{down.Addr}, Out: out, Fresh: true, Lookup: func(string) []net.IP { return nil }})
+	if err != nil {
+		t.Fatalf("run with apiserver down: %v", err)
+	}
+	if res.Endpoint.Host != "127.0.0.1" || res.Version != "" || !strings.Contains(strings.Join(res.Notes, "\n"), "khealth starts offline") {
+		t.Errorf("offline result: %+v", res)
+	}
 
 	// no host at all
 	if _, err := Run(context.Background(), r, Options{Hosts: []string{"127.0.0.1:1"}}); err == nil || !strings.HasPrefix(err.Error(), "no host yielded a kubeconfig: ssh 127.0.0.1:1") {

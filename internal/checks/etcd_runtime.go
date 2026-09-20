@@ -174,6 +174,7 @@ func (r etcdRuntime) resetSteps(target, targetIP, snapshot string, others []stri
 	case "rke2", "k3s":
 		return []string{
 			"If quorum has not returned: on EVERY other server first (" + otherList + "): " + r.stop + "   (nothing else may be trying to form a cluster while " + target + " resets)",
+			"Before resetting, on EVERY node including agents: server: in /etc/rancher/" + r.kind + "/config.yaml(.d) must be the VIP/DNS the cluster joins through and token: the cluster token (/var/lib/rancher/" + r.kind + "/server/token on a server) — a node pointed at one specific server or carrying another token will not rejoin. On " + target + " itself: cluster-reset refuses to run while server: is set (\"remove server from configuration before resetting\"): comment it out for the reset, keep token: (the snapshot's bootstrap data is encrypted with it), put server: back before the next restart",
 			"Then on " + target + ": " + r.stop + "; " + r.kind + " server --cluster-reset   (keeps its local data, drops the other members; the command exits when done)",
 			r.start + " on " + target + "; wait until kubectl get nodes answers",
 			"On each of the other servers, one at a time: rm -rf " + r.dbDir() + "; " + r.start + "   (they rejoin and resync from " + target + ")",

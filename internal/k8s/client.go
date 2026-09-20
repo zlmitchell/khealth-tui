@@ -4,8 +4,10 @@ package k8s
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -36,6 +38,10 @@ type Options struct {
 	// ~3-5x fewer bytes than JSON and much cheaper for the apiserver to
 	// encode. Raw endpoints (readyz, metrics.k8s.io, kubelet proxy) stay JSON.
 	Protobuf bool
+	// Server replaces the kubeconfig's server URL (same CA, same
+	// credentials): khealth fails over to another control-plane node's
+	// apiserver when the configured one is down.
+	Server string
 	// DiscoveryTTL caches API discovery + CRD definitions (large, static)
 	// and ConfigzTTL the per-node kubelet configz; 0 fetches every cycle.
 	DiscoveryTTL time.Duration
@@ -244,6 +250,9 @@ func NewWithOptions(kubeconfig, ctxName string, opts Options) (*Client, error) {
 	if ctxName != "" {
 		overrides.CurrentContext = ctxName
 	}
+	if opts.Server != "" {
+		overrides.ClusterInfo.Server = opts.Server
+	}
 	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides)
 	raw, err := cc.RawConfig()
 	if err != nil {
@@ -254,6 +263,9 @@ func NewWithOptions(kubeconfig, ctxName string, opts Options) (*Client, error) {
 		return nil, fmt.Errorf("build client config: %w", err)
 	}
 	restCfg.Timeout = 30 * time.Second
+	// a dead control-plane host must fail fast (default: the request
+	// timeout), or every refresh stalls before the SSH collection even starts
+	restCfg.Dial = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	restCfg.QPS = 50
 	restCfg.Burst = 100
 	// Deprecation warnings would otherwise go to stderr via klog and corrupt
@@ -285,6 +297,34 @@ func NewWithOptions(kubeconfig, ctxName string, opts Options) (*Client, error) {
 		name = raw.CurrentContext
 	}
 	return &Client{CS: cs, Dyn: dyn, Meta: md, Config: restCfg, Context: name, Host: restCfg.Host, Opts: opts, stats: st, configz: map[string]configzEntry{}}, nil
+}
+
+// Ping asks the apiserver for /version; the error says why it is not
+// usable (connection, TLS, credentials).
+func (c *Client) Ping(ctx context.Context) (string, error) {
+	b, err := c.CS.Discovery().RESTClient().Get().AbsPath("/version").DoRaw(ctx)
+	if err != nil {
+		return "", err
+	}
+	var v struct {
+		GitVersion string `json:"gitVersion"`
+	}
+	_ = json.Unmarshal(b, &v)
+	return v.GitVersion, nil
+}
+
+// Unreachable reports whether a snapshot's errors say the apiserver could
+// not be reached at all (as opposed to refusing a request), which is when
+// another control-plane node's apiserver is worth trying.
+func Unreachable(errs []string) bool {
+	for _, e := range errs {
+		for _, m := range []string{"connection refused", "i/o timeout", "no route to host", "network is unreachable", "context deadline exceeded", "EOF", "connection reset", "no such host", "dial tcp"} {
+			if strings.Contains(e, m) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CheckKubeconfig reports whether a kubeconfig loads and yields a usable

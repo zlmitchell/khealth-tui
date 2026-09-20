@@ -532,6 +532,13 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 	hint.Host = src.Host
 	hint.Bootstrapped = time.Now().UTC().Format(time.RFC3339)
 	res.SSH = hint
+	sshHost, _, _ := strings.Cut(src.Host, ":")
+	// when nothing verifies (apiserver down, etcd quorum lost, no SAN) the
+	// SSH host is written anyway: khealth then starts offline, probes the
+	// node over SSH and the etcd tab can run the rescue
+	var fallback []byte
+	var fallbackEP Endpoint
+	fallbackName, fallbackErr := "", ""
 	for _, ep := range eps {
 		name := ClusterName(o.Name, ep, src)
 		kc, err := Rewrite(src.Kubeconfig, ep.Host, name, hint)
@@ -541,15 +548,19 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 		v, err := Verify(ctx, kc)
 		if err != nil {
 			logf("  %-40s %s", ep.Host, shortErr(err))
-			if ep.Score <= 10 && out == nil {
-				out, res.Endpoint, res.Name = kc, ep, name
-				res.Notes = append(res.Notes, "no endpoint verified; wrote the SSH host - "+shortErr(err))
+			if fallback == nil || ep.Host == sshHost {
+				fallback, fallbackEP, fallbackName, fallbackErr = kc, ep, name, shortErr(err)
 			}
 			continue
 		}
 		logf("  %-40s ok  %s (%s)", ep.Host, v, ep.Reason)
 		out, res.Endpoint, res.Name, res.Version = kc, ep, name, v
 		break
+	}
+	if out == nil && fallback != nil {
+		out, res.Endpoint, res.Name = fallback, fallbackEP, fallbackName
+		res.Notes = append(res.Notes, "no endpoint verified; wrote the SSH host - "+fallbackErr)
+		res.Notes = append(res.Notes, "the API server is not answering: khealth starts offline and probes "+src.Host+" over SSH; if etcd is the problem, X on the etcd tab restores a snapshot")
 	}
 	if out == nil {
 		return nil, errors.New("no endpoint could be verified")

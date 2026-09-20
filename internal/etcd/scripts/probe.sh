@@ -12,7 +12,7 @@ sec() { printf '\n===%s\n' "$1"; }
 export LC_ALL=C
 EXTRA_DIRS='__EXTRA_DIRS__'
 EP_OVERRIDE='__EP__'; CA_OVERRIDE='__CA__'; CERT_OVERRIDE='__CERT__'; KEY_OVERRIDE='__KEY__'
-DIST=unknown; CA=; CERT=; KEY=; EP=https://127.0.0.1:2379; CRICTL=; CRI_EP=; DATADIR=; SNAPDIR=; ETCDCTL=
+DIST=unknown; CA=; CERT=; KEY=; EP=https://127.0.0.1:2379; CRICTL=; CRI_EP=; DATADIR=; SNAPDIR=; ETCDCTL=; SKIPPEERS=
 H=$(hostname)
 # rke2/k3s data-dir may be customised in config.yaml
 RKE2_DD=/var/lib/rancher/rke2; K3S_DD=/var/lib/rancher/k3s
@@ -211,6 +211,21 @@ elif [ "$(systemctl show -p LoadState --value etcd 2>/dev/null)" = loaded ]; the
   echo "source=journalctl -u etcd"
   journalctl -u etcd -q --no-pager -n 50000 -o short-iso 2>/dev/null | grep -oE '"local-member-id":"[0-9a-f]+"' | tail -1 | cut -d'"' -f4 | sed 's/^/local-member-id=/'
   journalctl -u etcd -q --no-pager -n 50000 -o short-iso 2>/dev/null | grep -E "$LOGRE" | tail -30
+fi
+sec PEERS
+# The cluster's members as this node's disk knows them - readable with etcd
+# down, which is when it matters (rescue picker, apiserver unreachable):
+# the members bucket of the bbolt db (json; freed pages may still hold
+# entries of members removed since, so khealth keys them by peer address),
+# the initial-cluster list of the generated config / static pod manifest,
+# and this member's own name. Scanning the db costs a read of the whole
+# file: full cycles and unhealthy members only, carried forward otherwise.
+case "$HEALTH_OUT" in *'"health":"true"'*) [ "__FULL__" = 1 ] || { echo "skipped=healthy"; SKIPPEERS=1; };; esac
+[ -z "$SKIPPEERS" ] && [ -f "$DATADIR/member/snap/db" ] && grep -ao '{"id":[0-9]*,"peerURLs":\[[^]]*\],"name":"[^"]*"' "$DATADIR/member/snap/db" 2>/dev/null | sort -u | sed 's/^/db: /'
+if [ -z "$SKIPPEERS" ]; then
+[ -f "$DATADIR/config" ] && grep -E '^initial-cluster:' "$DATADIR/config" 2>/dev/null | sed 's/^/config: /'
+for m in /etc/kubernetes/manifests/etcd.yaml /etc/kubernetes/etcd.yaml.off; do [ -f "$m" ] && grep -o -- '--initial-cluster=[^ "]*' "$m" 2>/dev/null | head -1 | sed 's/^--initial-cluster=/config: initial-cluster: /'; done
+[ -f "$DATADIR/name" ] && echo "self: $(cat "$DATADIR/name")"
 fi
 sec RAFT
 [ -d "$DATADIR/member/snap" ] && ls "$DATADIR/member/snap"/*.snap 2>/dev/null | sort | tail -1 | sed 's|^|snap=|'

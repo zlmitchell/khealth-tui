@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,22 @@ type SSH struct {
 	// half the refresh interval, or whose previous probe is still running,
 	// instead of stacking sessions on a slow node.
 	Backoff bool `yaml:"backoff"`
+}
+
+// AddFallbackHost makes host an SSH target when none are configured: the
+// node a cluster was bootstrapped from is what khealth probes when the API
+// server cannot list nodes (etcd down), so the etcd tab can still triage
+// and restore. The entry is keyed by the host itself since the node name
+// is unknown; it is never used while the API answers.
+func (s *SSH) AddFallbackHost(host string) {
+	if host == "" || len(s.Hosts) > 0 {
+		return
+	}
+	name := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		name = h
+	}
+	s.Hosts = map[string]string{name: host}
 }
 
 // Etcd configures etcd probing and backup expectations.

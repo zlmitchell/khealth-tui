@@ -142,9 +142,11 @@ func parseEndpointHealth(raw string) []EndpointHealth {
 	if raw == "" {
 		return nil
 	}
-	// etcdctl may print warnings before the JSON array
-	if i := strings.Index(raw, "["); i > 0 {
-		raw = raw[i:]
+	// etcdctl may print warnings before the JSON array and, with a member
+	// down, "Error: unhealthy cluster" after it
+	raw = jsonArray(raw)
+	if raw == "" {
+		return nil
 	}
 	var doc []struct {
 		Endpoint string `json:"endpoint"`
