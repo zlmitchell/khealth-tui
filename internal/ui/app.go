@@ -1465,6 +1465,8 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	case "P":
 		a.setDetail("Footprint: what khealth costs the cluster and this host", a.perfLines())
+	case "e":
+		a.exportReport()
 	case "tab", "]":
 		a.tab = (a.tab + 1) % tabCount
 		return a, a.onEnter()
@@ -2571,6 +2573,7 @@ func helpLines(width int) []string {
 		{key("R"), "full refresh: journal logs, images, tarballs, PV du (not the OS STIG)"},
 		{key("s"), "toggle SSH collection on/off"},
 		{key("P"), "footprint: what khealth itself costs the API server, the nodes (remote CPU per probe) and this host"},
+		{key("e"), "export the findings, the security scan (one sheet per benchmark) and the node hardening table as JSON + XLSX (--export-dir / export.dir, default: current directory)"},
 		{key("?"), "this help"},
 		{key("q"), "quit (steps back first when inside an object/log view)"},
 	})

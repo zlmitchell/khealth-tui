@@ -3,11 +3,13 @@
 // images, the registry pull dry run - full etcd probe on etcd nodes) and prints
 // the findings the TUI would show, plus each etcd node's newest snapshot and
 // backup hints. Meant for scripted verification, e.g. after configuring etcd
-// backups.
+// backups. -json / -xlsx write the same report the TUI exports with `e`
+// (-stig adds the STIG/CIS scan: the API-side rules plus the OS STIG facts
+// collected over SSH, one sheet per benchmark).
 //
 // Usage:
 //
-//	findings [-area etcd] [-heavy] -- [khealth flags]
+//	findings [-area etcd] [-heavy] [-stig] [-json out.json] [-xlsx out.xlsx] -- [khealth flags]
 //	findings -- --kubeconfig ~/.kube/x.yaml --ssh-user root --ssh-key ~/.ssh/id_rsa
 package main
 
@@ -26,17 +28,22 @@ import (
 	"k8s-health-tui/internal/checks"
 	"k8s-health-tui/internal/config"
 	"k8s-health-tui/internal/etcd"
+	"k8s-health-tui/internal/export"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/sshrun"
+	"k8s-health-tui/internal/stig"
 )
 
 func main() {
 	bf := flag.NewFlagSet("findings", flag.ExitOnError)
 	area := bf.String("area", "", "only print findings of this area (etcd, node, ...)")
 	heavy := bf.Bool("heavy", false, "run the heavy node tier too (journal, images, registry pull dry run)")
+	withStig := bf.Bool("stig", false, "evaluate the STIG/CIS rules too (API data + the OS STIG facts collected over SSH)")
+	jsonOut := bf.String("json", "", "write the report as JSON to this file (- = stdout)")
+	xlsxOut := bf.String("xlsx", "", "write the report as an Excel workbook to this file")
 	bf.Usage = func() {
-		fmt.Fprintf(bf.Output(), "Usage: findings [-area X] [-heavy] -- [khealth flags]\n\n")
+		fmt.Fprintf(bf.Output(), "Usage: findings [-area X] [-heavy] [-stig] [-json out.json] [-xlsx out.xlsx] -- [khealth flags]\n\n")
 		bf.PrintDefaults()
 	}
 	args := os.Args[1:]
@@ -78,7 +85,7 @@ func main() {
 		defer runner.Close()
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, Config: true, Journal: *heavy, Images: *heavy, PVs: *heavy, CPUSample: true}
+		o := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, Config: true, Journal: *heavy, Images: *heavy, PVs: *heavy, OSStig: *withStig, CPUSample: true}
 		setNet := func(o nodeinfo.Options, node string) nodeinfo.Options {
 			for _, t := range snap.PodTargetList() {
 				if !strings.HasPrefix(t, node+"=") {
@@ -147,7 +154,42 @@ func main() {
 		}
 	}
 
+	var stigRes []stig.Result
+	if *withStig {
+		stigRes = stig.Evaluate(stig.Input{Snap: snap, Nodes: in.Nodes, Etcd: in.Etcd})
+		in.Stig = stigRes
+	}
 	fs := checks.Evaluate(in)
+	if *jsonOut != "" || *xlsxOut != "" {
+		rep := export.Build(export.Input{Snap: snap, Nodes: in.Nodes, Findings: fs, Stig: stigRes, StigRun: *withStig, Context: cfg.Context, Server: client.Host, Version: config.Version, Now: time.Now()})
+		if *jsonOut == "-" {
+			if err := export.WriteJSON(os.Stdout, rep); err != nil {
+				fmt.Fprintln(os.Stderr, "json:", err)
+				os.Exit(1)
+			}
+		} else if *jsonOut != "" {
+			f, err := os.Create(*jsonOut)
+			if err == nil {
+				err = export.WriteJSON(f, rep)
+				f.Close()
+			}
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "json:", err)
+				os.Exit(1)
+			}
+			fmt.Println("wrote", *jsonOut)
+		}
+		if *xlsxOut != "" {
+			if err := export.WriteXLSX(*xlsxOut, rep); err != nil {
+				fmt.Fprintln(os.Stderr, "xlsx:", err)
+				os.Exit(1)
+			}
+			fmt.Println("wrote", *xlsxOut)
+		}
+		if *jsonOut == "-" {
+			return
+		}
+	}
 	fmt.Printf("\n%d findings", len(fs))
 	if *area != "" {
 		fmt.Printf(" (showing area %q)", *area)

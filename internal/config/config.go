@@ -42,12 +42,20 @@ type Config struct {
 	// Perf tunes and records the tool's own footprint (docs/PERFORMANCE.md).
 	Perf Perf `yaml:"perf"`
 
+	// Export is where `e` writes the findings report (JSON + XLSX).
+	Export Export `yaml:"export"`
+
 	Diag bool `yaml:"-"` // --diag: print API/permission diagnostics and exit
 
 	// Bootstrap (--bootstrap-kubeconfig): build a kubeconfig over SSH from a
 	// server node before starting, for operators who have node access but no
 	// kubeconfig (see internal/bootstrap).
 	Bootstrap Bootstrap `yaml:"-"`
+}
+
+// Export configures the report files `e` writes (internal/export).
+type Export struct {
+	Dir string `yaml:"dir"` // directory for khealth-<context>-<timestamp>.json/.xlsx (default: current directory)
 }
 
 // Bootstrap holds the --bootstrap-* flags.
@@ -268,6 +276,7 @@ func Load(args []string) (Config, error) {
 		readOnly     = fs.Bool("read-only", false, "disable mutating actions (helm rollback/upgrade)")
 		diag         = fs.Bool("diag", false, "run API/permission diagnostics (nodes/proxy, stats/summary, pods/exec, ...) and exit")
 		perfLog      = fs.String("perf-log", "", "append one JSON line per refresh cycle with the tool's own footprint (remote CPU, API bytes, local CPU) to this file")
+		exportDir    = fs.String("export-dir", "", "directory where 'e' writes the findings report as khealth-<context>-<timestamp>.json and .xlsx (default: current directory)")
 		pprofAddr    = fs.String("pprof", "", "serve net/http/pprof on this address (e.g. 127.0.0.1:6060)")
 		noNice       = fs.Bool("no-nice", false, "do not renice/ionice the probe scripts on the nodes")
 		noBackoff    = fs.Bool("no-backoff", false, "do not skip cycles for nodes whose probes are slow or still running")
@@ -389,6 +398,8 @@ func Load(args []string) (Config, error) {
 			cfg.Diag = *diag
 		case "perf-log":
 			cfg.Perf.Log = *perfLog
+		case "export-dir":
+			cfg.Export.Dir = *exportDir
 		case "pprof":
 			cfg.Perf.Pprof = *pprofAddr
 		case "no-nice":

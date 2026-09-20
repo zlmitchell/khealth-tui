@@ -60,6 +60,8 @@ sparklines inline. History is kept in memory for the session (90 samples).
 
 **Upgrade readiness** (Addons tab, findings under `upgrade`): kubelet vs API server skew on every node (a kubelet newer than the API server - agents upgraded before the servers - is CRIT, more than three minors behind WARN, a minority version WARN); **system-upgrade-controller plans** (`upgrade.cattle.io`, what Rancher installs for imported rke2/k3s clusters and what operators run by hand) with the nodes each plan still owes, the newest job per node and why it is stuck - image not pullable from the node (or the version has no upgrade image at all), job failed, running for over 30 minutes (drain stuck), no job scheduled for a pending node -, a channel the controller cannot resolve, a plan that skips a minor version, and nodes carrying the done label while still running the old version (rpm installs, service not restarted). On a **Rancher management cluster**, the clusters Rancher provisions (v2prov): provisioning/RKEControlPlane conditions with the planner's current step ("draining node x", "waiting for etcd"), machine phases, machines not yet on the spec version, and per machine what `rancher-system-agent` reported back through its plan secret - plan pending, failed attempts and whether the agent gave up (`failure-threshold`), failing health probes that hold further plans.
 
+**Export** (`e` anywhere in the app; `tools/findings -json/-xlsx` headlessly): the findings (ongoing and recently resolved, with first-seen times), the security scan and the node hardening table as one JSON document and one Excel workbook - `Summary`, `Findings`, then one sheet per benchmark that was evaluated (`Kubernetes STIG`, `RKE2 STIG`, `MCM STIG`, `CIS Kubernetes`, `RHEL 9 STIG`, `Ubuntu 24.04 LTS STIG`, ... with the OS STIG rules carrying one status column per node), then `Nodes`. Coloured status cells, frozen headers, autofilter. Files are `khealth-<context>-<timestamp>.json/.xlsx` in `--export-dir` / `export.dir` (default: the current directory); nothing is re-collected, the export is what the screen shows. The JSON is the same report (`findings[]`, `resolved[]`, `security.benchmarks[]` with scores and per-node outcomes, `nodes[]`), meant for diffing between runs or feeding alerting.
+
 **Cloud provider & CSI** (Addons tab, findings under `cloud`/`storage`): which cloud-controller-manager runs (vSphere CPI, AWS, Azure, OpenStack, Harvester, or only rke2's embedded stub) and whether it initialized every node (`uninitialized` taint, providerID scheme - an `rke2://` providerID on a vSphere/AWS cluster means the stub won and the CSI cannot map the node), kubelet `--cloud-provider` vs the installed CPI, both controllers running at once; per CSI driver (vSphere, Trident, EBS/EFS, Azure, Cinder, Longhorn, NFS/SMB, Ceph, Harvester): controller and node-plugin health with crash reasons (including `FailedCreate` when PodSecurity admission rejects every pod, so no pod exists to blame), nodes missing the CSINode registration, StorageClasses/PVs, attach/mount/provision failure events of the last hour, the vSphere CPI `vsphere.conf` (vCenters, datacenters, credentials secret present). **VolumeAttachments** (every driver): a volume still attached to a NotReady node while its pod was rescheduled elsewhere (the Multi-Attach / split-brain case), StatefulSet pods stuck Terminating on a dead node with the volume, attach/detach errors the controller reports; RWX/ROX attachments are only noted. **Longhorn** from its CRs: every volume's robustness with healthy/failed/rebuilding replicas per node (faulted, degraded with why it cannot rebuild - replica count vs schedulable nodes, disk space -, unknown while attached to a down node, unscheduled volumes whose PVC is Bound anyway), RWX share-manager state, snapshot count against the volume's limit, expansion errors, single-replica volumes, engine upgrades pending, failed backups (the cause pulled out of the gRPC wrapping) and recurring backup jobs with no usable target; Longhorn nodes and disks (Ready/Schedulable with the message, missing packages, mount propagation, instance manager state, disks that do not exist or are nearly full), engine images not deployed everywhere, backup target unset or unreachable, orphaned replica directories, and the settings that bite (`default-replica-count` above the node count, rebuilds disabled, soft anti-affinity, `node-down-pod-deletion-policy`, `upgrade-checker`). **Trident** from its CRs: `TridentBackend` state and reason (offline/failed/suspended), `TridentOrchestrator` install state, `TridentBackendConfig` phase and last-operation errors, nodes without a `TridentNode` registration or with a dirty publication state, single-writer volumes published to two nodes at once, and **StorageClass resolution**: every Trident class is matched to the backends and virtual pools its parameters select (`backendType`, `storagePools`, `selector` against the pool labels, with Trident's full selector grammar) and shown with the ONTAP policies volumes inherit from those pools (snapshot, export, QoS, tiering, space/snapshot reserve - read from the backend config's non-secret keys only); a class that selects nothing, only offline backends, or that Trident never registered as a `TridentStorageClass` is a finding. **Rook-Ceph** from `cephclusters` / `cephblockpools` / `cephfilesystems` / `cephobjectstores`: the Ceph health checks with their messages, the operator phase, raw capacity, pools not Ready. Node side: AWS IMDSv2 reachable, vSphere `disk.EnableUUID` (wwn disks), vCenter SDK reachable from each node, Trident host prerequisites by backend type (iscsid, `find_multipaths no`, `mount.nfs`), Longhorn block devices a node still presents (`/dev/longhorn/*`, iSCSI sessions) for volumes the cluster has attached elsewhere or given up on - the partitioned node that keeps writing -, and network mounts that stopped answering (a hung NFS export makes `df` and every pod on it block; the probe times it out and names the mount), cloud-init unit results, `status.json`/`result.json`/`cloud-init.log` errors. Accounts: the cloud-init provisioning user (Rancher's) must not carry a password under STIG aging and must keep NOPASSWD sudo and keys; the `etcd` user must be a system account (nologin, no password) owning the etcd data dir.
 
 **CNI / overlay network** (Addons tab CNI section and node detail, findings under `network`): every light probe reads the interfaces (`ip -o link`), the default route's device and flannel's `subnet.env`, so the overlay MTU (`flannel.1`, `flannel-wg`, `vxlan.calico`, `tunl0`, `cilium_vxlan`, ...) is checked against the underlay minus the encapsulation overhead (VXLAN 50, WireGuard 60-80, IPIP 20), across nodes, and against the `mtu` in the CNI conflist; a tunnel that is DOWN is a finding. From the API: a `NetworkUnavailable` condition that cleared in the last hour, CNI agent pods that restart. With the config tier (first contact, `R`, heavy cycles) each node runs active probes - a `ping` to one pod on every other node (the overlay path: cni bridge, VXLAN/WireGuard/IPIP to the far node, its pod), a DNS query to each CoreDNS pod and to the DNS service ClusterIP, a TCP connect to the `kubernetes` service ClusterIP - all in parallel, capped at a few seconds, targets taken from the snapshot; nothing is created in the cluster and no RBAC beyond listing services is needed. Which probes fail together names the fault: every ping fails = this node's overlay or the tunnel port on the host firewall; one ping fails = that one path (MTU, firewall one way); CoreDNS pods answer but the service does not = kube-proxy (iptables vs nftables backend on RHEL 9); the `kubernetes` service fails while DNS works = 6443 to the control plane blocked from the node.
@@ -79,7 +81,7 @@ across nodes.
 
 Keys: `Tab`/`Shift+Tab` (or `[`/`]`, number keys) switch tabs, `←`/`→` or `h`/`l` switch sub-tabs inside a tab, `j/k` move, `Enter` detail, `n` namespace,
 `/` filter, `a` problems-only, `m` hide manual STIG rules, `r` refresh, `R` full refresh (logs/images), `Shift+S` security scan (Security tab),
-`s` toggle SSH, `P` footprint (what khealth itself costs), `w` wrap long lines in a detail view, `?` help, `q` quit.
+`s` toggle SSH, `P` footprint (what khealth itself costs), `e` export findings + security scan as JSON and XLSX, `w` wrap long lines in a detail view, `?` help, `q` quit.
 
 ## Install / build
 
@@ -419,6 +421,89 @@ The mapping is best-effort: verify it against the release you are audited
 against and treat `MANUAL` results as items to review. Secrets, tokens and
 passwords are masked before any file content leaves the node.
 
+## Support matrix
+
+*Tested* = exercised against a live cluster in the lab (what those clusters
+are is under each table). *Supported* = the code paths and unit tests exist,
+built from the API/CRD schemas or the vendor's documented layout, but no
+live cluster of that kind has run through it yet - expect rough edges and
+report them. Nothing else is claimed.
+
+The lab: rke2 v1.34 single node (Rocky Linux 9.7, Rancher v2.13 management
+cluster, Harbor registry, csi-driver-nfs, local-path), rke2 v1.35 three-server
+control plane (RHEL 9.6, DISA STIG + FIPS, fapolicyd, `profile: cis`,
+Longhorn), kubeadm v1.35 three-node stacked-etcd control plane (Ubuntu 24.04
+LTS, DISA STIG); Canal on all three. The operator host is Windows; Linux
+binaries are built the same way but exercised less.
+
+### Kubernetes distributions
+
+| Distribution | Status | Notes |
+|---|---|---|
+| RKE2 | tested | v1.34-v1.35, single node and 3-server, `profile: cis` |
+| kubeadm / upstream | tested | v1.35, 3-node stacked etcd (containerd); the Config tab and kubeadm cert/SAN checks |
+| k3s | supported | same code paths as rke2 (data-dir, `k3s.yaml`, `k3s crictl`, embedded etcd); no k3s cluster in the lab |
+| Rancher management cluster | tested | Rancher v2.13 on rke2: MCM STIG rules, local users/auth providers, provisioned-cluster listing |
+| Rancher-managed (imported) cluster | supported | cattle-cluster-agent, fleet-agent, system-upgrade-controller plans; the Rancher-side views were exercised on the management cluster only |
+| Rancher-provisioned (v2prov) cluster | supported | machine plans / RKEControlPlane conditions are read from the management cluster; built from the planner's secret layout, unit-tested, no downstream cluster in the lab |
+
+### Node operating systems
+
+| OS | Status | Notes |
+|---|---|---|
+| RHEL 9 (and Rocky / Alma / CentOS Stream / Oracle 9) | tested | preflight, hardening table, DISA RHEL 9 STIG V2R9 (445 rules), FIPS, fapolicyd, SELinux enforcing |
+| Ubuntu 24.04 LTS | tested | preflight, hardening table, DISA Ubuntu 24.04 STIG, ufw, AppArmor, unattended-upgrades |
+| RHEL 8, RHEL 10 | supported | DISA STIG tables generated the same way as RHEL 9; not run on a node |
+| Ubuntu 22.04 LTS | supported | DISA STIG table present; not run on a node |
+| SLES / SLE Micro, Flatcar, others | supported | the generic checks (preflight, hardening, `OS-*` rules); no DISA table, so the OS STIG sub-tab is empty |
+
+### CNI
+
+| CNI | Status | Notes |
+|---|---|---|
+| Canal | tested | overlay/underlay MTU, node-side pod / DNS / service probes |
+| Calico, Cilium, Flannel, Multus | supported | detection, interface MTU and the node-side probes are CNI-agnostic; not run with these in the lab |
+
+### Storage / CSI
+
+| Driver | Status | Notes |
+|---|---|---|
+| Longhorn | tested | volumes, replicas, engines, nodes/disks, instance managers, backups, orphans, settings, node-side devices; chaos-tested (node partitions, replica and instance-manager loss, hung RWX exports, backup failures) |
+| local-path-provisioner / hostPath | tested | PV `du` on the nodes, hung mounts |
+| csi-driver-nfs / SMB | tested (nfs) | the generic controller / node-plugin / attachment checks; hung-mount detection was exercised with Longhorn RWX exports |
+| NetApp Trident | supported | backends, pools, policies, TridentNode registrations from the CRDs; node prerequisites (iscsid, multipath, mount.nfs); unit-tested from the CRD schemas, no ONTAP in the lab |
+| Rook-Ceph | supported | cluster/OSD health from the CRDs; unit-tested only |
+| vSphere CNS, AWS EBS/EFS, Azure Disk/File, OpenStack Cinder, Harvester, Portworx | supported | generic controller / node-plugin / CSINode / VolumeAttachment checks and the cloud-provider checks; not run in the lab (KVM) |
+
+### Cloud providers
+
+| Provider | Status | Notes |
+|---|---|---|
+| none / rke2 embedded stub | tested | providerID scheme, `uninitialized` taint |
+| vSphere CPI, AWS, Azure, OpenStack, Harvester | supported | which CCM runs, node initialization, `vsphere.conf`, IMDS/vCenter reachability from the nodes; no such cluster in the lab |
+
+### Major features
+
+| Feature | Status | Notes |
+|---|---|---|
+| Health findings, node preflight, log classification | tested | all three lab clusters, continuously |
+| Bootstrap a kubeconfig over SSH (`khealth user@node`) | tested | rke2 and kubeadm servers, VIP/SAN ranking |
+| etcd triage (quorum, leader, latency, member vs node reconciliation) | tested | rke2 and kubeadm; exec-based member view and the SSH fallbacks |
+| etcd rescue - rejoin one broken server | tested | rke2 3-server (RHEL 9 STIG) and kubeadm 3-node (Ubuntu STIG): stop, move data aside, member remove/add, rejoin, CNI restart, endpoint check |
+| etcd rescue - restore a snapshot, single node | tested | rke2 single server and kubeadm single node |
+| etcd rescue - restore a snapshot, whole control plane | tested | rke2 3-server (`cluster-reset`, VIP + shared token pre-flight) and kubeadm 3-node, restored from any of the servers |
+| etcd rescue on k3s | supported | same steps as rke2 with the k3s paths; not run |
+| etcd S3 snapshot configuration and endpoint reachability | supported | rke2 `etcd-s3` settings, secret, endpoint probe from the etcd nodes; unit-tested, no S3 target in the lab |
+| Security scan: Kubernetes STIG, RKE2 STIG, CIS | tested | rke2 and kubeadm clusters |
+| Security scan: Rancher MCM STIG | tested | Rancher v2.13 management cluster |
+| Security scan: OS STIG collection over SSH | tested | RHEL 9 (STIG/FIPS/fapolicyd) and Ubuntu 24.04, four stages per node |
+| Registry probes (`registries.yaml` curl + `crictl pull` dry run) | tested | Harbor (token auth, `insecure_skip_verify`), hand-rendered `hosts.toml` failure paths on containerd 2.x |
+| Upgrade readiness: system-upgrade-controller plans | tested | SUC v0.20 on rke2: unpullable image, missing version, skipped minor, unresolvable channel, completed plan |
+| Upgrade readiness: Rancher provisioned-cluster machine plans | supported | unit-tested against the planner's secret layout |
+| Helm actions (`u` upgrade, `b` rollback) | supported | run the `helm` CLI after a confirmation; the overlays and command lines are unit-tested, a live upgrade/rollback has not been run from khealth in the lab |
+| Export (`e`, JSON + XLSX) | tested | the RHEL 9 cluster with the full STIG scan (five benchmarks, 445 OS rules with per-node columns) |
+| Footprint measurement (`P`, `--perf-log`, `tools/perfbench`) | tested | baseline in [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
+
 ## Layout
 
 ```
@@ -460,4 +545,4 @@ Open:
 * CNI: `NetworkUnavailable` history beyond the last transition (event timeline), probes from inside a pod namespace (NetworkPolicy effects) - the node-side probes cover the overlay, DNS and service paths
 * image signature/SBOM presence
 * Helm: drift between HelmChartConfig and rendered values, charts pinned to deprecated APIs
-* export findings as JSON / Prometheus metrics for alerting (`tools/findings` prints them headlessly; no machine format yet)
+* Prometheus metrics for alerting (the JSON/XLSX export exists: `e`, `tools/findings -json -xlsx`)

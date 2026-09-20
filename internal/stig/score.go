@@ -59,6 +59,10 @@ func (s *Score) add(st Status, cat string) {
 }
 
 // benchmarkOf names the reference document behind a result.
+// BenchmarkName is the reference document a result belongs to, as the
+// scorecards group them ("custom" for unmapped IDs).
+func BenchmarkName(r Result) string { return benchmarkOf(r) }
+
 func benchmarkOf(r Result) string {
 	if r.Ref != "" {
 		return r.Ref
