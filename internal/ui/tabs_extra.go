@@ -2383,9 +2383,12 @@ func (a *App) cloudLines(s *k8s.Snapshot) []string {
 			}
 			out = append(out, fmt.Sprintf("      backend %s  %s  %s  %s", styleBold.Render(b.BackendName), b.Driver, st, styleDim.Render(b.Version)))
 		}
-		out = append(out, a.tridentLines(s, d.TridentX)...)
+		out = append(out, a.tridentLines(s, d.TridentX, d.Trident)...)
 		if d.Longhorn != nil {
 			out = append(out, a.longhornLines(s, d.Longhorn)...)
+		}
+		if d.Ceph != nil {
+			out = append(out, cephLines(d.Ceph)...)
 		}
 		if v := d.VSphere; v != nil {
 			sec := "secret " + v.SecretRef

@@ -84,6 +84,7 @@ type Snapshot struct {
 	TridentBackends []TridentBackend
 	Trident         *TridentInfo  // nil without the Trident CRDs
 	Longhorn        *LonghornInfo // nil without the Longhorn CRDs
+	Ceph            *CephInfo     // nil without the Rook-Ceph CRDs
 	VSphereConf     *VSphereConf
 	HelmReleases    []HelmRelease
 	Rancher         *RancherInfo
@@ -548,6 +549,14 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		li := c.longhornInfo(ctx)
 		mu.Lock()
 		s.Longhorn = li
+		mu.Unlock()
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ce := c.cephInfo(ctx)
+		mu.Lock()
+		s.Ceph = ce
 		mu.Unlock()
 	}()
 	optional("kubeadm-config", func() error {

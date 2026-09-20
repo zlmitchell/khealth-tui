@@ -79,6 +79,14 @@ type Client struct {
 	helmFP      string
 	helmCache   []HelmRelease
 	denied      map[string]deniedEntry
+	// Longhorn: the settings list (~80 KB, static) is kept for DiscoveryTTL;
+	// the engines list (the largest per-volume object, needed for rebuild
+	// progress and the replica mode map) is refreshed when a volume is not
+	// healthy or after DiscoveryTTL, and carried forward otherwise.
+	lhSettings   map[string]string
+	lhSettingsAt time.Time
+	lhEngines    map[string]lhEngineFacts
+	lhEnginesAt  time.Time
 }
 
 type deniedEntry struct {
@@ -140,13 +148,15 @@ func (c *Client) DeniedList() []string {
 	return out
 }
 
-// ResetDenied forgets every skipped call (R / full refresh).
+// ResetDenied forgets every skipped call and the Longhorn caches (R / full
+// refresh).
 func (c *Client) ResetDenied() {
 	if c == nil {
 		return
 	}
 	c.cacheMu.Lock()
 	c.denied = nil
+	c.lhSettings, c.lhEngines = nil, nil
 	c.cacheMu.Unlock()
 }
 

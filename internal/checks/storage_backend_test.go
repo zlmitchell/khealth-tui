@@ -116,6 +116,15 @@ func longhornInput() Input {
 	}
 	li.EngineImages = []k8s.LonghornEngineImage{{Name: "ei-1", Version: "v1.12.1", State: "deploying", RefCount: 30, NotOn: []string{"cp-3"}}}
 	li.BackupTargets = []k8s.LonghornBackupTarget{{Name: "default"}}
+	li.Backups = []k8s.LonghornBackup{
+		{Name: "backup-3d2f", Volume: "pvc-four", Snapshot: "nightly--1", State: "Error", Created: now.Add(-5 * time.Minute), Error: "proxyServer=10.42.1.17:8501 destination=10.42.1.17:10092: failed to backup snapshot nightly--1 to backup-3d2f: rpc error: code = Internal desc = failed to create backup: rpc error: code = Unknown desc = failed to store updated lock: mkdir /var/lib/longhorn-backupstore-mounts/10_0_0_143/srv/longhorn-backup: file exists"},
+		{Name: "backup-old", Volume: "pvc-four", State: "Error", Created: now.Add(-time.Hour), Error: "older failure"},
+		{Name: "backup-ok", Volume: "pvc-web", State: "Completed", Created: now.Add(-time.Hour)},
+	}
+	li.RecurringJobs = []k8s.LonghornRecurringJob{{Name: "nightly", Task: "backup", Cron: "0 2 * * *", Retain: 7, Groups: []string{"default"}}}
+	// web-data is one snapshot over its limit, four is close to it
+	li.Volumes[0].Snapshots, li.Volumes[0].SnapshotMax = 6, 5
+	li.Volumes[3].Snapshots, li.Volumes[3].SnapshotMax = 230, 250
 	li.Orphans = []k8s.LonghornOrphan{{Name: "orphan-1", Type: "replica", Node: "cp-1"}}
 	s.Longhorn = li
 	return in
@@ -148,6 +157,11 @@ func TestLonghornFindings(t *testing.T) {
 		{SevInfo, "storage", "replica-soft-anti-affinity is on"},
 		{SevInfo, "storage", "Longhorn upgrade-checker is on"},
 		{SevInfo, "storage", "node-down-pod-deletion-policy is do-nothing"},
+		// backups and snapshots
+		{SevWarn, "storage", "Longhorn backup backup-3d2f of volume pvc-four failed (2 failed backups for this volume): failed to store updated lock: mkdir /var/lib/longhorn-backupstore-mounts/10_0_0_143/srv/longhorn-backup: file exists"},
+		{SevWarn, "storage", "recurring backup job nightly (0 2 * * *) is scheduled but the backup target is not set"},
+		{SevWarn, "storage", "Longhorn volume pvc-web has too many snapshots (6, max 5)"},
+		{SevInfo, "storage", "Longhorn volume pvc-four is at 230 of 250 snapshots"},
 		// VolumeAttachments (driver-independent)
 		{SevCrit, "storage", "volume is still attached to cp-3 (NotReady) while lh-test/single-new (unscheduled) waits for it"},
 		{SevWarn, "storage", "volume attached to cp-3 (NotReady) with lh-test/db-1 (Terminating) still bound there"},
@@ -162,6 +176,16 @@ func TestLonghornFindings(t *testing.T) {
 	// the huge volume is unschedulable, not "faulted"; cp-3's Longhorn node
 	// is NotReady because the Kubernetes node is (no separate finding);
 	// the engine image missing on the dead node is not reported either
+	if n := 0; true {
+		for _, x := range f {
+			if strings.Contains(x.Message, "Longhorn backup backup-") {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("failed backups reported %d times, want one per volume", n)
+		}
+	}
 	for _, x := range f {
 		for _, bad := range []string{"pvc-huge is FAULTED", "Longhorn node not ready although", "engine image ei-1", "default-replica-count is 3 but only"} {
 			if strings.Contains(x.Message, bad) {
@@ -235,7 +259,23 @@ func TestTridentExtraFindings(t *testing.T) {
 		BackendConfigs: []k8s.TridentBackendConfig{{Namespace: "trident", Name: "tbc-san", BackendName: "san-1", Driver: "ontap-san", Phase: "Failed", Message: "could not log in to SVM", Credentials: "svm-creds"}, {Namespace: "trident", Name: "tbc-nas", Phase: "Bound", LastOperation: "Failed", Message: "update rejected"}},
 		Nodes:          []k8s.TridentNode{{Name: "cp-1", Registered: true, PublicationState: "dirty"}, {Name: "cp-2", Registered: true, PublicationState: "clean"}},
 		Publications:   []k8s.TridentPublication{{Volume: "pvc-a", Node: "cp-1", AccessMode: 1}, {Volume: "pvc-a", Node: "cp-2", AccessMode: 1}, {Volume: "pvc-b", Node: "cp-1", AccessMode: 5}, {Volume: "pvc-b", Node: "cp-2", AccessMode: 5}},
+		// classes: gold selects the online NAS pool, san-gold the failed SAN backend, platinum nothing, ghost is unknown to Trident, old-tsc is only in Trident
+		StorageClassesListed: true,
+		StorageClasses:       []k8s.TridentStorageClass{{Name: "gold"}, {Name: "san-gold"}, {Name: "platinum"}, {Name: "old-tsc"}},
 	}
+	for i := range s.TridentBackends {
+		b := &s.TridentBackends[i]
+		b.Pools = []k8s.TridentPool{{Name: b.BackendName, Labels: map[string]string{"performance": "gold"}, Defaults: map[string]string{"snapshotPolicy": "none"}}}
+	}
+	scOf := func(name string, params map[string]string) storagev1.StorageClass {
+		return storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: name}, Provisioner: "csi.trident.netapp.io", Parameters: params}
+	}
+	s.StorageClasses = append(s.StorageClasses,
+		scOf("gold", map[string]string{"backendType": "ontap-nas", "selector": "performance=gold"}),
+		scOf("san-gold", map[string]string{"backendType": "ontap-san"}),
+		scOf("platinum", map[string]string{"selector": "performance=platinum"}),
+		scOf("ghost", map[string]string{"backendType": "ontap-nas"}),
+	)
 	f := Evaluate(in)
 	for _, w := range []struct {
 		sev    Severity
@@ -249,6 +289,10 @@ func TestTridentExtraFindings(t *testing.T) {
 		{SevCrit, "Trident published the single-writer volume to cp-1 and cp-2 at the same time"},
 		{SevInfo, "Trident backend nas-2 is suspended by the user"},
 		{SevInfo, "Trident enableForceDetach is off"},
+		{SevCrit, "every backend StorageClass san-gold can provision on is offline (san-1 failed)"},
+		{SevCrit, "StorageClass platinum selects no Trident backend (backendType=any selector=performance=platinum)"},
+		{SevCrit, "StorageClass ghost is not registered with Trident (no TridentStorageClass)"},
+		{SevInfo, "Trident still holds StorageClass old-tsc which no longer exists in Kubernetes"},
 	} {
 		if findingWith(f, w.sev, "storage", w.substr) == nil {
 			t.Errorf("missing %s finding containing %q", w.sev, w.substr)
@@ -257,6 +301,9 @@ func TestTridentExtraFindings(t *testing.T) {
 	for _, x := range f {
 		if strings.Contains(x.Message, "pvc-b") {
 			t.Errorf("multi-writer volume reported as split brain: %s", x.Message)
+		}
+		if strings.Contains(x.Message, "StorageClass gold ") {
+			t.Errorf("the healthy class must not be reported: %s", x.Message)
 		}
 	}
 }
@@ -273,5 +320,64 @@ func TestFailedCreateProblem(t *testing.T) {
 	x := findingWith(f, SevCrit, "storage", "Longhorn manager not healthy: 0/3 ready (FailedCreate: pods \"longhorn-manager-b7zv2\" is forbidden: violates PodSecurity")
 	if x == nil {
 		t.Error("FailedCreate reason not attached to the component")
+	}
+}
+
+func TestLonghornJoiningReplica(t *testing.T) {
+	in := longhornInput()
+	li := in.Snap.Longhorn
+	// data-db-0 style: a replacement replica is running but the engine has
+	// not admitted it yet, so it is neither failed nor RW/WO
+	v := &li.Volumes[1]
+	v.State, v.Node, v.Robustness = "attached", "cp-1", "degraded"
+	v.ReplicaList = []k8s.LonghornReplica{
+		{Name: "r-1", Node: "cp-1", State: "running", Mode: "RW", Rebuild: -1},
+		{Name: "r-2", Node: "cp-2", State: "running", Mode: "RW", Rebuild: -1},
+		{Name: "r-3", Node: "cp-3", State: "running", Rebuild: -1},
+	}
+	v.ReplicaMode = map[string]string{"r-1": "RW", "r-2": "RW"}
+	f := Evaluate(in)
+	if findingWith(f, SevWarn, "storage", "Longhorn volume pvc-data-db-1 degraded: 2/3 replicas healthy, rebuilding on cp-3 (joining)") == nil {
+		t.Error("joining replica not reported as rebuilding")
+	}
+	if lastCause("a: rpc error: code = Internal desc = b: rpc error: desc = the cause\nsecond line") != "the cause" || lastCause("plain") != "plain" {
+		t.Error("lastCause")
+	}
+}
+
+func TestCephFindings(t *testing.T) {
+	in := baseInput()
+	s := in.Snap
+	s.CSIDrivers = []storagev1.CSIDriver{{ObjectMeta: metav1.ObjectMeta{Name: "rbd.csi.ceph.com"}}, {ObjectMeta: metav1.ObjectMeta{Name: "cephfs.csi.ceph.com"}}}
+	s.Ceph = &k8s.CephInfo{
+		Clusters: []k8s.CephCluster{{Namespace: "rook-ceph", Name: "rook-ceph", Phase: "Ready", Health: "HEALTH_ERR", Capacity: k8s.CephCapacity{Total: 1000, Used: 960},
+			Details: []k8s.CephCheck{{Name: "MON_DOWN", Severity: "HEALTH_ERR", Message: "1/3 mons down, quorum a,b"}, {Name: "OSD_DOWN", Severity: "HEALTH_WARN", Message: "1 osds down"}}}},
+		Pools: []k8s.CephResource{{Kind: "CephBlockPool", Namespace: "rook-ceph", Name: "replicapool", Phase: "Ready"}, {Kind: "CephBlockPool", Namespace: "rook-ceph", Name: "broken", Phase: "Failure"}},
+	}
+	f := Evaluate(in)
+	for _, w := range []struct {
+		sev    Severity
+		substr string
+	}{
+		{SevCrit, "Ceph reports HEALTH_ERR: MON_DOWN: 1/3 mons down, quorum a,b, OSD_DOWN: 1 osds down"},
+		{SevCrit, "Ceph raw capacity 96% used"},
+		{SevWarn, "Rook CephBlockPool broken is in phase Failure"},
+	} {
+		x := findingWith(f, w.sev, "storage", w.substr)
+		if x == nil {
+			t.Errorf("missing %s finding containing %q", w.sev, w.substr)
+		} else if x.Object != "rook-ceph/rook-ceph" && x.Object != "rook-ceph/broken" {
+			t.Errorf("finding %q attributed to %q", w.substr, x.Object)
+		}
+	}
+	// one CephCluster shared by two drivers: reported once
+	n := 0
+	for _, x := range f {
+		if strings.Contains(x.Message, "HEALTH_ERR") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("cluster health reported %d times, want 1", n)
 	}
 }

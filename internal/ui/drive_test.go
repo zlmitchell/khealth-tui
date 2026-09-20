@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -450,4 +451,81 @@ func TestNodesAgeAndIP(t *testing.T) {
 	if !found {
 		t.Errorf("nodes row should carry IP and age:\n%s", strings.Join(rowsText(c), "\n"))
 	}
+}
+
+// TestDriveStorageDetail: enter on a PVC row opens the volume detail with
+// the claim, its (Longhorn) backend view and the findings for it; enter
+// on a PV and a node filesystem row work too.
+func TestDriveStorageDetail(t *testing.T) {
+	a := newDriveApp(t)
+	s := a.snap
+	s.PVCs = append(s.PVCs, corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pvc-web", AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}})
+	s.PVs = append(s.PVs, corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pvc-web"}, Spec: corev1.PersistentVolumeSpec{StorageClassName: "longhorn", ClaimRef: &corev1.ObjectReference{Namespace: "default", Name: "web"},
+		PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "driver.longhorn.io", VolumeHandle: "pvc-web", VolumeAttributes: map[string]string{"numberOfReplicas": "3", "csi.storage.k8s.io/secret": "hidden"}}}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}})
+	s.Longhorn = &k8s.LonghornInfo{Volumes: []k8s.LonghornVolume{{Name: "pvc-web", PVC: "default/web", State: "attached", Robustness: "degraded", Node: "cp-1", Replicas: 3, Scheduled: true, Size: 1 << 30,
+		ReplicaList: []k8s.LonghornReplica{{Name: "pvc-web-r-1", Node: "cp-1", State: "running", Mode: "RW", Rebuild: -1}, {Name: "pvc-web-r-2", Node: "w-1", State: "stopped", FailedAt: "2026-09-20T19:13:11Z", Mode: "ERR", Rebuild: -1}}, ReplicaMode: map[string]string{"pvc-web-r-1": "RW", "pvc-web-r-2": "ERR"}}},
+		Backups: []k8s.LonghornBackup{{Name: "backup-1", Volume: "pvc-web", State: "Error", Error: "rpc error: desc = target unreachable"}}, Settings: map[string]string{}}
+	a.recompute()
+	key(t, a, "5")
+	if a.tab != tabStorage {
+		t.Fatalf("tab 5 should be Storage, got %v", a.tab)
+	}
+	c := a.storageContent()
+	if !c.selectable {
+		t.Fatal("storage content must be selectable")
+	}
+	var pvcRow, pvRow, nodeRow int = -1, -1, -1
+	for i, r := range c.rows {
+		switch {
+		case r.id == "pvc:default/web":
+			pvcRow = i
+		case r.id == "pv:pvc-web":
+			pvRow = i
+		case strings.HasPrefix(r.id, "node:") && nodeRow < 0:
+			nodeRow = i
+		}
+	}
+	if pvcRow < 0 || pvRow < 0 {
+		t.Fatalf("rows: pvc=%d pv=%d", pvcRow, pvRow)
+	}
+	a.cursor[tabStorage] = pvcRow
+	key(t, a, "enter")
+	if a.overlay != ovDetail {
+		t.Fatalf("enter on a PVC row should open the detail overlay, got %v", a.overlay)
+	}
+	v := ansi.Strip(a.View())
+	for _, want := range []string{"PersistentVolumeClaim default/web", "Longhorn", "degraded", "pvc-web-r-2", "w-1", "backup-1", "numberOfReplicas=3"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("detail lacks %q", want)
+		}
+	}
+	if strings.Contains(v, "hidden") {
+		t.Error("secret-looking volume attribute rendered")
+	}
+	key(t, a, "esc")
+	a.cursor[tabStorage] = pvRow
+	key(t, a, "enter")
+	if v := ansi.Strip(a.View()); a.overlay != ovDetail || !strings.Contains(v, "PersistentVolume pvc-web") || !strings.Contains(v, "Claim") {
+		t.Error("enter on a PV row should open the same detail through the claimRef")
+	}
+	key(t, a, "esc")
+	if nodeRow >= 0 {
+		a.cursor[tabStorage] = nodeRow
+		key(t, a, "enter")
+		if a.overlay != ovDetail {
+			t.Error("enter on a node filesystem row should open the node detail")
+		}
+		key(t, a, "esc")
+	}
+	// the Pending fixture claim explains why
+	for i, r := range c.rows {
+		if r.id == "pvc:default/data" {
+			a.cursor[tabStorage] = i
+		}
+	}
+	key(t, a, "enter")
+	if v := ansi.Strip(a.View()); !strings.Contains(v, "no StorageClass on the claim") && !strings.Contains(v, "waiting for provisioner") {
+		t.Errorf("pending claim detail should say why:\n%s", v)
+	}
+	key(t, a, "esc")
 }

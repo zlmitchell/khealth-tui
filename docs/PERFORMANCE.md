@@ -80,6 +80,18 @@ One-off cycles:
 | `find` scans in the OS STIG probe | 174 | **39** (same output) |
 | local `stig.Evaluate` per node per recompute | 3.5 ms, 1.2 MB allocated | **2.7 ms, 0.7 MB** (compiled patterns cached) |
 
+**Storage backend CRs** (3-node RKE2 v1.35 / RHEL 9 lab with Longhorn
+v1.12.1, 6 volumes, 64 pods, measured 2026-09-20): the API snapshot is
+2.0 MB / 46 requests / 0.2 s per refresh, i.e. the nine Longhorn lists
+added ~9 requests and well under 0.3 MB at that size. The CRs are JSON
+with managedFields, so they grow with the volume count: ~30 KB per volume
+per tick (volume 6.5 KB, three replicas 13 KB, engine 8 KB, its
+instance-manager entries ~3 KB). The 80 KB settings list is cached for
+`discovery_ttl` and the engines list is only re-read while a volume is
+unhealthy (docs/REFRESH.md), which leaves ~22 KB per volume per tick in
+steady state - 500 volumes would add ~11 MB per refresh, so on a big
+Longhorn cluster raise `refresh` rather than the TTLs.
+
 The independent node sampler (1/s over a second SSH session) on that box:
 baseline 26 % CPU across all cores, 37 % while five probe cycles ran back to
 back with no pause, i.e. about +11 % during a burst that in normal operation

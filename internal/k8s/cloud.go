@@ -59,6 +59,7 @@ type CSIStatus struct {
 	Trident    []TridentBackend
 	TridentX   *TridentInfo  // orchestrator, backend configs, nodes, publications
 	Longhorn   *LonghornInfo // volumes, replicas, nodes, disks, backup target
+	Ceph       *CephInfo     // Rook-Ceph cluster health, pools, filesystems, object stores
 	VSphere    *VSphereConf
 }
 
@@ -82,6 +83,7 @@ type CloudNode struct {
 // TridentBackend is a trident.netapp.io/v1 TridentBackend.
 type TridentBackend struct {
 	Namespace, Name, BackendName string
+	UUID                         string // backendUUID: what a PV's volumeAttributes.backendUUID points at
 	State                        string // online, offline, failed, deleting, unknown
 	Online                       bool
 	Driver                       string // config.storageDriverName: ontap-nas, ontap-san, ...
@@ -89,6 +91,11 @@ type TridentBackend struct {
 	UserState                    string // "" or suspended
 	StateReason                  string
 	ConfigRef                    string // TridentBackendConfig uid
+	// from config (non-secret parts only): labels and policy defaults the
+	// StorageClass selectors and provisioned volumes see
+	Labels       map[string]string
+	Region, Zone string
+	Pools        []TridentPool
 }
 
 // TridentInfo is the rest of the Trident control plane: the operator's
@@ -99,6 +106,10 @@ type TridentInfo struct {
 	BackendConfigs []TridentBackendConfig
 	Nodes          []TridentNode
 	Publications   []TridentPublication
+	// StorageClasses are the classes Trident accepted (TridentStorageClass
+	// CRs); StorageClassesListed says the list itself worked.
+	StorageClasses       []TridentStorageClass
+	StorageClassesListed bool
 }
 
 // TridentOrchestrator is the trident-operator's install state.
@@ -472,6 +483,9 @@ func (s *Snapshot) Cloud() CloudInfo {
 		if st.Provider == "longhorn" {
 			st.Longhorn = s.Longhorn
 		}
+		if st.Provider == "ceph" {
+			st.Ceph = s.Ceph
+		}
 		if st.Provider == "vsphere" && s.VSphereConf != nil {
 			vc := *s.VSphereConf
 			vc.SecretFound = vc.SecretRef == "" || s.SecretNames[vc.SecretRef]
@@ -537,6 +551,7 @@ func (c *Client) tridentBackends(ctx context.Context) []TridentBackend {
 	for _, it := range l.Items {
 		b := TridentBackend{Namespace: it.GetNamespace(), Name: it.GetName()}
 		b.BackendName, _, _ = unstructured.NestedString(it.Object, "backendName")
+		b.UUID, _, _ = unstructured.NestedString(it.Object, "backendUUID")
 		b.State, _, _ = unstructured.NestedString(it.Object, "state")
 		b.Online, _, _ = unstructured.NestedBool(it.Object, "online")
 		b.Driver, _, _ = unstructured.NestedString(it.Object, "config", "storageDriverName")
@@ -544,6 +559,7 @@ func (c *Client) tridentBackends(ctx context.Context) []TridentBackend {
 		b.UserState, _, _ = unstructured.NestedString(it.Object, "userState")
 		b.StateReason, _, _ = unstructured.NestedString(it.Object, "stateReason")
 		b.ConfigRef, _, _ = unstructured.NestedString(it.Object, "configRef")
+		b.Labels, b.Region, b.Zone, b.Pools = parseTridentBackendConfig(it.Object)
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].BackendName < out[j].BackendName })
@@ -700,6 +716,10 @@ func (c *Client) tridentInfo(ctx context.Context) *TridentInfo {
 			ti.Nodes = append(ti.Nodes, n)
 		}
 		sort.Slice(ti.Nodes, func(i, j int) bool { return ti.Nodes[i].Name < ti.Nodes[j].Name })
+	}
+	if scs, ok := c.tridentStorageClasses(ctx); ok {
+		found = true
+		ti.StorageClasses, ti.StorageClassesListed = scs, true
 	}
 	if l, err := c.dynList(ctx, "tridentvolumepublications.trident.netapp.io", tridentPublicationGVR); err == nil {
 		found = true

@@ -50,6 +50,13 @@ func (a *App) longhornLines(s *k8s.Snapshot, li *k8s.LonghornInfo) []string {
 			line += "  " + kv("backup target", styleCrit.Render(bt.URL+" unavailable"))
 		}
 	}
+	if len(li.Backups) > 0 || len(li.RecurringJobs) > 0 {
+		b := fmt.Sprintf("%d backups", len(li.Backups))
+		if f := li.FailedBackups(); len(f) > 0 {
+			b = styleWarn.Render(fmt.Sprintf("%d backups, %d failed", len(li.Backups), len(f)))
+		}
+		line += "  " + b + styleDim.Render(fmt.Sprintf(", %d recurring jobs", len(li.RecurringJobs)))
+	}
 	if len(li.Orphans) > 0 {
 		line += "  " + styleWarn.Render(fmt.Sprintf("%d orphans", len(li.Orphans)))
 	}
@@ -160,7 +167,7 @@ func longhornVolumeLine(v k8s.LonghornVolume) string {
 
 // tridentLines renders the Trident control plane beyond the backends:
 // operator state, backend configs, node registrations, publications.
-func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo) []string {
+func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo, backends []k8s.TridentBackend) []string {
 	var out []string
 	if ti == nil {
 		return nil
@@ -195,6 +202,47 @@ func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo) []string {
 		}
 		out = append(out, line)
 	}
+	// storage classes -> backends / pools and the policies volumes inherit
+	for _, r := range ti.ResolveStorageClasses(s.StorageClasses, backends) {
+		sel := orStr(r.BackendType, "any backend")
+		if r.Selector != "" {
+			sel += "  selector " + r.Selector
+		}
+		if r.PoolsParam != "" {
+			sel += "  pools " + trunc(r.PoolsParam, 40)
+		}
+		line := fmt.Sprintf("      sc %s  %s  ", styleBold.Render(r.Name), styleDim.Render(sel))
+		switch {
+		case !r.Registered:
+			line += styleCrit.Render("NOT REGISTERED with Trident")
+		case len(r.Matches) == 0:
+			line += styleCrit.Render("matches no backend")
+		default:
+			var ms []string
+			for _, m := range r.Matches {
+				txt := fmt.Sprintf("%s (%d pools)", m.Backend.BackendName, len(m.Pools))
+				if !m.Backend.Online || (m.Backend.State != "" && m.Backend.State != "online") {
+					txt = styleCrit.Render(txt + " " + strings.ToUpper(orStr(m.Backend.State, "offline")))
+				}
+				ms = append(ms, txt)
+			}
+			line += "-> " + strings.Join(ms, ", ")
+			var pol []string
+			p := r.Policies()
+			for _, k := range []string{"snapshotPolicy", "exportPolicy", "qosPolicy", "adaptiveQosPolicy", "tieringPolicy", "spaceReserve", "snapshotReserve", "encryption"} {
+				if v, ok := p[k]; ok {
+					pol = append(pol, strings.TrimSuffix(k, "Policy")+"="+v)
+				}
+			}
+			if len(pol) > 0 {
+				line += "  " + styleDim.Render(strings.Join(pol, " "))
+			}
+		}
+		if len(r.Problems) > 0 {
+			line += "  " + styleWarn.Render(trunc(strings.Join(r.Problems, "; "), 60))
+		}
+		out = append(out, line)
+	}
 	if len(ti.Nodes) > 0 {
 		registered, dirty := 0, 0
 		for _, n := range ti.Nodes {
@@ -219,6 +267,50 @@ func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo) []string {
 			line += "  " + styleCrit.Render(vol+" published to "+strings.Join(nodes, "+"))
 		}
 		out = append(out, line)
+	}
+	return out
+}
+
+// cephLines renders the Rook-Ceph cluster(s): health with the check names,
+// operator phase, capacity, and the pools that are not Ready.
+func cephLines(ci *k8s.CephInfo) []string {
+	var out []string
+	for _, cc := range ci.Clusters {
+		health := cc.Health
+		switch cc.Health {
+		case "HEALTH_OK":
+			health = styleOK.Render(health)
+		case "HEALTH_WARN":
+			health = styleWarn.Render(health)
+		case "":
+			health = styleDim.Render("no health yet")
+		default:
+			health = styleCrit.Render(health)
+		}
+		line := "      " + styleBold.Render("ceph "+cc.Namespace+"/"+cc.Name) + "  " + health + "  " + kv("phase", okText(strings.EqualFold(cc.Phase, "Ready"), cc.Phase, cc.Phase)) + "  " + kv("version", cc.Version)
+		if cc.Capacity.Total > 0 {
+			line += "  " + kv("raw", fmt.Sprintf("%s of %s used", humanBytes(float64(cc.Capacity.Used)), humanBytes(float64(cc.Capacity.Total))))
+		}
+		if cc.External {
+			line += "  " + styleDim.Render("external")
+		}
+		out = append(out, line)
+		for i, det := range cc.Details {
+			if i == 4 {
+				out = append(out, styleDim.Render(fmt.Sprintf("        ... %d more checks", len(cc.Details)-4)))
+				break
+			}
+			out = append(out, "        "+okText(det.Severity != "HEALTH_ERR", det.Name, det.Name)+"  "+styleDim.Render(trunc(det.Message, 90)))
+		}
+	}
+	ready := 0
+	all := len(ci.Pools) + len(ci.Filesys) + len(ci.Stores)
+	for _, r := range ci.Unhealthy() {
+		out = append(out, fmt.Sprintf("        %s %s  %s", r.Kind, styleBold.Render(r.Name), styleCrit.Render(orStr(r.Phase, "no phase"))))
+	}
+	if all > 0 {
+		ready = all - len(ci.Unhealthy())
+		out = append(out, "        "+kv("pools/filesystems/stores ready", okText(ready == all, fmt.Sprintf("%d/%d", ready, all), fmt.Sprintf("%d/%d", ready, all))))
 	}
 	return out
 }

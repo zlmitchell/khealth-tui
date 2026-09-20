@@ -313,6 +313,47 @@ func (a *App) nodeDetail(name string) (string, []string) {
 		if len(ni.PVMounts) > 0 {
 			add(styleDim.Render(fmt.Sprintf("  + %d pod volume mounts (PV usage on the Storage tab)", len(ni.PVMounts))))
 		}
+		for _, m := range ni.StaleMounts {
+			add("  " + styleCrit.Render("HUNG "+m.FSType+" mount "+m.Source) + styleDim.Render(" at "+m.Mountpoint))
+		}
+		// Longhorn block devices this node presents, against where the
+		// cluster has each volume attached
+		if devs := ni.Preflight.CSI.LonghornDevs; len(devs) > 0 {
+			session := map[string]string{}
+			for _, s := range ni.Preflight.CSI.ISCSISessions {
+				if v := s.LonghornVolume(); v != "" {
+					session[v] = s.State
+				}
+			}
+			add("", styleTitle.Render("Longhorn devices"))
+			for _, dev := range devs {
+				line := "  /dev/longhorn/" + dev
+				if st := session[dev]; st != "" {
+					line += "  " + kv("iscsi", okText(st == "LOGGED_IN", st, st))
+				}
+				var v *k8s.LonghornVolume
+				if a.snap != nil && a.snap.Longhorn != nil {
+					for i := range a.snap.Longhorn.Volumes {
+						if a.snap.Longhorn.Volumes[i].Name == dev {
+							v = &a.snap.Longhorn.Volumes[i]
+						}
+					}
+				}
+				switch {
+				case v == nil:
+					line += "  " + styleWarn.Render("volume no longer exists")
+				case v.State == "attached" && v.Node == ni.Node:
+					line += "  " + styleOK.Render("attached here") + "  " + kv("pvc", v.PVC)
+				default:
+					where := v.State
+					if v.Node != "" {
+						where += " on " + v.Node
+					}
+					line += "  " + styleCrit.Render("cluster: "+where+" (STALE DEVICE)") + "  " + kv("pvc", v.PVC)
+				}
+				add(line)
+			}
+		}
 	}
 
 	// ---- certificates ----

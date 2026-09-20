@@ -381,8 +381,13 @@ func (a *App) eventsContent() content {
 func (a *App) storageContent() content {
 	s := a.snap
 	thr := a.cfg.Thresholds
-	var out []string
-	add := func(l ...string) { out = append(out, l...) }
+	var out, ids []string
+	add := func(l ...string) {
+		for _, x := range l {
+			out, ids = append(out, x), append(ids, "")
+		}
+	}
+	addRow := func(id, l string) { out, ids = append(out, l), append(ids, id) }
 
 	pvcSegs := []seg{{0, styleOK, "bound"}, {0, styleWarn, "pending"}, {0, styleCrit, "lost"}}
 	for i := range s.PVCs {
@@ -492,8 +497,9 @@ func (a *App) storageContent() content {
 			usedNote += "; stats/summary error: " + firstLine(s.PVCUsageErr)
 		}
 	}
-	add("", styleTitle.Render("PersistentVolumeClaims")+styleDim.Render("  (namespace filter applies; "+usedNote+")"))
+	add("", styleTitle.Render("PersistentVolumeClaims")+styleDim.Render("  (namespace filter applies; enter = claim detail; "+usedNote+")"))
 	rows = nil
+	var rowIDs []string
 	// which claims are mounted by a running pod, and what backs each PV
 	mountedBy := map[string]string{}
 	for i := range s.Pods {
@@ -579,6 +585,7 @@ func (a *App) storageContent() content {
 			row = append(row, backendHealth(s, p.Namespace, p.Name))
 		}
 		rows = append(rows, append(row, p.Spec.VolumeName, capacity, sc, age(p.CreationTimestamp.Time)))
+		rowIDs = append(rowIDs, "pvc:"+key)
 	}
 	if len(rows) == 0 {
 		add(styleDim.Render("  none"))
@@ -590,11 +597,13 @@ func (a *App) storageContent() content {
 		cols = append(cols, column{title: "VOLUME", max: 30}, column{title: "CAPACITY"}, column{title: "CLASS"}, column{title: "AGE"})
 		h, lines := renderTable(a.width, cols, rows)
 		add(h)
-		add(lines...)
+		for i, l := range lines {
+			addRow(rowIDs[i], l)
+		}
 	}
 
-	add("", styleTitle.Render("PersistentVolumes"))
-	rows = nil
+	add("", styleTitle.Render("PersistentVolumes")+styleDim.Render("  (enter = volume detail)"))
+	rows, rowIDs = nil, nil
 	for i := range s.PVs {
 		p := &s.PVs[i]
 		claim := ""
@@ -618,25 +627,34 @@ func (a *App) storageContent() content {
 			capacity = q.String()
 		}
 		rows = append(rows, []string{p.Name, capacity, st, claim, p.Spec.StorageClassName, string(p.Spec.PersistentVolumeReclaimPolicy), age(p.CreationTimestamp.Time)})
+		rowIDs = append(rowIDs, "pv:"+p.Name)
 	}
 	if len(rows) == 0 {
 		add(styleDim.Render("  none"))
 	} else {
 		h, lines := renderTable(a.width, []column{{title: "NAME", max: 44}, {title: "CAPACITY"}, {title: "STATUS"}, {title: "CLAIM", max: 44}, {title: "CLASS"}, {title: "RECLAIM"}, {title: "AGE"}}, rows)
 		add(h)
-		add(lines...)
+		for i, l := range lines {
+			addRow(rowIDs[i], l)
+		}
 	}
 
-	add("", styleTitle.Render("Node filesystems")+styleDim.Render("  (SSH)"))
-	rows = nil
+	add("", styleTitle.Render("Node filesystems")+styleDim.Render("  (SSH; enter = node detail)"))
+	rows, rowIDs = nil, nil
 	for _, name := range sortedKeys(a.nodes) {
 		ni := a.nodes[name]
 		if ni.Err != nil {
 			rows = append(rows, []string{name, styleCrit.Render("ssh error"), "", "", "", "", "", ""})
+			rowIDs = append(rowIDs, "node:"+name)
 			continue
 		}
 		for _, m := range ni.Mounts {
 			rows = append(rows, []string{name, m.Mountpoint, m.Type, humanKB(m.SizeKB), humanKB(m.UsedKB), humanKB(m.AvailKB), gauge(float64(m.UsePct), 12, thr.DiskWarnPct, thr.DiskCritPct), gauge(float64(m.InodePct), 8, thr.InodeWarnPct, 95)})
+			rowIDs = append(rowIDs, "node:"+name)
+		}
+		for _, m := range ni.StaleMounts {
+			rows = append(rows, []string{name, m.Mountpoint, m.FSType, "", "", "", styleCrit.Render("HUNG " + m.Source), ""})
+			rowIDs = append(rowIDs, "node:"+name)
 		}
 	}
 	if len(rows) == 0 {
@@ -644,9 +662,15 @@ func (a *App) storageContent() content {
 	} else {
 		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "MOUNT", max: 40}, {title: "TYPE"}, {title: "SIZE", right: true}, {title: "USED", right: true}, {title: "AVAIL", right: true}, {title: "USE"}, {title: "INODES"}}, rows)
 		add(h)
-		add(lines...)
+		for i, l := range lines {
+			addRow(rowIDs[i], l)
+		}
 	}
-	return linesContent(out)
+	c := content{selectable: true, empty: "no storage objects"}
+	for i, l := range out {
+		c.rows = append(c.rows, row{id: ids[i], text: l})
+	}
+	return c
 }
 
 func linesContent(lines []string) content {
@@ -710,6 +734,8 @@ func (a *App) detailFor(t tab, id string) (string, []string) {
 		}
 	case tabEtcd:
 		return a.etcdDetail()
+	case tabStorage:
+		return a.storageDetail(id)
 	case tabAddons:
 		return a.addonsDetail(id)
 	case tabHelm:

@@ -27,9 +27,11 @@ type LonghornInfo struct {
 	InstanceManagers []LonghornInstanceManager
 	EngineImages     []LonghornEngineImage
 	BackupTargets    []LonghornBackupTarget
+	Backups          []LonghornBackup
+	RecurringJobs    []LonghornRecurringJob
 	Orphans          []LonghornOrphan
 	Settings         map[string]string // name -> value (raw; JSON for the per-data-engine ones)
-	Version          string            // longhorn-manager image tag
+	EnginesFrom      time.Time         // when the engine facts were listed (carried forward between refreshes)
 }
 
 // LonghornVolume is a longhorn.io Volume with what its Replicas, Engine and
@@ -54,6 +56,7 @@ type LonghornVolume struct {
 	Scheduled     bool
 	SchedMessage  string // Scheduled condition message when false
 	TooManySnaps  bool
+	SnapshotMax   int // spec.snapshotMaxCount (0: unlimited)
 	LastBackup    string
 	LastBackupAt  time.Time
 	LastDegraded  time.Time
@@ -165,6 +168,23 @@ type LonghornBackupTarget struct {
 	LastSynced            time.Time
 }
 
+// LonghornBackup is a backups.longhorn.io object: one snapshot shipped to
+// the backup target.
+type LonghornBackup struct {
+	Name, Volume, Snapshot string
+	State                  string // New, Pending, InProgress, Completed, Error, Unknown
+	Error                  string
+	Created                time.Time
+	Size                   int64
+}
+
+// LonghornRecurringJob is a recurringjobs.longhorn.io schedule.
+type LonghornRecurringJob struct {
+	Name, Task, Cron string // Task: snapshot, backup, snapshot-cleanup, filesystem-trim, ...
+	Retain           int
+	Groups           []string
+}
+
 // LonghornOrphan is a replica directory or instance Longhorn found without
 // a matching CR.
 type LonghornOrphan struct {
@@ -183,6 +203,8 @@ var (
 	lhBackupTargetGVR    = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "backuptargets"}
 	lhOrphanGVR          = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "orphans"}
 	lhSettingGVR         = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "settings"}
+	lhBackupGVR          = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "backups"}
+	lhRecurringJobGVR    = schema.GroupVersionResource{Group: "longhorn.io", Version: "v1beta2", Resource: "recurringjobs"}
 
 	// longhornSettings are the settings kept in LonghornInfo.Settings.
 	longhornSettings = map[string]bool{
@@ -197,19 +219,43 @@ var (
 	}
 )
 
+// lhEngineFacts is what the checks need from an engines.longhorn.io object.
+type lhEngineFacts struct {
+	state, node string
+	modes       map[string]string
+	rebuild     map[string]int
+	snapshots   int
+	expansion   string
+}
+
 // longhornInfo lists the Longhorn CRs. nil when the volumes CRD is absent
-// or cannot be listed; the other lists are best effort.
+// or cannot be listed; the other lists are best effort. The volumes list
+// comes first because it decides whether the engines are (re)listed.
 func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 	vols, err := c.dynList(ctx, "volumes.longhorn.io", lhVolumeGVR)
 	if err != nil {
 		return nil
 	}
 	li := &LonghornInfo{Settings: map[string]string{}}
+	ttl := c.Opts.DiscoveryTTL
+	unhealthy := false
+	for _, it := range vols.Items {
+		rob, _, _ := unstructured.NestedString(it.Object, "status", "robustness")
+		st, _, _ := unstructured.NestedString(it.Object, "status", "state")
+		if rob != "healthy" && st != "detached" && st != "" {
+			unhealthy = true
+		}
+	}
+	c.cacheMu.Lock()
+	needEngines := c.lhEngines == nil || unhealthy || ttl <= 0 || time.Since(c.lhEnginesAt) > ttl
+	needSettings := c.lhSettings == nil || ttl <= 0 || time.Since(c.lhSettingsAt) > ttl
+	c.cacheMu.Unlock()
 	var (
 		mu                                   sync.Mutex
 		wg                                   sync.WaitGroup
 		replicas, engines, shares, ims       *unstructured.UnstructuredList
 		nodes, images, targets, orphans, set *unstructured.UnstructuredList
+		backups, jobs                        *unstructured.UnstructuredList
 	)
 	fetch := func(what string, gvr schema.GroupVersionResource, dst **unstructured.UnstructuredList) {
 		wg.Add(1)
@@ -225,14 +271,20 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 		}()
 	}
 	fetch("replicas", lhReplicaGVR, &replicas)
-	fetch("engines", lhEngineGVR, &engines)
+	if needEngines {
+		fetch("engines", lhEngineGVR, &engines)
+	}
 	fetch("sharemanagers", lhShareManagerGVR, &shares)
 	fetch("instancemanagers", lhInstanceManagerGVR, &ims)
 	fetch("nodes", lhNodeGVR, &nodes)
 	fetch("engineimages", lhEngineImageGVR, &images)
 	fetch("backuptargets", lhBackupTargetGVR, &targets)
+	fetch("backups", lhBackupGVR, &backups)
+	fetch("recurringjobs", lhRecurringJobGVR, &jobs)
 	fetch("orphans", lhOrphanGVR, &orphans)
-	fetch("settings", lhSettingGVR, &set)
+	if needSettings {
+		fetch("settings", lhSettingGVR, &set)
+	}
 	wg.Wait()
 
 	// replicas and engines by volume
@@ -250,14 +302,7 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 			replicasOf[vol] = append(replicasOf[vol], r)
 		}
 	}
-	type engineFacts struct {
-		state, node string
-		modes       map[string]string
-		rebuild     map[string]int
-		snapshots   int
-		expansion   string
-	}
-	engineOf := map[string]engineFacts{}
+	engineOf := map[string]lhEngineFacts{}
 	if engines != nil {
 		for _, it := range engines.Items {
 			o := it.Object
@@ -266,7 +311,7 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 			if prev, ok := engineOf[vol]; ok && !active && prev.state != "" {
 				continue // a migration/upgrade engine: keep the active one
 			}
-			ef := engineFacts{modes: map[string]string{}, rebuild: map[string]int{}}
+			ef := lhEngineFacts{modes: map[string]string{}, rebuild: map[string]int{}}
 			ef.state, _, _ = unstructured.NestedString(o, "status", "currentState")
 			ef.node, _, _ = unstructured.NestedString(o, "spec", "nodeID")
 			ef.expansion, _, _ = unstructured.NestedString(o, "status", "lastExpansionError")
@@ -299,6 +344,14 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 			}
 			engineOf[vol] = ef
 		}
+		c.cacheMu.Lock()
+		c.lhEngines, c.lhEnginesAt = engineOf, time.Now()
+		c.cacheMu.Unlock()
+		li.EnginesFrom = c.lhEnginesAt
+	} else {
+		c.cacheMu.Lock()
+		engineOf, li.EnginesFrom = c.lhEngines, c.lhEnginesAt
+		c.cacheMu.Unlock()
 	}
 	shareOf := map[string][2]string{}
 	if shares != nil {
@@ -325,6 +378,9 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 		v.LastBackup, _, _ = unstructured.NestedString(o, "status", "lastBackup")
 		if n, _, _ := unstructured.NestedInt64(o, "spec", "numberOfReplicas"); n > 0 {
 			v.Replicas = int(n)
+		}
+		if n, _, _ := unstructured.NestedInt64(o, "spec", "snapshotMaxCount"); n > 0 {
+			v.SnapshotMax = int(n)
 		}
 		if sz, _, _ := unstructured.NestedFieldNoCopy(o, "spec", "size"); sz != nil {
 			v.Size = toInt64(sz)
@@ -508,14 +564,44 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 		}
 		sort.Slice(li.BackupTargets, func(i, j int) bool { return li.BackupTargets[i].Name < li.BackupTargets[j].Name })
 	}
-	// the legacy backup-target setting (pre-1.8) when no BackupTarget CR exists
-	if len(li.BackupTargets) == 0 && set != nil {
-		for _, it := range set.Items {
-			if it.GetName() == "backup-target" {
-				url, _, _ := unstructured.NestedString(it.Object, "value")
-				li.BackupTargets = append(li.BackupTargets, LonghornBackupTarget{Name: "default", URL: url, Available: url != ""})
+
+	if backups != nil {
+		for _, it := range backups.Items {
+			o := it.Object
+			b := LonghornBackup{Name: it.GetName()}
+			b.Volume, _, _ = unstructured.NestedString(o, "status", "volumeName")
+			if b.Volume == "" {
+				b.Volume = it.GetLabels()["backup-volume"]
 			}
+			b.Snapshot, _, _ = unstructured.NestedString(o, "spec", "snapshotName")
+			b.State, _, _ = unstructured.NestedString(o, "status", "state")
+			b.Error, _, _ = unstructured.NestedString(o, "status", "error")
+			if t, _, _ := unstructured.NestedString(o, "status", "backupCreatedAt"); t != "" {
+				b.Created, _ = time.Parse(time.RFC3339, t)
+			}
+			if b.Created.IsZero() {
+				b.Created = it.GetCreationTimestamp().Time
+			}
+			if sz, _, _ := unstructured.NestedFieldNoCopy(o, "status", "size"); sz != nil {
+				b.Size = toInt64(sz)
+			}
+			li.Backups = append(li.Backups, b)
 		}
+		sort.Slice(li.Backups, func(i, j int) bool { return li.Backups[i].Created.After(li.Backups[j].Created) })
+	}
+	if jobs != nil {
+		for _, it := range jobs.Items {
+			o := it.Object
+			j := LonghornRecurringJob{Name: it.GetName()}
+			j.Task, _, _ = unstructured.NestedString(o, "spec", "task")
+			j.Cron, _, _ = unstructured.NestedString(o, "spec", "cron")
+			if n, _, _ := unstructured.NestedInt64(o, "spec", "retain"); n > 0 {
+				j.Retain = int(n)
+			}
+			j.Groups, _, _ = unstructured.NestedStringSlice(o, "spec", "groups")
+			li.RecurringJobs = append(li.RecurringJobs, j)
+		}
+		sort.Slice(li.RecurringJobs, func(i, j int) bool { return li.RecurringJobs[i].Name < li.RecurringJobs[j].Name })
 	}
 
 	if orphans != nil {
@@ -540,8 +626,37 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 			v, _, _ := unstructured.NestedString(it.Object, "value")
 			li.Settings[it.GetName()] = v
 		}
+		c.cacheMu.Lock()
+		c.lhSettings, c.lhSettingsAt = li.Settings, time.Now()
+		c.cacheMu.Unlock()
+	} else {
+		c.cacheMu.Lock()
+		if c.lhSettings != nil {
+			li.Settings = c.lhSettings
+		}
+		c.cacheMu.Unlock()
+	}
+	// the legacy backup-target setting (pre-1.8) when no BackupTarget CR exists
+	if len(li.BackupTargets) == 0 {
+		if url, ok := li.Settings["backup-target"]; ok {
+			li.BackupTargets = append(li.BackupTargets, LonghornBackupTarget{Name: "default", URL: url, Available: url != ""})
+		}
 	}
 	return li
+}
+
+// FailedBackups returns the backups in Error state, newest first.
+func (li *LonghornInfo) FailedBackups() []LonghornBackup {
+	if li == nil {
+		return nil
+	}
+	var out []LonghornBackup
+	for _, b := range li.Backups {
+		if b.State == "Error" || b.Error != "" {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // Setting returns a Longhorn setting; the per-data-engine JSON form

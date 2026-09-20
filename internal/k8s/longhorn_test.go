@@ -104,6 +104,13 @@ func longhornCluster(f *fakeAPI) {
 	f.set("/apis/longhorn.io/v1beta2/orphans", ulist(gv, "Orphan",
 		uobj("longhorn-system", "orphan-1a86", map[string]any{"spec": map[string]any{"orphanType": "replica", "nodeID": "cp-1", "parameters": map[string]any{"DataName": "pvc-00000000-dead-beef-0000-000000000000-abcdef12", "DiskPath": "/var/lib/longhorn/"}}}),
 	))
+	f.set("/apis/longhorn.io/v1beta2/backups", ulist(gv, "Backup",
+		uobj("longhorn-system", "backup-ok", map[string]any{"spec": map[string]any{"snapshotName": "snap-1"}, "status": map[string]any{"volumeName": "pvc-ok", "state": "Completed", "backupCreatedAt": "2026-09-20T20:17:47Z", "size": "117440512"}}),
+		uobj("longhorn-system", "backup-bad", map[string]any{"spec": map[string]any{"snapshotName": "nightly--1"}, "status": map[string]any{"volumeName": "pvc-deg", "state": "Error", "error": "proxyServer=10.42.1.17:8501 destination=10.42.1.17:10092: failed to backup snapshot: rpc error: code = Internal desc = failed to create backup: rpc error: code = Unknown desc = mkdir /var/lib/longhorn-backupstore-mounts/x: file exists", "backupCreatedAt": "2026-09-20T20:20:00Z"}}),
+	))
+	f.set("/apis/longhorn.io/v1beta2/recurringjobs", ulist(gv, "RecurringJob",
+		uobj("longhorn-system", "nightly", map[string]any{"spec": map[string]any{"task": "backup", "cron": "0 2 * * *", "retain": int64(7), "groups": []any{"default"}}}),
+	))
 	set := func(name, value string) map[string]any {
 		return uobj("longhorn-system", name, map[string]any{"value": value, "status": map[string]any{"applied": true}})
 	}
@@ -196,6 +203,16 @@ func TestLonghornInfo(t *testing.T) {
 	}
 	if o := li.Orphans[0]; o.Type != "replica" || o.Node != "cp-1" || o.DataName != "pvc-00000000-dead-beef-0000-000000000000-abcdef12" {
 		t.Errorf("orphan: %+v", o)
+	}
+	// backups newest first, the failed one found
+	if len(li.Backups) != 2 || li.Backups[0].Name != "backup-bad" || li.Backups[1].Size != 117440512 || li.Backups[1].State != "Completed" || li.Backups[1].Volume != "pvc-ok" {
+		t.Errorf("backups: %+v", li.Backups)
+	}
+	if fb := li.FailedBackups(); len(fb) != 1 || fb[0].Volume != "pvc-deg" || fb[0].Error == "" {
+		t.Errorf("failed backups: %+v", fb)
+	}
+	if len(li.RecurringJobs) != 1 || li.RecurringJobs[0].Task != "backup" || li.RecurringJobs[0].Retain != 7 || li.RecurringJobs[0].Cron != "0 2 * * *" || len(li.RecurringJobs[0].Groups) != 1 {
+		t.Errorf("recurring jobs: %+v", li.RecurringJobs)
 	}
 	if li.Setting("default-replica-count") != "3" || li.SettingInt("default-replica-count", 0) != 3 || li.Setting("upgrade-checker") != "true" || li.Setting("not-kept") != "" || li.SettingInt("missing", 7) != 7 {
 		t.Errorf("settings: %v", li.Settings)
@@ -292,5 +309,55 @@ func TestTridentInfo(t *testing.T) {
 	}
 	if n := f2.hitCount("/apis/trident.netapp.io/v1/tridentnodes"); n != 0 {
 		t.Errorf("tridentnodes listed %d times without the backend CRD", n)
+	}
+}
+
+// The settings list is cached for DiscoveryTTL and the engines list is only
+// re-listed while a volume is unhealthy (or after the TTL); R clears both.
+func TestLonghornCaches(t *testing.T) {
+	f := newFakeAPI(t)
+	rke2Cluster(f)
+	longhornCluster(f)
+	// every volume healthy: engines are needed once, then carried forward
+	const gv = "longhorn.io/v1beta2"
+	f.set("/apis/longhorn.io/v1beta2/volumes", ulist(gv, "Volume",
+		uobj("longhorn-system", "pvc-ok", map[string]any{"spec": map[string]any{"numberOfReplicas": int64(3)}, "status": map[string]any{"state": "attached", "robustness": "healthy", "currentNodeID": "cp-1"}}),
+	))
+	c := f.client(t, DefaultOptions())
+	ctx := context.Background()
+	li := c.longhornInfo(ctx)
+	li2 := c.longhornInfo(ctx)
+	if li == nil || li2 == nil || li.Volumes[0].Snapshots != 2 || li2.Volumes[0].Snapshots != 2 || li2.EnginesFrom.IsZero() || li2.Setting("default-replica-count") != "3" {
+		t.Fatalf("carried-forward facts missing: %+v %+v", li, li2)
+	}
+	if n := f.hitCount("/apis/longhorn.io/v1beta2/engines"); n != 1 {
+		t.Errorf("engines listed %d times for healthy volumes, want 1", n)
+	}
+	if n := f.hitCount("/apis/longhorn.io/v1beta2/settings"); n != 1 {
+		t.Errorf("settings listed %d times, want 1", n)
+	}
+	if n := f.hitCount("/apis/longhorn.io/v1beta2/replicas"); n != 2 {
+		t.Errorf("replicas listed %d times, want every call", n)
+	}
+	// a degraded volume re-lists the engines
+	f.set("/apis/longhorn.io/v1beta2/volumes", ulist(gv, "Volume",
+		uobj("longhorn-system", "pvc-ok", map[string]any{"spec": map[string]any{"numberOfReplicas": int64(3)}, "status": map[string]any{"state": "attached", "robustness": "degraded", "currentNodeID": "cp-1"}}),
+	))
+	c.longhornInfo(ctx)
+	if n := f.hitCount("/apis/longhorn.io/v1beta2/engines"); n != 2 {
+		t.Errorf("engines listed %d times after a volume degraded, want 2", n)
+	}
+	// R forgets both caches
+	c.ResetDenied()
+	c.longhornInfo(ctx)
+	if n := f.hitCount("/apis/longhorn.io/v1beta2/settings"); n != 2 {
+		t.Errorf("settings listed %d times after R, want 2", n)
+	}
+	// TTL 0: every call lists everything
+	c2 := f.client(t, Options{})
+	c2.longhornInfo(ctx)
+	c2.longhornInfo(ctx)
+	if n := f.hitCount("/apis/longhorn.io/v1beta2/settings"); n != 4 {
+		t.Errorf("settings listed %d times with TTL 0, want 4", n)
 	}
 }

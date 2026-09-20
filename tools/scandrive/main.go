@@ -12,6 +12,7 @@
 //	scandrive [-press 23s] [-timeout 6m] -- [khealth flags]
 //	scandrive -press 23s -- --kubeconfig ~/.kube/x.yaml --ssh-user root --ssh-key ~/.ssh/id_rsa
 //	scandrive -dump 60s -final 7 -- ...   (no scan: print the Addons tab 60 s in and exit)
+//	scandrive -dump 60s -final '5jj\n' -- ...   (Storage tab, third row, \n = enter: its detail)
 //	KHT_SSH_PASSWORD=... scandrive -- --kubeconfig ~/.kube/x.yaml --ssh-user ops --become sudo
 package main
 
@@ -111,9 +112,7 @@ func main() {
 	for {
 		select {
 		case <-dumpAt:
-			for _, r := range *final {
-				update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-			}
+			pressFinal(update, *final)
 			for len(msgs) > 0 {
 				update(<-msgs)
 			}
@@ -154,9 +153,7 @@ func main() {
 			if strings.Contains(scanRe.FindString(v), "finished") {
 				// the OS STIG sub-tab (or -final keys), once the recompute has landed
 				if *final != "" {
-					for _, r := range *final {
-						update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-					}
+					pressFinal(update, *final)
 				} else {
 					update(tea.KeyMsg{Type: tea.KeyRight})
 					update(tea.KeyMsg{Type: tea.KeyRight})
@@ -182,5 +179,18 @@ func main() {
 			fmt.Println(ansi.Strip(model.View()))
 			os.Exit(1)
 		}
+	}
+}
+
+// pressFinal sends the -final keys: runes as typed, a newline (or the two
+// characters backslash-n) as enter.
+func pressFinal(update func(tea.Msg), keys string) {
+	keys = strings.ReplaceAll(keys, `\n`, "\n")
+	for _, r := range keys {
+		if r == '\n' {
+			update(tea.KeyMsg{Type: tea.KeyEnter})
+			continue
+		}
+		update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 }

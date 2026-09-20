@@ -261,6 +261,9 @@ func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, 
 				failedOn = append(failedOn, orDefault(r.Node, "unscheduled"))
 			case r.Node == "":
 				failedOn = append(failedOn, "unscheduled")
+			case r.Mode == "" && len(v.ReplicaMode) > 0 && (r.State == "running" || r.State == "starting"):
+				// a fresh replica the engine has not admitted yet (rebuild about to start)
+				rebuilding = append(rebuilding, r.Node+" (joining)")
 			}
 		}
 		sort.Strings(failedOn)
@@ -331,8 +334,15 @@ func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, 
 		if v.AccessMode == "rwx" && v.State == "attached" && v.ShareState != "" && v.ShareState != "running" {
 			add(SevCrit, "storage", obj, fmt.Sprintf("Longhorn RWX volume %s share manager is %s: the NFS export is down, every pod mounting it hangs", v.Name, v.ShareState), "kubectl -n longhorn-system get pods -l longhorn.io/share-manager="+v.Name+"; share-manager logs; nfs-utils on the nodes")
 		}
-		if v.TooManySnaps {
-			add(SevWarn, "storage", obj, fmt.Sprintf("Longhorn volume %s has too many snapshots (%d, max %s): new snapshots and backups fail", v.Name, v.Snapshots, orDefault(li.Setting("snapshot-max-count"), "250")), "delete or purge snapshots (recurring job with retain), raise snapshot-max-count")
+		snapMax := v.SnapshotMax
+		if snapMax == 0 {
+			snapMax = li.SettingInt("snapshot-max-count", 250)
+		}
+		switch {
+		case v.TooManySnaps || (snapMax > 0 && v.Snapshots > snapMax):
+			add(SevWarn, "storage", obj, fmt.Sprintf("Longhorn volume %s has too many snapshots (%d, max %d): new snapshots and backups fail until some are deleted", v.Name, v.Snapshots, snapMax), "delete or purge snapshots (recurring snapshot-cleanup job, or a snapshot job with retain), or raise snapshotMaxCount on the volume")
+		case snapMax > 0 && v.Snapshots >= snapMax*9/10:
+			add(SevInfo, "storage", obj, fmt.Sprintf("Longhorn volume %s is at %d of %d snapshots: the chain is long (slower rebuilds, more space) and creation stops at the limit", v.Name, v.Snapshots, snapMax), "a recurring snapshot job with retain keeps the chain short")
 		}
 		if v.ExpansionErr != "" {
 			add(SevWarn, "storage", obj, "Longhorn volume "+v.Name+" expansion failed: "+firstLine(v.ExpansionErr), "kubectl -n longhorn-system describe engines -l longhornvolume="+v.Name)
@@ -362,7 +372,46 @@ func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, 
 		case bt.URL == "":
 			add(SevInfo, "storage", d.Driver, "Longhorn has no backup target: no backups, no DR volumes, snapshots stay on the same disks as the data", "set the backup target (s3://, nfs://, cifs://) and its credential secret in Longhorn settings")
 		case !bt.Available:
-			add(SevWarn, "storage", d.Driver, "Longhorn backup target "+bt.URL+" unavailable: "+orDefault(bt.Message, "not reachable")+" - scheduled backups fail", "kubectl -n longhorn-system describe backuptargets.longhorn.io "+bt.Name+"; credentials secret "+orDefault(bt.Credential, "(none)")+", endpoint reachability from the longhorn-manager pods")
+			add(SevWarn, "storage", d.Driver, "Longhorn backup target "+bt.URL+" unavailable: "+truncStr(orDefault(firstLine(bt.Message), "not reachable"), 160)+" - scheduled backups fail", "kubectl -n longhorn-system describe backuptargets.longhorn.io "+bt.Name+"; credentials secret "+orDefault(bt.Credential, "(none)")+", endpoint reachability from the longhorn-manager pods (nfs: the export must allow the node IPs; s3: bucket, region, endpoint and the secret's keys)")
+		}
+	}
+	// backups that failed, per volume (the newest error each)
+	if failed := li.FailedBackups(); len(failed) > 0 {
+		seen := map[string]bool{}
+		for _, b := range failed {
+			if seen[b.Volume] {
+				continue
+			}
+			seen[b.Volume] = true
+			obj := b.Volume
+			for _, v := range li.Volumes {
+				if v.Name == b.Volume && v.PVC != "" {
+					obj = v.PVC
+				}
+			}
+			n := 0
+			for _, x := range failed {
+				if x.Volume == b.Volume {
+					n++
+				}
+			}
+			add(SevWarn, "storage", obj, fmt.Sprintf("Longhorn backup %s of volume %s failed (%d failed backups for this volume): %s", b.Name, b.Volume, n, truncStr(orDefault(lastCause(b.Error), b.State), 160)), "kubectl -n longhorn-system describe backups.longhorn.io "+b.Name+"; delete the failed backup CRs once the cause (target reachability, credentials, space) is fixed")
+		}
+	}
+	// a recurring backup job with nowhere to ship to
+	for _, j := range li.RecurringJobs {
+		if j.Task != "backup" && j.Task != "backup-force-create" {
+			continue
+		}
+		targetOK := false
+		for _, bt := range li.BackupTargets {
+			if bt.URL != "" && bt.Available {
+				targetOK = true
+			}
+		}
+		if !targetOK {
+			add(SevWarn, "storage", d.Driver, fmt.Sprintf("recurring backup job %s (%s) is scheduled but the backup target is %s: every run fails", j.Name, j.Cron, backupTargetState(li)), "fix the backup target or delete the job")
+			break
 		}
 	}
 	if len(li.Orphans) > 0 {
@@ -400,6 +449,63 @@ func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, 
 				break
 			}
 		}
+	}
+}
+
+// evalCeph raises the Rook-Ceph findings for the rbd / cephfs CSI drivers:
+// the Ceph health checks themselves, the operator phase and the pools the
+// classes provision from. Called once per driver, so the cluster findings
+// are attributed to the CephCluster object rather than the driver.
+func evalCeph(in Input, d k8s.CSIStatus, seen map[string]bool, add func(Severity, string, string, string, string)) {
+	ci := d.Ceph
+	if ci == nil {
+		return
+	}
+	for _, cc := range ci.Clusters {
+		obj := cc.Namespace + "/" + cc.Name
+		if seen[obj] {
+			continue
+		}
+		seen[obj] = true
+		var errs, warns []string
+		for _, det := range cc.Details {
+			txt := det.Name + ": " + truncStr(firstLine(det.Message), 100)
+			if det.Severity == "HEALTH_ERR" {
+				errs = append(errs, txt)
+			} else {
+				warns = append(warns, txt)
+			}
+		}
+		switch cc.Health {
+		case "HEALTH_ERR":
+			add(SevCrit, "storage", obj, "Ceph reports HEALTH_ERR: "+truncList(append(errs, warns...), 3)+" - I/O on the affected pools stalls or fails", "kubectl -n "+cc.Namespace+" exec deploy/rook-ceph-tools -- ceph health detail; ceph -s")
+		case "HEALTH_WARN":
+			add(SevWarn, "storage", obj, "Ceph reports HEALTH_WARN: "+truncList(warns, 3), "kubectl -n "+cc.Namespace+" exec deploy/rook-ceph-tools -- ceph health detail")
+		case "":
+			if cc.Phase != "" && !strings.EqualFold(cc.Phase, "Ready") {
+				add(SevCrit, "storage", obj, "Rook has not reached the Ceph cluster yet (phase "+cc.Phase+", no health reported): "+orDefault(firstLine(cc.Message), "see the operator log"), "kubectl -n "+cc.Namespace+" logs deploy/rook-ceph-operator")
+			}
+		}
+		if cc.Health != "" && cc.Phase != "" && !strings.EqualFold(cc.Phase, "Ready") && !strings.EqualFold(cc.Phase, "Progressing") && !strings.EqualFold(cc.Phase, "Updating") {
+			add(SevWarn, "storage", obj, "Rook CephCluster phase is "+cc.Phase+": "+orDefault(firstLine(cc.Message), "the operator cannot reconcile the cluster"), "kubectl -n "+cc.Namespace+" logs deploy/rook-ceph-operator")
+		}
+		if cc.Capacity.Total > 0 {
+			if pct := cc.Capacity.Used * 100 / cc.Capacity.Total; pct >= 85 {
+				sev := SevWarn
+				if pct >= 95 {
+					sev = SevCrit
+				}
+				add(sev, "storage", obj, fmt.Sprintf("Ceph raw capacity %d%% used (%s of %s): OSDs go read-only at the full ratio (95%%) and every PV on the cluster with them", pct, human(float64(cc.Capacity.Used)), human(float64(cc.Capacity.Total))), "add OSDs or free space; ceph osd df; the nearfull/full ratios (ceph osd dump | grep ratio)")
+			}
+		}
+	}
+	for _, r := range ci.Unhealthy() {
+		obj := r.Namespace + "/" + r.Name
+		if seen[obj] {
+			continue
+		}
+		seen[obj] = true
+		add(SevWarn, "storage", obj, fmt.Sprintf("Rook %s %s is in phase %s: StorageClasses on it cannot provision", r.Kind, r.Name, orDefault(r.Phase, "unknown")), "kubectl -n "+r.Namespace+" describe "+strings.ToLower(r.Kind)+" "+r.Name+"; rook-ceph-operator logs")
 	}
 }
 
@@ -458,6 +564,39 @@ func evalTridentExtra(in Input, d k8s.CSIStatus, add func(Severity, string, stri
 		}
 		if len(dirty) > 0 {
 			add(SevWarn, "storage", d.Driver, "TridentNode publication state is dirty on "+truncList(dirty, 4)+": volumes were force-detached from the node and Trident refuses new publications there until it is cleaned", "once the node is healthy: tridentctl node cleanup, or restart the trident node pod on it (Trident 23.10+ cleans automatically with enableForceDetach)")
+		}
+	}
+	// StorageClasses: what each one can provision on
+	for _, r := range ti.ResolveStorageClasses(s.StorageClasses, d.Trident) {
+		sel := "backendType=" + orDefault(r.BackendType, "any")
+		if r.Selector != "" {
+			sel += " selector=" + r.Selector
+		}
+		if r.PoolsParam != "" {
+			sel += " storagePools=" + r.PoolsParam
+		}
+		switch {
+		case !r.Registered:
+			add(SevCrit, "storage", r.Name, "StorageClass "+r.Name+" is not registered with Trident (no TridentStorageClass): Trident rejected its parameters or was down when it was created, so PVCs using it stay Pending", "kubectl -n trident logs deploy/trident-controller -c trident-main | grep "+r.Name+"; fix the parameters and recreate the StorageClass")
+		case len(r.Matches) == 0:
+			add(SevCrit, "storage", r.Name, "StorageClass "+r.Name+" selects no Trident backend ("+sel+"): nothing matches its parameters, so PVCs using it stay Pending"+problemSuffix(strings.Join(r.Problems, "; ")), "tridentctl -n trident get storageclass "+r.Name+" -o json shows the pools it resolved to; check backendType against the backends' storageDriverName, the selector against the virtual pool labels, and storagePools backend names")
+		case r.Online() == 0:
+			add(SevCrit, "storage", r.Name, fmt.Sprintf("every backend StorageClass %s can provision on is offline (%s): PVCs using it stay Pending", r.Name, tridentMatchNames(r)), "see the backend findings")
+		case r.Online() < len(r.Matches):
+			add(SevWarn, "storage", r.Name, fmt.Sprintf("StorageClass %s: %d of %d backends it can use are offline (%s)", r.Name, len(r.Matches)-r.Online(), len(r.Matches), tridentMatchNames(r)), "")
+		case len(r.Problems) > 0:
+			add(SevWarn, "storage", r.Name, "StorageClass "+r.Name+" storagePools parameter names things that do not exist: "+strings.Join(r.Problems, "; "), "")
+		}
+	}
+	if ti.StorageClassesListed {
+		known := map[string]bool{}
+		for i := range s.StorageClasses {
+			known[s.StorageClasses[i].Name] = true
+		}
+		for _, tsc := range ti.StorageClasses {
+			if !known[tsc.Name] {
+				add(SevInfo, "storage", tsc.Name, "Trident still holds StorageClass "+tsc.Name+" which no longer exists in Kubernetes", "harmless; kubectl delete tridentstorageclass "+tsc.Name+" to tidy up")
+			}
 		}
 	}
 	for vol, nodes := range ti.MultiPublished() {
@@ -585,4 +724,39 @@ func evalStorageNode(name string, ni *nodeinfo.Info, in Input, add func(Severity
 			add(SevCrit, "storage", obj, fmt.Sprintf("node %s still presents /dev/longhorn/%s%s while the cluster has the volume %s: the engine on this node can keep writing to its local replica, and once the volume is attached elsewhere the two copies diverge (split brain) - whatever is written here is discarded when the node rejoins", name, dev, st, where), "stop the pods on this node (or fence it) before the volume is reattached elsewhere; when the node is back, Longhorn rebuilds its replica from the surviving ones - do not salvage the replica from this node unless it is the only one with the data")
 		}
 	}
+}
+
+func backupTargetState(li *k8s.LonghornInfo) string {
+	for _, bt := range li.BackupTargets {
+		if bt.URL == "" {
+			return "not set"
+		}
+		if !bt.Available {
+			return "unavailable (" + bt.URL + ")"
+		}
+	}
+	return "not set"
+}
+
+// lastCause strips the gRPC wrapping Longhorn puts around an error
+// ("proxyServer=... destination=...: failed to X: rpc error: code = Internal
+// desc = failed to Y: rpc error: ... desc = <the cause>") down to the cause.
+func lastCause(msg string) string {
+	msg, _, _ = strings.Cut(strings.TrimSpace(msg), "\n")
+	if i := strings.LastIndex(msg, "desc = "); i >= 0 {
+		msg = msg[i+len("desc = "):]
+	}
+	return strings.TrimSpace(msg)
+}
+
+func tridentMatchNames(r k8s.TridentSCResolution) string {
+	var parts []string
+	for _, m := range r.Matches {
+		st := "online"
+		if !m.Backend.Online || (m.Backend.State != "" && m.Backend.State != "online") {
+			st = orDefault(m.Backend.State, "offline")
+		}
+		parts = append(parts, m.Backend.BackendName+" "+st)
+	}
+	return strings.Join(parts, ", ")
 }

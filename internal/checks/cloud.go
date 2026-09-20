@@ -64,6 +64,7 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 	}
 
 	// ---- CSI drivers ----
+	cephSeen := map[string]bool{} // rbd and cephfs share one CephCluster
 	for _, d := range ci.CSI {
 		obj := d.Driver
 		if d.Controller != nil && !d.Controller.OK() {
@@ -98,6 +99,9 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 		}
 		if d.Provider == "longhorn" {
 			evalLonghorn(in, d, add)
+		}
+		if d.Provider == "ceph" {
+			evalCeph(in, d, cephSeen, add)
 		}
 		if d.Provider == "vsphere" {
 			if ci.Provider != "vsphere" {
