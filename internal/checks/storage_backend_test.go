@@ -255,10 +255,11 @@ func TestTridentExtraFindings(t *testing.T) {
 	s := in.Snap
 	s.TridentBackends = append(s.TridentBackends, k8s.TridentBackend{BackendName: "nas-2", State: "online", Online: true, Driver: "ontap-nas", UserState: "suspended"})
 	s.Trident = &k8s.TridentInfo{
-		Orchestrator:   &k8s.TridentOrchestrator{Name: "trident", Status: "Failed", Message: "Trident installation failed: image pull", Namespace: "trident"},
-		BackendConfigs: []k8s.TridentBackendConfig{{Namespace: "trident", Name: "tbc-san", BackendName: "san-1", Driver: "ontap-san", Phase: "Failed", Message: "could not log in to SVM", Credentials: "svm-creds"}, {Namespace: "trident", Name: "tbc-nas", Phase: "Bound", LastOperation: "Failed", Message: "update rejected"}},
-		Nodes:          []k8s.TridentNode{{Name: "cp-1", Registered: true, PublicationState: "dirty"}, {Name: "cp-2", Registered: true, PublicationState: "clean"}},
-		Publications:   []k8s.TridentPublication{{Volume: "pvc-a", Node: "cp-1", AccessMode: 1}, {Volume: "pvc-a", Node: "cp-2", AccessMode: 1}, {Volume: "pvc-b", Node: "cp-1", AccessMode: 5}, {Volume: "pvc-b", Node: "cp-2", AccessMode: 5}},
+		Orchestrator: &k8s.TridentOrchestrator{Name: "trident", Status: "Failed", Message: "Trident installation failed: image pull", Namespace: "trident"},
+		BackendConfigs: []k8s.TridentBackendConfig{{Namespace: "trident", Name: "tbc-san", BackendName: "san-1", Driver: "ontap-san", Phase: "Failed", Message: "could not log in to SVM", Credentials: "svm-creds"}, {Namespace: "trident", Name: "tbc-nas", Phase: "Bound", LastOperation: "Failed", Message: "update rejected"},
+			{Namespace: "trident", Name: "tbc-new", Driver: "ontap-nas", LastOperation: "Failed", Message: "Failed to create backend: problem initializing storage driver 'ontap-nas': error initializing ontap-nas driver: could not create Data ONTAP API client: error creating ONTAP API client: error reading SVM details: Post \"https://10.0.0.250/servlets/netapp.servlets.admin.XMLrequest_filer\": dial tcp 10.0.0.250:443: connect: no route to host"}},
+		Nodes:        []k8s.TridentNode{{Name: "cp-1", Registered: true, PublicationState: "dirty", Services: []string{"NFS"}}, {Name: "cp-2", Registered: true, PublicationState: "clean", Services: []string{"NFS", "iSCSI"}}},
+		Publications: []k8s.TridentPublication{{Volume: "pvc-a", Node: "cp-1", AccessMode: 1}, {Volume: "pvc-a", Node: "cp-2", AccessMode: 1}, {Volume: "pvc-b", Node: "cp-1", AccessMode: 5}, {Volume: "pvc-b", Node: "cp-2", AccessMode: 5}},
 		// classes: gold selects the online NAS pool, san-gold the failed SAN backend, platinum nothing, ghost is unknown to Trident, old-tsc is only in Trident
 		StorageClassesListed: true,
 		StorageClasses:       []k8s.TridentStorageClass{{Name: "gold"}, {Name: "san-gold"}, {Name: "platinum"}, {Name: "old-tsc"}},
@@ -283,6 +284,8 @@ func TestTridentExtraFindings(t *testing.T) {
 	}{
 		{SevCrit, "Trident operator reports Failed: Trident installation failed: image pull"},
 		{SevCrit, "TridentBackendConfig tbc-san (ontap-san) is Failed: could not log in to SVM"},
+		{SevCrit, "TridentBackendConfig tbc-new (ontap-nas) creation failed: Failed to create backend: problem initializing storage driver 'ontap-nas': error initializ ... etapp.servlets.admin.XMLrequest_filer\": dial tcp 10.0.0.250:443: connect: no route to host"},
+		{SevWarn, "Trident found no usable iSCSI on cp-1 (TridentNode hostInfo.services) while a SAN backend is configured"},
 		{SevWarn, "TridentBackendConfig last update failed: update rejected"},
 		{SevWarn, "no TridentNode registration for cp-3"},
 		{SevWarn, "TridentNode publication state is dirty on cp-1"},

@@ -267,7 +267,8 @@ func TestTridentInfo(t *testing.T) {
 	))
 	f.set("/apis/trident.netapp.io/v1/tridentnodes", ulist(gv, "TridentNode",
 		uobj("trident", "cp-1", map[string]any{"spec": map[string]any{"nodeName": "cp-1", "iqn": "iqn.1994-05.com.redhat:cp1"}, "status": map[string]any{"registered": true, "publicationState": "dirty"}}),
-		uobj("trident", "w-1", map[string]any{"name": "w-1", "iqn": "iqn.1994-05.com.redhat:w1", "publicationState": "clean", "deleted": false}), // pre-25.x layout
+		// the 26.06 layout as seen live: everything top-level, name empty, hostInfo with the usable services
+		uobj("trident", "w-1", map[string]any{"name": "", "iqn": "iqn.1994-05.com.redhat:w1", "publicationState": "clean", "deleted": false, "hostInfo": map[string]any{"os": map[string]any{"distro": "rhel", "release": "9.6"}, "services": []any{"NFS", "iSCSI"}}}),
 	))
 	f.set("/apis/trident.netapp.io/v1/tridentvolumepublications", ulist(gv, "TridentVolumePublication",
 		uobj("trident", "pvc-a.cp-1", map[string]any{"volumeID": "pvc-a", "nodeID": "cp-1", "readOnly": false, "accessMode": int64(1)}),
@@ -289,6 +290,9 @@ func TestTridentInfo(t *testing.T) {
 	}
 	if len(ti.Nodes) != 2 || ti.TridentNode("cp-1") == nil || ti.TridentNode("cp-1").PublicationState != "dirty" || !ti.TridentNode("cp-1").Registered || ti.TridentNode("w-1") == nil || ti.TridentNode("w-1").IQN != "iqn.1994-05.com.redhat:w1" || ti.TridentNode("w-1").PublicationState != "clean" || ti.TridentNode("nope") != nil {
 		t.Errorf("nodes: %+v", ti.Nodes)
+	}
+	if w := ti.TridentNode("w-1"); !w.HasService("iscsi") || w.HasService("NVMe") || w.OS != "rhel 9.6" {
+		t.Errorf("host info: %+v", w)
 	}
 	mp := ti.MultiPublished()
 	if len(mp) != 1 || len(mp["pvc-a"]) != 2 {

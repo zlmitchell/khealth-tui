@@ -134,6 +134,18 @@ type TridentNode struct {
 	IQN, NQN         string
 	PublicationState string // clean, cleanable, dirty
 	Deleted          bool
+	Services         []string // hostInfo.services: what the node plugin found usable (NFS, iSCSI, NVMe, SMB)
+	OS               string   // hostInfo.os.distro + release
+}
+
+// HasService reports whether Trident found the protocol usable on the node.
+func (n TridentNode) HasService(name string) bool {
+	for _, s := range n.Services {
+		if strings.EqualFold(s, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // TridentPublication is a TridentVolumePublication: volume -> node.
@@ -712,6 +724,15 @@ func (c *Client) tridentInfo(ctx context.Context) *TridentInfo {
 			n.Deleted, _, _ = unstructured.NestedBool(it.Object, "status", "deleted")
 			if !n.Deleted {
 				n.Deleted, _, _ = unstructured.NestedBool(it.Object, "deleted")
+			}
+			for _, path := range [][]string{{"spec", "hostInfo"}, {"hostInfo"}} {
+				if hi, _, _ := unstructured.NestedMap(it.Object, path...); hi != nil {
+					n.Services, _, _ = unstructured.NestedStringSlice(hi, "services")
+					distro, _, _ := unstructured.NestedString(hi, "os", "distro")
+					rel, _, _ := unstructured.NestedString(hi, "os", "release")
+					n.OS = strings.TrimSpace(distro + " " + rel)
+					break
+				}
 			}
 			ti.Nodes = append(ti.Nodes, n)
 		}

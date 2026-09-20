@@ -1,15 +1,10 @@
 # STIG / CIS rules: where they come from and how to extend them
 
-The Security tab evaluates rules from six kinds of reference document. This
-page records the exact source of each, how the mapping was verified, how the
-OS STIG tables are generated, and the procedure for adding or updating rules.
+The Security tab evaluates rules from six kinds of reference document. This page records the exact source of each, how the mapping was verified, how the OS STIG tables are generated, and the procedure for adding or updating rules.
 
 ## 1. Sources
 
-Every DISA document is downloaded from the DoD Cyber Exchange
-(`https://dl.dod.cyber.mil/wp-content/uploads/stigs/zip/`) and the rule IDs,
-titles, severities and check/fix text are taken from the XCCDF inside the zip
-(`U_<name>_Manual-xccdf.xml`), never from third-party summaries.
+Every DISA document is downloaded from the DoD Cyber Exchange (`https://dl.dod.cyber.mil/wp-content/uploads/stigs/zip/`) and the rule IDs, titles, severities and check/fix text are taken from the XCCDF inside the zip (`U_<name>_Manual-xccdf.xml`), never from third-party summaries.
 
 | Reference | Release used | Zip | Rules in repo |
 |---|---|---|---|
@@ -20,23 +15,16 @@ titles, severities and check/fix text are taken from the XCCDF inside the zip
 | DISA RHEL 8 / 9 / 10 STIG | V2R8 / V2R9 / V1R2, 01 Jul 2026 | `U_RHEL_<n>_V…_STIG.zip` | generated: [internal/stigdata/data/rhel*.json.gz](../internal/stigdata/data) |
 | DISA Ubuntu 22.04 / 24.04 LTS STIG | V2R9 / V1R6 (01 Jul 2026) | `U_CAN_Ubuntu_<ver>_LTS_V…_STIG.zip` | generated: [internal/stigdata/data/ubuntu*.json.gz](../internal/stigdata/data) |
 
-Finding the newest release: file names follow `U_<product>_V<major>R<release>_STIG.zip`.
-Probe upward from the version you have until you get a 404, e.g.
+Finding the newest release: file names follow `U_<product>_V<major>R<release>_STIG.zip`. Probe upward from the version you have until you get a 404, e.g.
 
 ```sh
 for r in 6 7 8; do curl -s -o /dev/null -w "V2R$r %{http_code}\n" -I \
   https://dl.dod.cyber.mil/wp-content/uploads/stigs/zip/U_Kubernetes_V2R${r}_STIG.zip; done
 ```
 
-The XCCDF `release-info` element carries the authoritative release number and
-benchmark date; third-party sites (stigviewer, Tenable) lag or disagree, so
-always read it from the zip.
+The XCCDF `release-info` element carries the authoritative release number and benchmark date; third-party sites (stigviewer, Tenable) lag or disagree, so always read it from the zip.
 
-The Kubernetes, RKE2, MCM and CIS rules are hand-written Go. Their IDs were
-verified rule by rule against the XCCDF check text (this matters: earlier
-versions of this repo had the etcd, audit-log and kubelet TLS IDs mismapped).
-The OS STIGs are far too large to hand-write (369-445 rules each), so they
-are generated - see section 3.
+The Kubernetes, RKE2, MCM and CIS rules are hand-written Go. Their IDs were verified rule by rule against the XCCDF check text (this matters: earlier versions of this repo had the etcd, audit-log and kubelet TLS IDs mismapped). The OS STIGs are far too large to hand-write (369-445 rules each), so they are generated - see section 3.
 
 ## 2. Package layout
 
@@ -72,64 +60,40 @@ tools/stiggen/gen.py    generator (DISA XCCDF x ComplianceAsCode -> data/<produc
 
 Rule flow at runtime:
 
-```
-kube API snapshot ─┐
-                   ├─> stig.Evaluate(Input) ─> []Result ─> Security tab
-SSH node facts ────┘        │
-                            ├─ kubernetes/rke2/rancher/cis rules (Go)
-                            └─ osRules(): per node -> stigdata.ProductFor(os-release)
-                                   ├─ override in rhel.go/ubuntu.go?  -> hand-written check (os.go osChecks)
-                                   ├─ templated CAC check?           -> ostemplates.go evaluator
-                                   └─ otherwise                      -> MANUAL, with the STIG check text
+```mermaid
+flowchart LR
+    api[kube API snapshot] --> eval["stig.Evaluate(Input)"]
+    ssh[SSH node facts] --> eval
+    eval --> res["[]Result"] --> tab[Security tab]
+    eval --> k8s["kubernetes / rke2 / rancher / cis rules (Go)"]
+    eval --> os["osRules(): per node, stigdata.ProductFor(os-release)"]
+    os --> ov{"override in rhel.go / ubuntu.go?"}
+    ov -- yes --> hand["hand-written check (os.go osChecks)"]
+    ov -- no --> tpl{"templated CAC check?"}
+    tpl -- yes --> ev["ostemplates.go evaluator"]
+    tpl -- no --> manual["MANUAL, with the STIG check text"]
 ```
 
-`stig.Scores` turns results into SCC / OpenSCAP-style scorecards
-(`score.go`): per benchmark, and per node for the OS STIG rules, using the
-XCCDF default model (equal weights; score = Not a Finding / (Not a Finding
-+ Open); N/A and Not Reviewed excluded) with open-per-CAT counts. MANUAL and
-UNKNOWN map to Not Reviewed.
+`stig.Scores` turns results into SCC / OpenSCAP-style scorecards (`score.go`): per benchmark, and per node for the OS STIG rules, using the XCCDF default model (equal weights; score = Not a Finding / (Not a Finding + Open); N/A and Not Reviewed excluded) with open-per-CAT counts. MANUAL and UNKNOWN map to Not Reviewed.
 
-Result IDs are the DISA vulnerability IDs (`V-242390`), CIS section numbers
-(`CIS-1.2.14`), or `RKE2-*` / `OS-*` for prerequisites that no document
-numbers. `Result.Ref` names the document for OS rules; the others are matched
-by ID prefix in `stig.Benchmarks`.
+Result IDs are the DISA vulnerability IDs (`V-242390`), CIS section numbers (`CIS-1.2.14`), or `RKE2-*` / `OS-*` for prerequisites that no document numbers. `Result.Ref` names the document for OS rules; the others are matched by ID prefix in `stig.Benchmarks`.
 
 ## 3. OS STIG tables: how they are generated
 
-DISA publishes only prose check text. Structured, machine-readable checks
-for the same rules exist in [ComplianceAsCode/content](https://github.com/ComplianceAsCode/content)
-(CAC) - the upstream of the SCAP benchmarks DISA ships for these STIGs:
+DISA publishes only prose check text. Structured, machine-readable checks for the same rules exist in [ComplianceAsCode/content](https://github.com/ComplianceAsCode/content) (CAC) - the upstream of the SCAP benchmarks DISA ships for these STIGs:
 
-- `products/<product>/controls/stig_<product>.yml` (RHEL) or
-  `controls/stig_<product>.yml` (Ubuntu) maps every STIG rule ID
-  (`RHEL-09-211010`) to one or more CAC rules and tracks the STIG release.
-- each CAC rule (`linux_os/guide/**/<rule>/rule.yml`) either declares a
-  `template:` (`sysctl`, `package_installed`, `mount_option`,
-  `sshd_lineinfile`, `audit_rules_watch`, `file_permissions`, ...) with
-  parameters, or ships custom OVAL we cannot evaluate.
-- XCCDF variables (`sshd_idle_timeout_value`, `var_password_pam_minlen`)
-  are resolved from the control/profile selection or the variable's default.
+- `products/<product>/controls/stig_<product>.yml` (RHEL) or `controls/stig_<product>.yml` (Ubuntu) maps every STIG rule ID (`RHEL-09-211010`) to one or more CAC rules and tracks the STIG release.
+- each CAC rule (`linux_os/guide/**/<rule>/rule.yml`) either declares a `template:` (`sysctl`, `package_installed`, `mount_option`, `sshd_lineinfile`, `audit_rules_watch`, `file_permissions`, ...) with parameters, or ships custom OVAL we cannot evaluate.
+- XCCDF variables (`sshd_idle_timeout_value`, `var_password_pam_minlen`) are resolved from the control/profile selection or the variable's default.
 
-`tools/stiggen/gen.py` joins the DISA XCCDF with CAC using CAC's own `ssg`
-Python loader (so Jinja macros, product properties, `PARAM@PRODUCT`
-overrides and template preprocessing resolve exactly as in the upstream
-build) and writes one gzip JSON per product containing every STIG rule with
-its check/fix text plus the resolved template parameters.
+`tools/stiggen/gen.py` joins the DISA XCCDF with CAC using CAC's own `ssg` Python loader (so Jinja macros, product properties, `PARAM@PRODUCT` overrides and template preprocessing resolve exactly as in the upstream build) and writes one gzip JSON per product containing every STIG rule with its check/fix text plus the resolved template parameters.
 
 CAC checks come in two kinds, and the engine handles both:
 
-- **templated** (`sysctl`, `package_installed`, `mount_option`, ...): the
-  parameters are in the table; `ostemplates.go` implements each template
-  kind once.
-- **custom OVAL** (hand-written in CAC): the table carries only the CAC
-  rule name; `osnamed.go` / `osnamed_system.go` implement an evaluator
-  per rule name, fed by `scripts/os_stig_facts.sh` / `os_stig_sweep.sh` (account database,
-  one filesystem sweep, short commands) and the config-file dumps in
-  `stigdata.FileDumps`. Because the key is the CAC rule name, one
-  evaluator serves every product that maps a STIG rule to it.
+- **templated** (`sysctl`, `package_installed`, `mount_option`, ...): the parameters are in the table; `ostemplates.go` implements each template kind once.
+- **custom OVAL** (hand-written in CAC): the table carries only the CAC rule name; `osnamed.go` / `osnamed_system.go` implement an evaluator per rule name, fed by `scripts/os_stig_facts.sh` / `os_stig_sweep.sh` (account database, one filesystem sweep, short commands) and the config-file dumps in `stigdata.FileDumps`. Because the key is the CAC rule name, one evaluator serves every product that maps a STIG rule to it.
 
-Coverage at the time of writing (`go test -v -run TestEmbeddedTables
-./internal/stig/`):
+Coverage at the time of writing (`go test -v -run TestEmbeddedTables ./internal/stig/`):
 
 | Product | Rules | Evaluated | Notes |
 |---|---|---|---|
@@ -139,22 +103,13 @@ Coverage at the time of writing (`go test -v -run TestEmbeddedTables
 | ubuntu2204 | 188 | 188 | CAC controls file tracks V2R8; IDs are stable |
 | ubuntu2404 | 194 | 194 | |
 
-"Evaluated" means an evaluator exists; the result may still be MANUAL where
-the STIG's own check needs an organizational decision (authorized user
-list, PPSM CLSA, documented exceptions, temporary accounts) - those return
-MANUAL with the evidence an assessor would ask for. Rules with a
-templated part and an untemplated part that has no evaluator report MANUAL
-("automated part passes; verify ... manually") rather than PASS.
+"Evaluated" means an evaluator exists; the result may still be MANUAL where the STIG's own check needs an organizational decision (authorized user list, PPSM CLSA, documented exceptions, temporary accounts) - those return MANUAL with the evidence an assessor would ask for. Rules with a templated part and an untemplated part that has no evaluator report MANUAL ("automated part passes; verify ... manually") rather than PASS.
 
-The opt-in harness `TestOSLive` (`KHT_PROBE_OUT=<probe output> go test -v
--run TestOSLive ./internal/stig/`) evaluates a real probe capture and
-prints every FAIL/MANUAL, which is how the evaluators were checked against
-stock Rocky 9 and Ubuntu 24.04 images.
+The opt-in harness `TestOSLive` (`KHT_PROBE_OUT=<probe output> go test -v -run TestOSLive ./internal/stig/`) evaluates a real probe capture and prints every FAIL/MANUAL, which is how the evaluators were checked against stock Rocky 9 and Ubuntu 24.04 images.
 
 ### Regenerating (new DISA release or CAC update)
 
-The generator needs Linux paths and a full CAC checkout; the simplest
-reproducible way is a container:
+The generator needs Linux paths and a full CAC checkout; the simplest reproducible way is a container:
 
 ```sh
 docker run -d --name cacgen python:3.12-slim sleep infinity
@@ -172,138 +127,67 @@ docker exec cacgen sh -c 'cd /cac && python /gen.py --cac /cac --product rhel9 \
 docker cp cacgen:/rhel9.json.gz internal/stigdata/data/
 ```
 
-Repeat per product (`--controls /cac/controls/stig_ubuntu2204.yml` for
-Ubuntu; omit `--controls` for a product CAC no longer carries - every rule is
-then MANUAL). The generator prints `N rules, N templated, N custom, N unmapped`;
-a jump in `unmapped` means DISA renumbered rules faster than CAC's controls
-file - check `cac_controls_version` in the JSON against the XCCDF release.
+Repeat per product (`--controls /cac/controls/stig_ubuntu2204.yml` for Ubuntu; omit `--controls` for a product CAC no longer carries - every rule is then MANUAL). The generator prints `N rules, N templated, N custom, N unmapped`; a jump in `unmapped` means DISA renumbered rules faster than CAC's controls file - check `cac_controls_version` in the JSON against the XCCDF release.
 
 Then:
 
-1. update the version/date strings in `rhel.go` / `ubuntu.go` (they are shown
-   in the UI header and README) and `stig.Benchmarks`;
-2. run `go test ./internal/stig/` - `TestEmbeddedTables` asserts the rule
-   counts, that every template in the data has an evaluator, and minimum
-   coverage; update the counts in the test;
-3. if a new template name appears ("template X has no evaluator"), add an
-   evaluator (section 4.3). Any new shell goes in the `.sh` files under
-   `internal/nodeinfo/scripts/` (embedded with `//go:embed`), never in Go
-   string literals.
+1. update the version/date strings in `rhel.go` / `ubuntu.go` (they are shown in the UI header and [SECURITY.md](SECURITY.md)) and `stig.Benchmarks`;
+2. run `go test ./internal/stig/` - `TestEmbeddedTables` asserts the rule counts, that every template in the data has an evaluator, and minimum coverage; update the counts in the test;
+3. if a new template name appears ("template X has no evaluator"), add an evaluator (section 4.3). Any new shell goes in the `.sh` files under `internal/nodeinfo/scripts/` (embedded with `//go:embed`), never in Go string literals.
 
 ## 4. Adding rules
 
 ### 4.1 Kubernetes / RKE2 / Rancher / CIS rules (hand-written)
 
-1. Take the ID, title and severity from the XCCDF (`Group id`, `Rule
-   severity`, `title`) or the CIS section number. Read the check text - the
-   title alone is often ambiguous (V-242424 is a kubelet rule, not etcd).
-2. Add the check in the file for that document. Per-node checks use
-   `e.perNode(id, title, cat, group, fix, nodes, func(n string) (Status, string))`,
-   which aggregates node results (any Fail -> FAIL, any Manual -> MANUAL) and
-   fills `Result.PerNode`; cluster-wide checks build a `Result` and call
-   `e.add`. Available facts: control-plane flags (`e.apiserver`, `e.cm`,
-   `e.sched`, `e.etcdArgs`), kubelet configz (`e.kubeletCfg`), the API
-   snapshot (`e.in.Snap`) and node facts over SSH (`e.in.Nodes[n]`).
-3. If the ID has a new prefix, add it to `stig.Benchmarks` so the detail view
-   names the right document.
-4. Extend the expectations in `stig_test.go` (`TestEvaluate`,
-   `TestRancherRules`).
+1. Take the ID, title and severity from the XCCDF (`Group id`, `Rule severity`, `title`) or the CIS section number. Read the check text - the title alone is often ambiguous (V-242424 is a kubelet rule, not etcd).
+2. Add the check in the file for that document. Per-node checks use `e.perNode(id, title, cat, group, fix, nodes, func(n string) (Status, string))`, which aggregates node results (any Fail -> FAIL, any Manual -> MANUAL) and fills `Result.PerNode`; cluster-wide checks build a `Result` and call `e.add`. Available facts: control-plane flags (`e.apiserver`, `e.cm`, `e.sched`, `e.etcdArgs`), kubelet configz (`e.kubeletCfg`), the API snapshot (`e.in.Snap`) and node facts over SSH (`e.in.Nodes[n]`).
+3. If the ID has a new prefix, add it to `stig.Benchmarks` so the detail view names the right document.
+4. Extend the expectations in `stig_test.go` (`TestEvaluate`, `TestRancherRules`).
 
-Some rules combine sources: V-274882 (secrets encrypted at rest) reads the
-apiserver flag from the mirror pod, the provider order from the running
-apiserver's config (the etcd probe prints only the provider / resource
-token names, never key material) and a Secret sampled from etcd (first 24
-bytes; `k8s:enc:<provider>:` proves the stored value is encrypted, raw
-protobuf proves it is not). The flag alone is Manual, because secrets
-written before encryption was enabled stay plaintext until rewritten.
+Some rules combine sources: V-274882 (secrets encrypted at rest) reads the apiserver flag from the mirror pod, the provider order from the running apiserver's config (the etcd probe prints only the provider / resource token names, never key material) and a Secret sampled from etcd (first 24 bytes; `k8s:enc:<provider>:` proves the stored value is encrypted, raw protobuf proves it is not). The flag alone is Manual, because secrets written before encryption was enabled stay plaintext until rewritten.
 
-Use `Manual` when the rule needs judgment or data we do not collect;
-`NA` when it does not apply to this distribution; `Unknown` when we could
-not read the input (RBAC). Never emit FAIL for missing data.
+Use `Manual` when the rule needs judgment or data we do not collect; `NA` when it does not apply to this distribution; `Unknown` when we could not read the input (RBAC). Never emit FAIL for missing data.
 
 ### 4.2 OS STIG hand-written overrides
 
-When the probe can see something CAC only checks with custom OVAL (FIPS
-mode, SELinux state, service runtime-vs-boot), add it as an override:
+When the probe can see something CAC only checks with custom OVAL (FIPS mode, SELinux state, service runtime-vs-boot), add it as an override:
 
-1. add an `osCheck` to `osChecks` in `os.go` with a unique `key`, a generic
-   `OS-*` fallback ID and an `eval(info *nodeinfo.Info)`;
-2. map the key to the release's vulnerability ID and category in `rhel.go`
-   / `ubuntu.go` (`"fips": {"V-258230", "I"}`) - look the ID up in the
-   XCCDF or the generated table (`stigid`/`vid` fields);
-3. if the fact is new, add it to the probe (`internal/nodeinfo/script.go`,
-   HARDENING section) and its parser in `info.go`.
+1. add an `osCheck` to `osChecks` in `os.go` with a unique `key`, a generic `OS-*` fallback ID and an `eval(info *nodeinfo.Info)`;
+2. map the key to the release's vulnerability ID and category in `rhel.go` / `ubuntu.go` (`"fips": {"V-258230", "I"}`) - look the ID up in the XCCDF or the generated table (`stigid`/`vid` fields);
+3. if the fact is new, add it to the probe (`internal/nodeinfo/script.go`, HARDENING section) and its parser in `info.go`.
 
 Overrides win over CAC templates for that vulnerability ID.
 
 ### 4.3 A ComplianceAsCode custom-OVAL rule (named evaluator)
 
-When `TestEmbeddedTables` or the OS STIG sub-tab shows a rule as "custom
-OVAL only (<rule name>)":
+When `TestEmbeddedTables` or the OS STIG sub-tab shows a rule as "custom OVAL only (<rule name>)":
 
-1. Read the STIG check text (the rule's detail view, or the `check` field in
-   the table) - that is what an assessor runs, so match it, not the OVAL.
-2. Add `"<cac rule name>": func(i *nodeinfo.Info) (Status, string)` to the
-   relevant `register(...)` block in `osnamed.go` / `osnamed_system.go`.
-   Helpers: `keyValue`, `grep`, `lines`, `cmd` (STIGCMD facts), `sweep`
-   (filesystem sweep kinds), `interactiveUsers`, `failIf`.
-3. If a new fact is needed, add a `kv name "$(...)"` line to
-   `scripts/os_stig_facts.sh` (bounded: `head`, `tr` newlines to `;`) or a
-   file to `stigdata.FileDumps`; parse new sections in
-   `nodeinfo.parseOSStig` and carry them in `Info.MergeSTIG`.
-4. Extend `hardenedNode()` in `osnamed_test.go` so the hardened fixture
-   passes the new evaluator, and add a broken case to
-   `TestNamedEvaluatorsFindings`.
+1. Read the STIG check text (the rule's detail view, or the `check` field in the table) - that is what an assessor runs, so match it, not the OVAL.
+2. Add `"<cac rule name>": func(i *nodeinfo.Info) (Status, string)` to the relevant `register(...)` block in `osnamed.go` / `osnamed_system.go`. Helpers: `keyValue`, `grep`, `lines`, `cmd` (STIGCMD facts), `sweep` (filesystem sweep kinds), `interactiveUsers`, `failIf`.
+3. If a new fact is needed, add a `kv name "$(...)"` line to `scripts/os_stig_facts.sh` (bounded: `head`, `tr` newlines to `;`) or a file to `stigdata.FileDumps`; parse new sections in `nodeinfo.parseOSStig` and carry them in `Info.MergeSTIG`.
+4. Extend `hardenedNode()` in `osnamed_test.go` so the hardened fixture passes the new evaluator, and add a broken case to `TestNamedEvaluatorsFindings`.
 
 ### 4.4 A new ComplianceAsCode template kind
 
-1. Read `shared/templates/<name>/template.py` (parameter preprocessing) and
-   `oval.template` (semantics) in CAC.
-2. Add `func evalX(info *nodeinfo.Info, c stigdata.Check, id string) (Status, string)`
-   to `ostemplates.go` and register it in `templateEvals`. Parameters come
-   from `c.Str/Bool/List`; values backed by XCCDF variables come from
-   `c.Value("VALUE", "XCCDF_VARIABLE")` / `c.Resolved`.
-3. If it needs a fact the probe does not collect, add a section to
-   `osStigScript` (generic facts) or extend `stigdata.Derive()` (per-rule
-   stat / find / file dump targets computed from the tables) and parse it in
-   `nodeinfo.parseOSStig`. Keep output bounded (`head`, `-maxdepth`,
-   `head -c`) and pass dumps through `mask`.
-4. Add cases to `TestTemplateEvaluators` (synthetic `nodeinfo.Info`) - one
-   pass, one fail, and the "fact missing" path, which must be Manual/NA.
+1. Read `shared/templates/<name>/template.py` (parameter preprocessing) and `oval.template` (semantics) in CAC.
+2. Add `func evalX(info *nodeinfo.Info, c stigdata.Check, id string) (Status, string)` to `ostemplates.go` and register it in `templateEvals`. Parameters come from `c.Str/Bool/List`; values backed by XCCDF variables come from `c.Value("VALUE", "XCCDF_VARIABLE")` / `c.Resolved`.
+3. If it needs a fact the probe does not collect, add a section to `osStigScript` (generic facts) or extend `stigdata.Derive()` (per-rule stat / find / file dump targets computed from the tables) and parse it in `nodeinfo.parseOSStig`. Keep output bounded (`head`, `-maxdepth`, `head -c`) and pass dumps through `mask`.
+4. Add cases to `TestTemplateEvaluators` (synthetic `nodeinfo.Info`) - one pass, one fail, and the "fact missing" path, which must be Manual/NA.
 
 ### 4.5 A new operating system release
 
-1. Confirm a DISA STIG exists (probe the zip name) and that CAC has a
-   `stig_<product>.yml` controls file plus `products/<product>/product.yml`.
+1. Confirm a DISA STIG exists (probe the zip name) and that CAC has a `stig_<product>.yml` controls file plus `products/<product>/product.yml`.
 2. Generate the table (section 3) into `internal/stigdata/data/<product>.json.gz`.
-3. Teach `stigdata.ProductFor` the os-release mapping if it is not
-   `rhel<major>` / `ubuntu<version-without-dot>`.
-4. Add an `OSBenchmark` entry in `rhel.go` / `ubuntu.go` (or a new
-   `<family>.go`) with `product`, `family`, `release` and the override keys.
+3. Teach `stigdata.ProductFor` the os-release mapping if it is not `rhel<major>` / `ubuntu<version-without-dot>`.
+4. Add an `OSBenchmark` entry in `rhel.go` / `ubuntu.go` (or a new `<family>.go`) with `product`, `family`, `release` and the override keys.
 5. Add it to `TestEmbeddedTables` and `TestOSBenchmarkFor`.
 
 ## 5. Probe requirements and semantics
 
-- The node script runs as root via `sudo`, `dzdo` or `doas` (`ssh.become`,
-  probed per host; see README "What SSH needs"); `sshd -T`, `auditctl -l`,
-  the account-database facts (`/etc/shadow` is reduced to hash type and
-  aging fields, never the hash), the filesystem sweep (one `find` over the
-  local filesystems, 120 s cap, 200 hits max),
-  `stat` of `/etc/shadow` and the recursive `find` scans need root. Without
-  it those rules report MANUAL, never FAIL.
-- Runtime state is what is graded (`sysctl -a`, loaded audit rules, mounted
-  options, `sshd -T`); where the STIG also requires the setting to be
-  persisted (fstab, grub, sysctl.d) the evaluator reports FAIL with a
-  "lost on reboot" detail when only one side is set.
-- The Security tab is opt-in (`Shift+S` runs the scan); the OS STIG facts
-  are collected by that same key over SSH, in four stages per node (system
-  facts, file modes, accounts, filesystem sweep) with per-node progress on
-  the tab. Until then a node has no OS STIG rows at all rather than
-  hundreds of MANUAL ones, and the Node hardening column reads "not
-  collected".
-- The union of all products' stat/find/dump targets is sent to every node;
-  results are matched back by `V-ID:index` so a RHEL scan running on an
-  Ubuntu node is simply ignored.
+- The node script runs as root via `sudo`, `dzdo` or `doas` (`ssh.become`, probed per host; see [RUNNING.md](RUNNING.md) "What SSH needs on the nodes"); `sshd -T`, `auditctl -l`, the account-database facts (`/etc/shadow` is reduced to hash type and aging fields, never the hash), the filesystem sweep (one `find` over the local filesystems, 120 s cap, 200 hits max), `stat` of `/etc/shadow` and the recursive `find` scans need root. Without it those rules report MANUAL, never FAIL.
+- Runtime state is what is graded (`sysctl -a`, loaded audit rules, mounted options, `sshd -T`); where the STIG also requires the setting to be persisted (fstab, grub, sysctl.d) the evaluator reports FAIL with a "lost on reboot" detail when only one side is set.
+- The Security tab is opt-in (`Shift+S` runs the scan); the OS STIG facts are collected by that same key over SSH, in four stages per node (system facts, file modes, accounts, filesystem sweep) with per-node progress on the tab. Until then a node has no OS STIG rows at all rather than hundreds of MANUAL ones, and the Node hardening column reads "not collected".
+- The union of all products' stat/find/dump targets is sent to every node; results are matched back by `V-ID:index` so a RHEL scan running on an Ubuntu node is simply ignored.
 
 ## 6. Verifying
 
@@ -315,5 +199,4 @@ docker run --rm -v "$PWD/probe.sh:/probe.sh:ro" rockylinux:9 sh /probe.sh | grep
 docker run --rm -v "$PWD/probe.sh:/probe.sh:ro" ubuntu:24.04 sh /probe.sh | grep '^VIOL'
 ```
 
-(Containers have no systemd, sysctl or sshd, so those sections are empty
-there; the point is that every section parses and the find scans finish.)
+(Containers have no systemd, sysctl or sshd, so those sections are empty there; the point is that every section parses and the find scans finish.)

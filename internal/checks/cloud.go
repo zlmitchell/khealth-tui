@@ -121,6 +121,8 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 	}
 
 	evalVolumeAttachments(in, add)
+	evalSnapshots(in, add)
+	evalTridentProtect(in, add)
 
 	// StorageClasses whose CSI provisioner has no driver
 	have := map[string]bool{}

@@ -639,6 +639,58 @@ func (a *App) storageContent() content {
 		}
 	}
 
+	if si := s.Snapshots; si != nil {
+		add("", styleTitle.Render("VolumeSnapshots")+styleDim.Render("  (CSI; namespace filter applies)"))
+		var cls []string
+		drivers := map[string]bool{}
+		for i := range s.CSIDrivers {
+			drivers[s.CSIDrivers[i].Name] = true
+		}
+		for _, c := range si.Classes {
+			t := c.Name + " (" + c.Driver + ")"
+			if c.Default {
+				t += " default"
+			}
+			if !drivers[c.Driver] {
+				t = styleWarn.Render(t + " driver missing")
+			}
+			cls = append(cls, t)
+		}
+		add("  " + kv("classes", orStr(strings.Join(cls, ", "), styleDim.Render("none"))))
+		rows, rowIDs = nil, nil
+		for _, vs := range si.Snapshots {
+			if !a.inNamespace(vs.Namespace) {
+				continue
+			}
+			st := styleOK.Render("ready")
+			switch {
+			case vs.Deleting:
+				st = styleDim.Render("deleting")
+			case vs.Error != "":
+				st = styleCrit.Render("ERROR")
+			case !vs.Ready:
+				st = styleWarn.Render("pending")
+			}
+			detail := ""
+			if vs.Error != "" {
+				detail = styleDim.Render(trunc(firstLine(vs.Error), 70))
+			} else if !vs.SnapshotTime.IsZero() {
+				detail = styleDim.Render("taken " + age(vs.SnapshotTime) + " ago")
+			}
+			rows = append(rows, []string{vs.Namespace, vs.Name, orStr(vs.SourcePVC, vs.SourceContent), st, vs.Class, vs.RestoreSize, age(vs.Created), detail})
+			rowIDs = append(rowIDs, "pvc:"+vs.Namespace+"/"+vs.SourcePVC)
+		}
+		if len(rows) == 0 {
+			add(styleDim.Render("  none"))
+		} else {
+			h, lines := renderTable(a.width, []column{{title: "NAMESPACE", max: 24}, {title: "NAME", max: 36}, {title: "SOURCE PVC", max: 36}, {title: "STATUS"}, {title: "CLASS"}, {title: "SIZE"}, {title: "AGE"}, {title: ""}}, rows)
+			add(h)
+			for i, l := range lines {
+				addRow(rowIDs[i], l)
+			}
+		}
+	}
+
 	fsNote := "  (SSH; enter = node detail)"
 	if st := a.tierStatus(tierPV); st != "" && len(pvPathsOf(s)) > 0 {
 		fsNote += styleDim.Render("  hostPath/local " + st)

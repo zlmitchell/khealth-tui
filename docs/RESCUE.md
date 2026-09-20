@@ -1,15 +1,10 @@
 # etcd rescue: what `X` on the etcd tab does, step by step
 
-khealth can repair an rke2 / k3s / kubeadm control plane over SSH. This
-document lists every step it takes, the command behind it, what it checks
-before moving on, and what it leaves behind. The code is
-`internal/rescue` (plan and step engine) and `internal/rescue/scripts/*.sh`
-(what runs on the nodes, POSIX sh as root).
+khealth can repair an rke2 / k3s / kubeadm control plane over SSH. This document lists every step it takes, the command behind it, what it checks before moving on, and what it leaves behind. The code is `internal/rescue` (plan and step engine) and `internal/rescue/scripts/*.sh` (what runs on the nodes, POSIX sh as root).
 
 ## Two modes
 
-`X` first asks which situation you are in and recommends one from what the
-probes see:
+`X` first asks which situation you are in and recommends one from what the probes see:
 
 | | Rejoin one server | Restore a snapshot |
 |---|---|---|
@@ -19,85 +14,36 @@ probes see:
 | takes | ~30 s | 3-5 minutes for three servers |
 | recommended when | a live leader is seen and a reachable node is not serving etcd | otherwise |
 
-Requirements for both: SSH collection on (`s`), `actions.enabled` (not
-`--read-only`), the etcd probes of the servers, and an rke2, k3s or kubeadm
-control plane (external / kubespray etcd is refused with a pointer to the
-triage steps).
+Requirements for both: SSH collection on (`s`), `actions.enabled` (not `--read-only`), the etcd probes of the servers, and an rke2, k3s or kubeadm control plane (external / kubespray etcd is refused with a pointer to the triage steps).
 
 ## What khealth knows when the apiserver is down
 
-The picker works without the API. The etcd probe reads, on every reachable
-server, even with etcd stopped:
+The picker works without the API. The etcd probe reads, on every reachable server, even with etcd stopped:
 
-- the cluster's members from the `members` bucket of `member/snap/db`
-  (name, id, peer URL; freed pages may still hold members removed since, so
-  entries are keyed by peer address) and the `initial-cluster` line of the
-  rke2-generated `db/etcd/config` or the kubeadm manifest;
-- which member id was elected leader at which term, from the etcd log
-  (`/var/log/pods/kube-system_etcd-*/etcd/*.log`, journal for k3s);
-- the on-disk raft position (`member/snap/<term>-<index>.snap`, newest WAL)
-  and the snapshot files.
+- the cluster's members from the `members` bucket of `member/snap/db` (name, id, peer URL; freed pages may still hold members removed since, so entries are keyed by peer address) and the `initial-cluster` line of the rke2-generated `db/etcd/config` or the kubeadm manifest;
+- which member id was elected leader at which term, from the etcd log (`/var/log/pods/kube-system_etcd-*/etcd/*.log`, journal for k3s);
+- the on-disk raft position (`member/snap/<term>-<index>.snap`, newest WAL) and the snapshot files.
 
-Peers found this way become SSH targets on their peer address, so one
-reachable server is enough to learn and probe the whole control plane; `X`
-probes any node that has no probe yet and the picker updates as they
-answer. When the kubeconfig's apiserver is down but another server's is
-up, khealth switches to that one (same CA and credentials; `api ...
-(failover)` in the header) and every tab fills again. When `khealth
-user@server` is started with 6443 down, the bootstrap writes a kubeconfig
-pointing at that server anyway and the TUI comes up offline.
+Peers found this way become SSH targets on their peer address, so one reachable server is enough to learn and probe the whole control plane; `X` probes any node that has no probe yet and the picker updates as they answer. When the kubeconfig's apiserver is down but another server's is up, khealth switches to that one (same CA and credentials; `api ... (failover)` in the header) and every tab fills again. When `khealth user@server` is started with 6443 down, the bootstrap writes a kubeconfig pointing at that server anyway and the TUI comes up offline.
 
-The picker shows per node: SSH reachability, etcd health, `leader` (live) or
-`last leader` (highest election term in any log), member name/id, leader
-term, raft index, snapshots on the node.
+The picker shows per node: SSH reachability, etcd health, `leader` (live) or `last leader` (highest election term in any log), member name/id, leader term, raft index, snapshots on the node.
 
 ## The UI flow
 
 1. mode (rejoin / restore), with the recommendation;
-2. node: the server to rejoin, or the server to restore *from* (best source
-   preselected: online healthy leader, then the highest election term, then
-   raft index, then newest snapshot); unreachable nodes cannot be chosen;
-3. restore only: the restore point on that node, newest first (local files
-   the probe saw; S3 records on rke2/k3s only when the `etcd-s3-*` settings
-   are inline in `config.yaml` - a config secret cannot be read while the
-   apiserver is down);
+2. node: the server to rejoin, or the server to restore *from* (best source preselected: online healthy leader, then the highest election term, then raft index, then newest snapshot); unreachable nodes cannot be chosen;
+3. restore only: the restore point on that node, newest first (local files the probe saw; S3 records on rke2/k3s only when the `etcd-s3-*` settings are inline in `config.yaml` - a config secret cannot be read while the apiserver is down);
 4. preflight, read-only, on every server involved (below);
-5. confirmation: the plan, every warning, and the word `restore` typed
-   (the text scrolls with the arrows / PgUp / PgDn / Home / End, the input
-   stays at the bottom);
-6. the steps, live. The view follows the running step until you scroll
-   (`j/k`, PgUp/PgDn, `g/G`; `f` follows again). `esc` hides the view (the
-   rescue keeps running, `X` shows it again), `x` aborts after the step in
-   progress, `q` refuses to quit while it runs (`ctrl+c` still does,
-   cutting the step off).
+5. confirmation: the plan, every warning, and the word `restore` typed (the text scrolls with the arrows / PgUp / PgDn / Home / End, the input stays at the bottom);
+6. the steps, live. The view follows the running step until you scroll (`j/k`, PgUp/PgDn, `g/G`; `f` follows again). `esc` hides the view (the rescue keeps running, `X` shows it again), `x` aborts after the step in progress, `q` refuses to quit while it runs (`ctrl+c` still does, cutting the step off).
 
-A failing step stops everything: it is marked with the error and its last
-output lines, the remaining steps are skipped, and the notes say where every
-node's data is. Nothing retries silently except the two documented rke2
-cases below. khealth never deletes etcd data: everything moved aside stays
-in the rescue directory.
+A failing step stops everything: it is marked with the error and its last output lines, the remaining steps are skipped, and the notes say where every node's data is. Nothing retries silently except the two documented rke2 cases below. khealth never deletes etcd data: everything moved aside stays in the rescue directory.
 
 ## Preflight (`preflight.sh`, read-only)
 
-On each server: `systemctl` present; data dir owner, mode, size, whether it
-holds member data, whether it is a mount point (refused for rke2/k3s, the
-cluster-reset cannot rename a mount point); free space; the rescue
-directory it will use (`<data-dir>/../etcd-rescue-<stamp>`, or inside a
-mount point); running etcd container. rke2/k3s: the binary, `reset-flag`
-absent (a previous cluster-reset never followed by a normal start), the
-config's `server:`, `cluster-init`, `profile`, `etcd-s3` keys, the `etcd`
-user. kubeadm: the etcd manifest's `--name`, `--initial-advertise-peer-urls`,
-image and `--initial-cluster`, a kube-apiserver manifest, `crictl` and a CRI
-socket, which of `etcdutl` / `etcdctl` / `ctr` / `podman` exist, and the
-API endpoint `admin.conf` uses (the `controlPlaneEndpoint`): when it is not
-the target itself the confirmation warns which follower or external address
-it is, since kubectl, kube-proxy and the CNI pods on the target depend on it. The restore
-target also checks the snapshot file exists and is readable. Rejoin also
-runs `status.sh` on the healthy member and refuses when it does not see
-quorum and a leader.
+On each server: `systemctl` present; data dir owner, mode, size, whether it holds member data, whether it is a mount point (refused for rke2/k3s, the cluster-reset cannot rename a mount point); free space; the rescue directory it will use (`<data-dir>/../etcd-rescue-<stamp>`, or inside a mount point); running etcd container. rke2/k3s: the binary, `reset-flag` absent (a previous cluster-reset never followed by a normal start), the config's `server:`, `cluster-init`, `profile`, `etcd-s3` keys, the `etcd` user. kubeadm: the etcd manifest's `--name`, `--initial-advertise-peer-urls`, image and `--initial-cluster`, a kube-apiserver manifest, `crictl` and a CRI socket, which of `etcdutl` / `etcdctl` / `ctr` / `podman` exist, and the API endpoint `admin.conf` uses (the `controlPlaneEndpoint`): when it is not the target itself the confirmation warns which follower or external address it is, since kubectl, kube-proxy and the CNI pods on the target depend on it. The restore target also checks the snapshot file exists and is readable. Rejoin also runs `status.sh` on the healthy member and refuses when it does not see quorum and a leader.
 
-A follower that fails preflight or SSH is left out with a warning: it is
-neither stopped nor rejoined, and the final notes say what to do with it.
+A follower that fails preflight or SSH is left out with a warning: it is neither stopped nor rejoined, and the final notes say what to do with it.
 
 ## Restore, rke2 / k3s
 
@@ -145,8 +91,7 @@ Servers: T = the restore source, F1..Fn = the others, in name order.
 
 ## Rejoin one server
 
-N = the broken server, A = the healthy member it joins through (the live
-leader when there is one).
+N = the broken server, A = the healthy member it joins through (the live leader when there is one).
 
 | # | node | step | what runs | checked |
 |---|---|---|---|---|
@@ -158,58 +103,26 @@ leader when there is one).
 
 ## What is left behind
 
-- `<data-dir>/../etcd-rescue-<stamp>/etcd` on every node touched: the etcd
-  data as it was. Never deleted by khealth; the notes say so. rke2 also
-  keeps `db/etcd-old-<time>` from its own restore.
-- `cluster-reset.log` / `cluster-reset-2.log` and the exit files in the
-  rescue dir; `etcd.yaml.before-rescue` on patched kubeadm followers.
-- The join drop-in is removed once the node is a member; a failed run may
-  leave it (the notes list it).
-- kubeadm followers' manifests keep the patched `--initial-cluster`; etcd
-  only reads it with an empty data dir.
-- Worker kubelets are not restarted (`systemctl restart kubelet` there if
-  pods look stale).
+- `<data-dir>/../etcd-rescue-<stamp>/etcd` on every node touched: the etcd data as it was. Never deleted by khealth; the notes say so. rke2 also keeps `db/etcd-old-<time>` from its own restore.
+- `cluster-reset.log` / `cluster-reset-2.log` and the exit files in the rescue dir; `etcd.yaml.before-rescue` on patched kubeadm followers.
+- The join drop-in is removed once the node is a member; a failed run may leave it (the notes list it).
+- kubeadm followers' manifests keep the patched `--initial-cluster`; etcd only reads it with an empty data dir.
+- Worker kubelets are not restarted (`systemctl restart kubelet` there if pods look stale).
 
 ## Behaviors learned on real clusters (all handled)
 
-- SELinux: a restore started from an SSH session writes `unconfined_u`
-  files the confined etcd container is denied; rke2 waits 15 min and exits
+- SELinux: a restore started from an SSH session writes `unconfined_u` files the confined etcd container is denied; rke2 waits 15 min and exits
   0. Hence `systemd-run`, `restorecon`, and success judged on the log line.
-- `rke2 server --cluster-reset` refuses to run while `server:` is set;
-  `--server=` on the command line overrides the file.
-- A node joining through `server:` needs `token:` in its config; the first
-  server never had one there.
-- The combined restore + reset has been seen not to replace the data dir,
-  and to come up with the old peers still listed: verified on disk, second
-  attempt / second reset.
+- `rke2 server --cluster-reset` refuses to run while `server:` is set; `--server=` on the command line overrides the file.
+- A node joining through `server:` needs `token:` in its config; the first server never had one there.
+- The combined restore + reset has been seen not to replace the data dir, and to come up with the old peers still listed: verified on disk, second attempt / second reset.
 - The etcd container outlives `systemctl stop rke2-server`.
-- calico-node on the restored node drops the local pod routes while the
-  apiserver comes up ("no route to host" from every pod there).
-- With a member down, `etcdctl endpoint health/status --cluster -w json`
-  prints the JSON array and then `Error: unhealthy cluster` on the same
-  stream; the parser trims to the array.
+- calico-node on the restored node drops the local pod routes while the apiserver comes up ("no route to host" from every pod there).
+- With a member down, `etcdctl endpoint health/status --cluster -w json` prints the JSON array and then `Error: unhealthy cluster` on the same stream; the parser trims to the array.
 - rke2 refuses a rejoin while the stale member of the same name exists.
 
 ## Tested
 
-- rke2 v1.35.8, RHEL 9.6 STIG (SELinux enforcing, fapolicyd, `profile:
-  cis`): single node; three servers restoring from each of the three
-  (cluster-init node and joined nodes), rejoin of a stopped cluster-init
-  node through a follower.
-- kubeadm v1.35.8, Ubuntu 24.04 STIG (etcd 3.6.6, canal, no host
-  etcdutl: restore through `ctr` and the pod's etcd image): single node;
-  three stacked control-plane nodes with `controlPlaneEndpoint` set to the
-  init node's address (`hardening/ubuntu2404/README.md`, *Adding
-  control-plane nodes*) restoring from the endpoint node (184 s) and from a
-  follower (104 s), and a rejoin of a node whose etcd data was removed under
-  the running static pod (41 s). Found and fixed on those runs: the CNI
-  restart on a target that is not the endpoint node stranded it (Calico's
-  installer dies on the first refused connection through the service VIP,
-  which kube-proxy - pinned to the stopped endpoint - still maps to every
-  apiserver), hence the step's new position and endpoint check; kubelet
-  recreates a moved-aside `/var/lib/etcd` as 0755 before etcd starts
-  (`start.sh` creates it 0700 first); the followers' controller-manager and
-  scheduler are parked with the apiserver instead of being left running
-  against the restored data.
-- Every scenario proven by objects created after the snapshot being gone
-  (restore) or still present (rejoin), all nodes Ready, all pods Running.
+- rke2 v1.35.8, RHEL 9.6 STIG (SELinux enforcing, fapolicyd, `profile: cis`): single node; three servers restoring from each of the three (cluster-init node and joined nodes), rejoin of a stopped cluster-init node through a follower.
+- kubeadm v1.35.8, Ubuntu 24.04 STIG (etcd 3.6.6, canal, no host etcdutl: restore through `ctr` and the pod's etcd image): single node; three stacked control-plane nodes with `controlPlaneEndpoint` set to the init node's address (`hardening/ubuntu2404/README.md`, *Adding control-plane nodes*) restoring from the endpoint node (184 s) and from a follower (104 s), and a rejoin of a node whose etcd data was removed under the running static pod (41 s). Found and fixed on those runs: the CNI restart on a target that is not the endpoint node stranded it (Calico's installer dies on the first refused connection through the service VIP, which kube-proxy - pinned to the stopped endpoint - still maps to every apiserver), hence the step's new position and endpoint check; kubelet recreates a moved-aside `/var/lib/etcd` as 0755 before etcd starts (`start.sh` creates it 0700 first); the followers' controller-manager and scheduler are parked with the apiserver instead of being left running against the restored data.
+- Every scenario proven by objects created after the snapshot being gone (restore) or still present (rejoin), all nodes Ready, all pods Running.

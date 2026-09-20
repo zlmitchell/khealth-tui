@@ -1,10 +1,6 @@
 # Refresh cadence: what talks to the cluster and nodes, and how often
 
-One timer drives everything: `refresh` (default 30 s, floor 5 s; `--refresh`,
-`refresh:` in the config). Each tick fetches an API snapshot; when that lands,
-the SSH collections and the other follow-up commands are started for the
-same cycle. Nothing else polls on its own timer - the pod log viewer is a
-server-side stream and the spinner is UI-only.
+One timer drives everything: `refresh` (default 30 s, floor 5 s; `--refresh`, `refresh:` in the config). Each tick fetches an API snapshot; when that lands, the SSH collections and the other follow-up commands are started for the same cycle. Nothing else polls on its own timer - the pod log viewer is a server-side stream and the spinner is UI-only.
 
 | Work | Target | When | Cost / bound |
 |---|---|---|---|
@@ -31,42 +27,15 @@ server-side stream and the spinner is UI-only.
 
 ## Why the OS STIG collection only runs on request
 
-The light probe is designed to be cheap enough for every tick. The OS STIG
-facts are not: `rpm -qa`, `sysctl -a`, a `find` sweep over the local
-filesystems, `auditctl -l`, `sshd -T` and ~60 file dumps add a few seconds
-of CPU and 300 KB of output per node, and none of it changes minute to
-minute. So they are not part of any refresh cycle at all: `Shift+S` on the
-Security tab (the same key that opts in to the STIG/CIS evaluation itself)
-starts the scan's own probes - the four stages above, one SSH run each, per
-node - and the tab shows a checklist with every node's progress
-(`2/4 stages`, the stage that is running and for how long) and the overall
-percent in the header until the last node has answered. The key only
-reports a hint anywhere else, and neither launch, `r`, `R` nor re-enabling
-SSH trigger a collection.
+The light probe is designed to be cheap enough for every tick. The OS STIG facts are not: `rpm -qa`, `sysctl -a`, a `find` sweep over the local filesystems, `auditctl -l`, `sshd -T` and ~60 file dumps add a few seconds of CPU and 300 KB of output per node, and none of it changes minute to minute. So they are not part of any refresh cycle at all: `Shift+S` on the Security tab (the same key that opts in to the STIG/CIS evaluation itself) starts the scan's own probes - the four stages above, one SSH run each, per node - and the tab shows a checklist with every node's progress (`2/4 stages`, the stage that is running and for how long) and the overall percent in the header until the last node has answered. The key only reports a hint anywhere else, and neither launch, `r`, `R` nor re-enabling SSH trigger a collection.
 
-The stages are deliberately not piggybacked on the regular node probe: a
-probe that rides the refresh cycle is skipped while the previous one is
-still running or the node is in backoff, and an answer that arrives after
-the next refresh tick belonged to an old cycle. The scan's probes carry the
-cluster generation instead (only a context switch invalidates them), so a
-20 s collection that straddles the 30 s tick still lands.
+The stages are deliberately not piggybacked on the regular node probe: a probe that rides the refresh cycle is skipped while the previous one is still running or the node is in backoff, and an answer that arrives after the next refresh tick belonged to an old cycle. The scan's probes carry the cluster generation instead (only a context switch invalidates them), so a 20 s collection that straddles the 30 s tick still lands.
 
-Until the first scan the Security tab shows only the opt-in notice. Until a
-node has been collected its OS STIG rules are not emitted at all - the
-sub-tab says `Shift+S` runs the scan, and the Node hardening column reads
-"not collected". A node's facts are handed to its `Info` when its last stage
-lands; `Info.MergeSTIG` copies them forward on every later cycle, so the
-results stay populated, and the header shows how old they are; press
-`Shift+S` again to re-collect.
+Until the first scan the Security tab shows only the opt-in notice. Until a node has been collected its OS STIG rules are not emitted at all - the sub-tab says `Shift+S` runs the scan, and the Node hardening column reads "not collected". A node's facts are handed to its `Info` when its last stage lands; `Info.MergeSTIG` copies them forward on every later cycle, so the results stay populated, and the header shows how old they are; press `Shift+S` again to re-collect.
 
 ## Footprint
 
-`P` shows what the last cycles cost the API server, each node (remote CPU
-seconds per probe, from the `PERF` section every script ends with) and this
-host; `--perf-log` writes it per cycle and `tools/perfbench` measures it
-headlessly with baseline-vs-during CPU sampling on the nodes.
-[PERFORMANCE.md](PERFORMANCE.md) has the numbers and the rules;
-[ARCHITECTURE.md](ARCHITECTURE.md) the update loop behind the cadences.
+`P` shows what the last cycles cost the API server, each node (remote CPU seconds per probe, from the `PERF` section every script ends with) and this host; `--perf-log` writes it per cycle and `tools/perfbench` measures it headlessly with baseline-vs-during CPU sampling on the nodes. [PERFORMANCE.md](PERFORMANCE.md) has the numbers and the rules; [ARCHITECTURE.md](ARCHITECTURE.md) the update loop behind the cadences.
 
 ## Tuning
 
@@ -93,9 +62,4 @@ logs:
   since: -24h
 ```
 
-`s` turns SSH collection off entirely (API-only mode); `r` forces an
-immediate light cycle; `R` forces every tier on every node; `Shift+S`
-(Security tab only) runs the security scan and collects the OS STIG facts
-in stages. Opening a tab that shows a demand tier collects that tier at
-once if what it has is stale, and the tab says how old its facts are
-("journal from 4m ago · collecting").
+`s` turns SSH collection off entirely (API-only mode); `r` forces an immediate light cycle; `R` forces every tier on every node; `Shift+S` (Security tab only) runs the security scan and collects the OS STIG facts in stages. Opening a tab that shows a demand tier collects that tier at once if what it has is stale, and the tab says how old its facts are ("journal from 4m ago · collecting").

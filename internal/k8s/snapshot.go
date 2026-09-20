@@ -82,9 +82,11 @@ type Snapshot struct {
 	// Cloud provider / CSI extras (cloud.go): Trident backends and the
 	// vSphere CPI config; everything else is derived by Snapshot.Cloud.
 	TridentBackends []TridentBackend
-	Trident         *TridentInfo  // nil without the Trident CRDs
-	Longhorn        *LonghornInfo // nil without the Longhorn CRDs
-	Ceph            *CephInfo     // nil without the Rook-Ceph CRDs
+	Trident         *TridentInfo    // nil without the Trident CRDs
+	Longhorn        *LonghornInfo   // nil without the Longhorn CRDs
+	Ceph            *CephInfo       // nil without the Rook-Ceph CRDs
+	Snapshots       *SnapshotInfo   // nil without the snapshot.storage.k8s.io CRDs
+	Protect         *TridentProtect // nil without the Trident Protect CRDs
 	VSphereConf     *VSphereConf
 	HelmReleases    []HelmRelease
 	Rancher         *RancherInfo
@@ -557,6 +559,22 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		ce := c.cephInfo(ctx)
 		mu.Lock()
 		s.Ceph = ce
+		mu.Unlock()
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		si := c.snapshotInfo(ctx)
+		mu.Lock()
+		s.Snapshots = si
+		mu.Unlock()
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tp := c.tridentProtect(ctx)
+		mu.Lock()
+		s.Protect = tp
 		mu.Unlock()
 	}()
 	optional("kubeadm-config", func() error {

@@ -314,6 +314,37 @@ func (a *App) volumeDetail(pvc *corev1.PersistentVolumeClaim, pv *corev1.Persist
 		out = append(out, cephVolumeDetail(pv, s.Ceph)...)
 	}
 
+	// ---- CSI snapshots of this claim ----
+	if pvc != nil {
+		if snaps := s.Snapshots.ForPVC(pvc.Namespace, pvc.Name); len(snaps) > 0 {
+			add("", styleTitle.Render("VolumeSnapshots"))
+			var rows [][]string
+			for i, vs := range snaps {
+				if i == 8 {
+					add(styleDim.Render(fmt.Sprintf("  ... %d more", len(snaps)-8)))
+					break
+				}
+				st := styleOK.Render("ready")
+				switch {
+				case vs.Deleting:
+					st = styleDim.Render("deleting")
+				case vs.Error != "":
+					st = styleCrit.Render("ERROR")
+				case !vs.Ready:
+					st = styleWarn.Render("pending")
+				}
+				detail := ""
+				if vs.Error != "" {
+					detail = trunc(firstLine(vs.Error), 80)
+				} else if vs.Content != "" {
+					detail = vs.Content
+				}
+				rows = append(rows, []string{vs.Name, st, vs.Class, vs.RestoreSize, age(vs.Created), detail})
+			}
+			table([]column{{title: "SNAPSHOT", max: 36}, {title: "STATUS"}, {title: "CLASS"}, {title: "SIZE"}, {title: "AGE"}, {title: "CONTENT / ERROR"}}, rows)
+		}
+	}
+
 	// ---- events ----
 	var evRows [][]string
 	cutoff := time.Now().Add(-2 * time.Hour)

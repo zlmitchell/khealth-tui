@@ -1,0 +1,22 @@
+# Security tab: references, scores, running the scan
+
+This page is for the operator running the scan: which STIG / CIS releases apply, how the scores are computed, and how the OS STIG collection is started. Where the rules come from, how the OS tables are generated and how to add rules is in [STIG.md](STIG.md).
+
+The Security tab automates the checks that can be verified from configuration and API state. Rule IDs come from the XCCDF of these releases, downloaded from `https://dl.dod.cyber.mil/wp-content/uploads/stigs/zip/` (DISA) and the CIS benchmark numbering:
+
+| Reference | Release | IDs |
+|---|---|---|
+| DISA Kubernetes STIG | V2R6 (01 Apr 2026) | `V-2423xx`..`V-2424xx`, `V-2455xx`, `V-2548xx`, `V-2748xx` |
+| DISA Rancher Government RKE2 STIG | V2R7 (01 Jul 2026) | `V-2545xx`; `RKE2-*` for hardening-guide prerequisites the STIG does not number |
+| DISA Rancher Government MCM STIG | V2R2 (05 Jan 2026) | `V-2528xx`, `V-257292`; only on the cluster that runs Rancher (auth provider, `AUDIT_LEVEL`, new-user default role, single local admin, ingress 443 + NetworkPolicies to 444, `privateCA`/`ingress.tls.source=secret` from helm values) |
+| CIS Kubernetes Benchmark | v2.0.1 (Jun 2026) / rke2 self-assessment v1.12 | `CIS-x.y.z` |
+| DISA RHEL STIG | 8 V2R8, 9 V2R9, 10 V1R2 (01 Jul 2026) | per node, matched from `/etc/os-release` |
+| DISA Ubuntu LTS STIG | 22.04 V2R9, 24.04 V1R6 | per node, matched from `/etc/os-release` (20.04 is out of standard support and not covered) |
+
+**Scores.** Both Security sub-tabs show an SCC / OpenSCAP-style scorecard per benchmark (and per node on the OS STIG sub-tab): score = Not a Finding ÷ (Not a Finding + Open) - the XCCDF default scoring model DISA content uses, where every rule has equal weight and Not Applicable / Not Reviewed rules are excluded from the denominator - plus the Open / Not a Finding / N/A / Not Reviewed counts and open-per-CAT (I/II/III), so the numbers line up with what SCC prints for the same STIG. MANUAL results are Not Reviewed: they lower nothing, but the count is shown so nobody mistakes a partially reviewed 100% for a complete one.
+
+**Running the OS STIG.** The OS STIG collection is heavier than the normal probes (`sysctl -a`, package lists, `auditctl -l`, `sshd -T`, a `find` sweep over the local filesystems and ~60 config-file dumps - a few seconds of CPU per node), so it never runs on its own: not at launch, not on `r`/`R`, not when SSH is re-enabled. Go to the **Security** tab and press **`Shift+S`**; the tab shows a checklist with each node's progress through the four collection stages (system facts, file modes, accounts, filesystem sweep; a few seconds each) and the header the overall percent (`scan 58% 1/3 nodes`), the results appear when the last node answers, and the OS STIG header shows how old the facts are. Later refresh cycles carry the facts forward; press `Shift+S` again to re-collect (for example after remediation). Until the first scan the whole tab shows only the opt-in notice; without SSH the scan evaluates the API-side rules only and every sub-tab says so.
+
+The OS STIGs are evaluated in full: every rule of the matched release is listed on the `OS STIG` sub-tab. Checks come from [ComplianceAsCode](https://github.com/ComplianceAsCode/content) templates (sysctl, packages, services, mounts, `sshd -T`, file modes and owners, audit rules, kernel modules, grub arguments, pwquality/faillock, config-file values) joined to the DISA XCCDF by STIG ID and embedded as generated tables (`internal/stigdata/data`), plus native evaluators for the rules ComplianceAsCode checks with hand-written OVAL (account database, PAM/sudo/login.defs, audit and rsyslog configuration, crypto policy, boot loader, a filesystem sweep, ...). Every rule of RHEL 8/9/10 and Ubuntu 22.04/24.04 that ComplianceAsCode maps is evaluated (98-100%); results that need an organizational decision are MANUAL with the evidence and the STIG's own check text in the detail view. RHEL rebuilds (Rocky, Alma, CentOS Stream, Oracle) use the RHEL STIG of the same major; other distributions fall back to generic `OS-*` IDs. `Node hardening` keeps the per-node runtime/boot facts and a pass/fail summary column. See [STIG.md](STIG.md) for sources, generation and how to add rules.
+
+The mapping is best-effort: verify it against the release you are audited against and treat `MANUAL` results as items to review. Secrets, tokens and passwords are masked before any file content leaves the node.

@@ -123,6 +123,188 @@ func evalVolumeAttachments(in Input, add func(Severity, string, string, string, 
 	}
 }
 
+// evalSnapshots covers the CSI snapshot objects for every driver: a
+// snapshot that errored or never became ready, a class whose driver is not
+// installed, contents stuck deleting, and snapshots piling up with no
+// controller to serve them.
+func evalSnapshots(in Input, add func(Severity, string, string, string, string)) {
+	s := in.Snap
+	si := s.Snapshots
+	if si == nil {
+		return
+	}
+	now := in.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	drivers := map[string]bool{}
+	for i := range s.CSIDrivers {
+		drivers[s.CSIDrivers[i].Name] = true
+	}
+	// the external snapshot-controller (rke2: rke2-snapshot-controller) turns
+	// VolumeSnapshots into contents; without it every snapshot stays pending
+	controller := false
+	for i := range s.Deployments {
+		if strings.Contains(s.Deployments[i].Name, "snapshot-controller") {
+			controller = true
+		}
+	}
+	if !controller && len(si.Snapshots) > 0 {
+		add(SevCrit, "storage", "snapshot-controller", fmt.Sprintf("%d VolumeSnapshots exist but no snapshot-controller Deployment runs: none of them will ever be taken", len(si.Snapshots)), "install the CSI external snapshot-controller (rke2: the rke2-snapshot-controller chart; upstream: kubernetes-csi/external-snapshotter deploy/kubernetes/snapshot-controller)")
+	}
+	for _, c := range si.Classes {
+		if !drivers[c.Driver] {
+			add(SevWarn, "storage", "volumesnapshotclass/"+c.Name, "VolumeSnapshotClass "+c.Name+" names driver "+c.Driver+" which is not installed: snapshots with this class stay pending", "install the driver or delete the class")
+		}
+	}
+	for _, vs := range si.Snapshots {
+		obj := vs.Namespace + "/" + vs.Name
+		if vs.Ready || vs.Deleting {
+			continue
+		}
+		age := now.Sub(vs.Created)
+		switch {
+		case vs.Error != "":
+			if age < 2*time.Minute {
+				continue // the controller retries; give it a moment
+			}
+			hint := "kubectl -n " + vs.Namespace + " describe volumesnapshot " + vs.Name + "; the driver's csi-snapshotter sidecar logs"
+			switch {
+			case strings.Contains(vs.Error, "cannot get claim"):
+				hint = "the source PVC " + vs.SourcePVC + " does not exist in " + vs.Namespace + ": recreate the snapshot from an existing claim"
+			case strings.Contains(vs.Error, "default snapshot class"):
+				hint = "set volumeSnapshotClassName on the snapshot, or annotate one class for the claim's driver with snapshot.storage.kubernetes.io/is-default-class=true (the default is per driver)"
+			}
+			add(SevWarn, "storage", obj, fmt.Sprintf("VolumeSnapshot %s of claim %s failed (%s ago): %s", vs.Name, orDefault(vs.SourcePVC, vs.SourceContent), roundDur(age), truncStr(firstLine(vs.Error), 160)), hint)
+		case age > 10*time.Minute:
+			add(SevWarn, "storage", obj, fmt.Sprintf("VolumeSnapshot %s of claim %s is not ready after %s and reports no error", vs.Name, orDefault(vs.SourcePVC, vs.SourceContent), roundDur(age)), "kubectl -n "+vs.Namespace+" describe volumesnapshot "+vs.Name+"; is the snapshot-controller running and does the driver's csi-snapshotter sidecar log errors?")
+		}
+	}
+	for _, c := range si.Contents {
+		obj := "volumesnapshotcontent/" + c.Name
+		if c.Snapshot != "" {
+			obj = c.Snapshot
+		}
+		switch {
+		case c.Deleting && now.Sub(c.DeletedAt) > 10*time.Minute:
+			add(SevWarn, "storage", obj, fmt.Sprintf("VolumeSnapshotContent %s has been deleting for %s (driver %s): the driver did not delete the snapshot on the backend, so its finalizer stays", c.Name, roundDur(now.Sub(c.DeletedAt)), c.Driver), "csi-snapshotter sidecar logs of "+c.Driver+"; if the backend snapshot is gone: remove the finalizer (kubectl patch volumesnapshotcontent "+c.Name+" -p '{\"metadata\":{\"finalizers\":null}}' --type=merge)")
+		case c.Error != "" && !c.Ready && now.Sub(c.Created) > 2*time.Minute:
+			add(SevWarn, "storage", obj, fmt.Sprintf("VolumeSnapshotContent %s (driver %s) failed: %s", c.Name, c.Driver, truncStr(firstLine(c.Error), 160)), "csi-snapshotter sidecar logs of "+c.Driver)
+		}
+	}
+}
+
+// evalTridentProtect covers Trident Protect: vaults that are not
+// Available, applications whose protection is unhealthy, failed or stuck
+// runs (a run with reclaimPolicy Delete cannot finish deleting while its
+// vault is unreachable, and holds the application lock so every later run
+// stays Blocked), and schedules with nothing usable to write to.
+func evalTridentProtect(in Input, add func(Severity, string, string, string, string)) {
+	tp := in.Snap.Protect
+	if tp == nil {
+		return
+	}
+	now := in.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	vaultOK := map[string]bool{}
+	for _, v := range tp.Vaults {
+		obj := v.Namespace + "/" + v.Name
+		where := v.Provider
+		if v.Endpoint != "" || v.Bucket != "" {
+			where += " " + v.Endpoint + "/" + v.Bucket
+		}
+		switch {
+		case strings.EqualFold(v.State, "Available"):
+			vaultOK[v.Name] = true
+		case strings.EqualFold(v.State, "Terminating"):
+			add(SevWarn, "storage", obj, "Trident Protect AppVault "+v.Name+" ("+where+") is being deleted"+problemSuffix(v.Error), "runs still referencing it keep it; with the bucket gone remove the finalizer")
+		default:
+			add(SevCrit, "storage", obj, fmt.Sprintf("Trident Protect AppVault %s (%s) is %s: %s - every snapshot, backup and restore using it fails, and runs with reclaimPolicy Delete cannot even be deleted", v.Name, where, orDefault(v.State, "not ready"), orDefault(truncStr(firstLine(orDefault(v.Error, v.Message)), 160), "no detail")), "kubectl -n "+v.Namespace+" describe appvault "+v.Name+"; endpoint reachability from the trident-protect controller, bucket name and the credentials secret (Access Denied = wrong keys or bucket policy)")
+		}
+	}
+	for _, a := range tp.Applications {
+		if strings.EqualFold(a.ProtectionHealth, "Unhealthy") || (a.ProtectionState != "" && !strings.EqualFold(a.ProtectionState, "Full") && len(a.Details) > 0) {
+			sev := SevInfo
+			if strings.EqualFold(a.ProtectionHealth, "Unhealthy") {
+				sev = SevWarn
+			}
+			add(sev, "storage", a.Namespace+"/"+a.Name, fmt.Sprintf("Trident Protect application %s protection is %s (%s): %s", a.Name, orDefault(a.ProtectionState, "unknown"), orDefault(a.ProtectionHealth, "health unknown"), truncList(a.Details, 3)), "kubectl -n "+a.Namespace+" describe application.protect.trident.netapp.io "+a.Name+"; a Schedule with a usable AppVault gives Full protection")
+		}
+	}
+	// runs: the newest failure per app and kind, stuck deletions; the
+	// Blocked ones are grouped by the lock they wait for, with its holder
+	type key struct{ ns, app, kind string }
+	seenFail := map[key]bool{}
+	for _, list := range [][]k8s.ProtectRun{tp.Snapshots, tp.Backups} {
+		for _, r := range list {
+			obj := r.Namespace + "/" + r.Name
+			k := key{r.Namespace, r.App, r.Kind}
+			switch {
+			case r.Deleting && now.Sub(r.DeletedAt) > 5*time.Minute:
+				why := "the controller must delete its archive from the vault first"
+				if !vaultOK[r.Vault] {
+					why = "its vault " + r.Vault + " is not Available, so the archive cannot be removed"
+				}
+				add(SevWarn, "storage", obj, fmt.Sprintf("Trident Protect %s %s has been deleting for %s: %s; while it exists it holds the application lock and later runs stay Blocked", r.Kind, r.Name, roundDur(now.Sub(r.DeletedAt)), why), "fix the vault, or if its data is gone for good: kubectl -n "+r.Namespace+" patch "+strings.ToLower(r.Kind)+"s.protect.trident.netapp.io "+r.Name+" --type=merge -p '{\"metadata\":{\"finalizers\":null}}'")
+			case r.Failed():
+				if seenFail[k] {
+					continue
+				}
+				seenFail[k] = true
+				hint := "kubectl -n " + r.Namespace + " describe " + strings.ToLower(r.Kind) + "s.protect.trident.netapp.io " + r.Name + "; the vault state and the trident-protect controller log"
+				if strings.Contains(r.Error, "does not support VolumeSnapshots") {
+					hint = "the application includes a PVC on a driver without CSI snapshot support (nfs.csi.k8s.io, local-path, hostPath): narrow the Application with includedNamespaces[].labelSelector or resourceFilter so only snapshot-capable claims are in it, or move that claim to a snapshot-capable class - backups snapshot first, so they fail the same way"
+				}
+				add(SevWarn, "storage", obj, fmt.Sprintf("Trident Protect %s %s of application %s failed: %s", r.Kind, r.Name, r.App, truncStr(firstLine(r.Error), 160)), hint)
+			case strings.EqualFold(r.State, "Blocked"):
+			case strings.EqualFold(r.State, "Running") && now.Sub(r.Created) > 2*time.Hour:
+				add(SevInfo, "storage", obj, fmt.Sprintf("Trident Protect %s %s of application %s has been running for %s", r.Kind, r.Name, r.App, roundDur(now.Sub(r.Created))), "kopia/restic data movement of large volumes takes long; the kopiavolumebackups CRs show per-volume progress")
+			}
+		}
+	}
+	for _, b := range tp.BlockedLocks() {
+		if h := b.Holder; h != nil {
+			state := h.State
+			switch {
+			case h.Deleting:
+				state = fmt.Sprintf("%s, deleting for %s", h.State, roundDur(now.Sub(h.DeletedAt)))
+				if !vaultOK[h.Vault] {
+					state += " because vault " + h.Vault + " is not Available"
+				}
+			case strings.EqualFold(h.State, "Running"):
+				state = "Running for " + roundDur(now.Sub(h.Created))
+			}
+			hint := "wait for it to finish, or clear it"
+			if h.Deleting {
+				hint = "fix the vault so the archive can be deleted, or drop the finalizer: kubectl -n " + h.Namespace + " patch " + strings.ToLower(h.Kind) + "s.protect.trident.netapp.io " + h.Name + " --type=merge -p '{\"metadata\":{\"finalizers\":null}}'"
+			}
+			add(SevWarn, "storage", b.Namespace+"/"+b.App, fmt.Sprintf("%d Trident Protect runs of application %s are Blocked on lock %s, held by %s %s (%s): %s", len(b.Waiting), b.App, b.Lock, strings.ToLower(h.Kind), h.Name, state, truncList(b.Waiting, 3)), hint)
+		} else if b.Stale && b.Lease != nil {
+			l := b.Lease
+			until := "already expired"
+			if exp := l.Expires(); exp.After(now) {
+				until = "expires in " + roundDur(exp.Sub(now)) + " (leaseDurationSeconds " + fmt.Sprint(int(l.Duration.Seconds())) + ")"
+			}
+			add(SevWarn, "storage", b.Namespace+"/"+b.App, fmt.Sprintf("%d Trident Protect runs of application %s are Blocked on lock %s whose holder %s no longer exists (deleted while it held the lock): nothing releases the Lease, it %s; %s", len(b.Waiting), b.App, b.Lock, l.Holder, until, truncList(b.Waiting, 3)), "kubectl -n "+b.Namespace+" delete lease "+b.Lock+" unblocks them now (safe: the holder is gone)")
+		} else {
+			add(SevWarn, "storage", b.Namespace+"/"+b.App, fmt.Sprintf("%d Trident Protect runs of application %s are Blocked on lock %s and no run of that kind is in flight: the lock may be stale (controller restarted mid-run)", len(b.Waiting), b.App, b.Lock), "kubectl -n "+b.Namespace+" get lease "+b.Lock+" shows the holder; delete it when that run no longer exists")
+		}
+	}
+	for _, s := range tp.Schedules {
+		obj := s.Namespace + "/" + s.Name
+		switch {
+		case !s.Enabled:
+			add(SevInfo, "storage", obj, "Trident Protect schedule "+s.Name+" is disabled: application "+s.App+" gets no automatic snapshots or backups", "")
+		case s.Vault != "" && !vaultOK[s.Vault]:
+			add(SevWarn, "storage", obj, "Trident Protect schedule "+s.Name+" ("+s.Granularity+") writes to AppVault "+s.Vault+" which is not Available: every scheduled backup of "+s.App+" fails", "see the vault finding")
+		case s.Error != "":
+			add(SevWarn, "storage", obj, "Trident Protect schedule "+s.Name+": "+truncStr(firstLine(s.Error), 160), "")
+		}
+	}
+}
+
 // evalLonghorn raises the Longhorn findings for the driver.longhorn.io
 // CSIStatus. Attribution: volumes to their PVC, node facts to the node.
 func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, string, string)) {
@@ -537,8 +719,15 @@ func evalTridentExtra(in Input, d k8s.CSIStatus, add func(Severity, string, stri
 			if strings.EqualFold(bc.LastOperation, "failed") {
 				add(SevWarn, "storage", obj, "TridentBackendConfig last update failed: "+orDefault(firstLine(bc.Message), "see status")+" (the backend keeps its previous config)", "kubectl -n "+bc.Namespace+" describe tridentbackendconfig "+bc.Name)
 			}
-		case "unbound", "failed", "lost", "":
-			add(SevCrit, "storage", obj, fmt.Sprintf("TridentBackendConfig %s (%s) is %s: %s - no backend, so no volume can be provisioned from it", bc.Name, bc.Driver, orDefault(bc.Phase, "not processed"), orDefault(firstLine(bc.Message), "see status")), "check the credentials secret "+orDefault(bc.Credentials, "(inline)")+", the management LIF reachability from the trident-controller pod and the SVM permissions; kubectl -n "+bc.Namespace+" describe tridentbackendconfig "+bc.Name)
+		case "":
+			// no phase yet: creation is what failed (lastOperationStatus Failed with the driver's error)
+			what := "has not been processed"
+			if strings.EqualFold(bc.LastOperation, "failed") {
+				what = "creation failed"
+			}
+			add(SevCrit, "storage", obj, fmt.Sprintf("TridentBackendConfig %s (%s) %s: %s - no backend, so no volume can be provisioned from it", bc.Name, bc.Driver, what, orDefault(headTail(bc.Message, 90, 90), "see status")), "check the credentials secret "+orDefault(bc.Credentials, "(inline)")+", the management LIF reachability from the trident-controller pod and the SVM permissions; kubectl -n "+bc.Namespace+" describe tridentbackendconfig "+bc.Name)
+		case "unbound", "failed", "lost":
+			add(SevCrit, "storage", obj, fmt.Sprintf("TridentBackendConfig %s (%s) is %s: %s - no backend, so no volume can be provisioned from it", bc.Name, bc.Driver, bc.Phase, orDefault(headTail(bc.Message, 90, 90), "see status")), "check the credentials secret "+orDefault(bc.Credentials, "(inline)")+", the management LIF reachability from the trident-controller pod and the SVM permissions; kubectl -n "+bc.Namespace+" describe tridentbackendconfig "+bc.Name)
 		case "deleting":
 			add(SevWarn, "storage", obj, "TridentBackendConfig is deleting; the backend "+bc.BackendName+" is removed once no volume uses it", "")
 		}
@@ -564,6 +753,43 @@ func evalTridentExtra(in Input, d k8s.CSIStatus, add func(Severity, string, stri
 		}
 		if len(dirty) > 0 {
 			add(SevWarn, "storage", d.Driver, "TridentNode publication state is dirty on "+truncList(dirty, 4)+": volumes were force-detached from the node and Trident refuses new publications there until it is cleaned", "once the node is healthy: tridentctl node cleanup, or restart the trident node pod on it (Trident 23.10+ cleans automatically with enableForceDetach)")
+		}
+		// Trident's own host inventory against the backend protocols in use
+		san, nas, nvme := false, false, false
+		for _, b := range d.Trident {
+			dr := strings.ToLower(b.Driver)
+			switch {
+			case strings.Contains(dr, "nvme"):
+				nvme = true
+			case strings.Contains(dr, "san") || strings.Contains(dr, "solidfire"):
+				san = true
+			case strings.Contains(dr, "nas") || strings.Contains(dr, "nfs"):
+				nas = true
+			}
+		}
+		var noISCSI, noNFS, noNVMe []string
+		for _, tn := range ti.Nodes {
+			if len(tn.Services) == 0 || tn.Deleted {
+				continue
+			}
+			if san && !tn.HasService("iSCSI") {
+				noISCSI = append(noISCSI, tn.Name)
+			}
+			if nas && !tn.HasService("NFS") {
+				noNFS = append(noNFS, tn.Name)
+			}
+			if nvme && !tn.HasService("NVMe") {
+				noNVMe = append(noNVMe, tn.Name)
+			}
+		}
+		if len(noISCSI) > 0 {
+			add(SevWarn, "storage", d.Driver, "Trident found no usable iSCSI on "+truncList(noISCSI, 4)+" (TridentNode hostInfo.services) while a SAN backend is configured: SAN volumes cannot attach there", "iscsi-initiator-utils / open-iscsi installed and iscsid running on those nodes, then restart the trident node pod")
+		}
+		if len(noNFS) > 0 {
+			add(SevWarn, "storage", d.Driver, "Trident found no NFS client on "+truncList(noNFS, 4)+" (TridentNode hostInfo.services) while a NAS backend is configured: NFS volumes cannot mount there", "nfs-utils / nfs-common on those nodes, then restart the trident node pod")
+		}
+		if len(noNVMe) > 0 {
+			add(SevWarn, "storage", d.Driver, "Trident found no NVMe on "+truncList(noNVMe, 4)+" (TridentNode hostInfo.services) while an NVMe backend is configured", "nvme-cli and the nvme-tcp module on those nodes")
 		}
 	}
 	// StorageClasses: what each one can provision on
@@ -759,4 +985,15 @@ func tridentMatchNames(r k8s.TridentSCResolution) string {
 		parts = append(parts, m.Backend.BackendName+" "+st)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// headTail keeps the start and the end of a long message ("... "
+// between): Trident's errors put the driver context first and the cause
+// (dial tcp ...: no route to host) last.
+func headTail(msg string, head, tail int) string {
+	msg = strings.TrimSpace(msg)
+	if len(msg) <= head+tail+5 {
+		return msg
+	}
+	return msg[:head] + " ... " + msg[len(msg)-tail:]
 }

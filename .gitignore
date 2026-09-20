@@ -9,3 +9,4 @@ vagrant/
 autoinstall/
 hardening/
 .env
+/DEDUP-CHECKLIST.md

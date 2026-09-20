@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"k8s-health-tui/internal/k8s"
 )
@@ -188,9 +189,12 @@ func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo, backends []k8s.
 	}
 	for _, bc := range ti.BackendConfigs {
 		st := bc.Phase
-		if strings.EqualFold(bc.Phase, "bound") {
+		switch {
+		case strings.EqualFold(bc.Phase, "bound"):
 			st = styleOK.Render(st)
-		} else {
+		case bc.Phase == "" && strings.EqualFold(bc.LastOperation, "failed"):
+			st = styleCrit.Render("CREATION FAILED")
+		default:
 			st = styleCrit.Render(strings.ToUpper(orStr(st, "unprocessed")))
 		}
 		line := fmt.Sprintf("      backendconfig %s  %s  %s", styleBold.Render(bc.Namespace+"/"+bc.Name), bc.Driver, st)
@@ -260,6 +264,19 @@ func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo, backends []k8s.
 			nodes = styleOK.Render(nodes)
 		}
 		line := "      " + kv("nodes registered", nodes) + "  " + kv("publications", fmt.Sprint(len(ti.Publications)))
+		svc := map[string]int{}
+		for _, n := range ti.Nodes {
+			for _, sv := range n.Services {
+				svc[sv]++
+			}
+		}
+		if len(svc) > 0 {
+			var parts []string
+			for _, k := range sortedKeys(svc) {
+				parts = append(parts, fmt.Sprintf("%s %d/%d", k, svc[k], len(ti.Nodes)))
+			}
+			line += "  " + kv("host services", strings.Join(parts, ", "))
+		}
 		if dirty > 0 {
 			line += "  " + styleWarn.Render(fmt.Sprintf("%d nodes dirty", dirty))
 		}
@@ -267,6 +284,68 @@ func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo, backends []k8s.
 			line += "  " + styleCrit.Render(vol+" published to "+strings.Join(nodes, "+"))
 		}
 		out = append(out, line)
+	}
+	return out
+}
+
+// protectLines renders Trident Protect: vaults, applications, the latest
+// runs and the schedules.
+func protectLines(tp *k8s.TridentProtect) []string {
+	if tp == nil {
+		return nil
+	}
+	var out []string
+	out = append(out, "      "+styleBold.Render("trident protect")+"  "+kv("vaults", fmt.Sprint(len(tp.Vaults)))+"  "+kv("applications", fmt.Sprint(len(tp.Applications)))+"  "+kv("snapshots", fmt.Sprint(len(tp.Snapshots)))+"  "+kv("backups", fmt.Sprint(len(tp.Backups)))+"  "+kv("schedules", fmt.Sprint(len(tp.Schedules))))
+	for _, v := range tp.Vaults {
+		st := okText(strings.EqualFold(v.State, "Available"), v.State, strings.ToUpper(orStr(v.State, "not ready")))
+		line := fmt.Sprintf("        vault %s  %s %s/%s  %s", styleBold.Render(v.Name), v.Provider, v.Endpoint, v.Bucket, st)
+		if v.Error != "" && !strings.EqualFold(v.State, "Available") {
+			line += "  " + styleDim.Render(trunc(firstLine(v.Error), 70))
+		}
+		out = append(out, line)
+	}
+	for _, a := range tp.Applications {
+		st := okText(strings.EqualFold(a.ProtectionHealth, "Healthy") || strings.EqualFold(a.ProtectionState, "Full"), a.ProtectionState, orStr(a.ProtectionState, "unknown")+" / "+orStr(a.ProtectionHealth, "?"))
+		line := fmt.Sprintf("        app %s  %s  %s", styleBold.Render(a.Namespace+"/"+a.Name), kv("namespaces", strings.Join(a.Namespaces, ",")), st)
+		if len(a.Details) > 0 {
+			line += "  " + styleDim.Render(strings.Join(a.Details, "; "))
+		}
+		for _, kind := range []string{"Snapshot", "Backup"} {
+			if r := tp.LatestRun(kind, a.Namespace, a.Name); r != nil {
+				t := strings.ToLower(kind) + " " + r.State + " " + age(r.Created) + " ago"
+				if r.Failed() {
+					t = styleCrit.Render(strings.ToLower(kind) + " " + strings.ToUpper(r.State) + " " + age(r.Created) + " ago")
+				} else if r.Deleting {
+					t = styleWarn.Render(t + " (deleting)")
+				}
+				line += "  " + t
+			}
+		}
+		out = append(out, line)
+	}
+	for _, b := range tp.BlockedLocks() {
+		line := "        " + styleWarn.Render(fmt.Sprintf("%d runs blocked on %s", len(b.Waiting), b.Lock))
+		switch {
+		case b.Holder != nil:
+			what := b.Holder.State
+			if b.Holder.Deleting {
+				what += ", deleting"
+			}
+			line += "  " + kv("held by", strings.ToLower(b.Holder.Kind)+" "+styleBold.Render(b.Holder.Name)+" ("+what+")")
+		case b.Stale && b.Lease != nil:
+			exp := "expired"
+			if t := b.Lease.Expires(); t.After(time.Now()) {
+				exp = "expires in " + humanDur(time.Until(t))
+			}
+			line += "  " + styleCrit.Render("STALE lease: holder "+b.Lease.Holder+" is gone, "+exp) + styleDim.Render("  kubectl -n "+b.Namespace+" delete lease "+b.Lock)
+		default:
+			line += "  " + styleDim.Render("holder not found")
+		}
+		out = append(out, line)
+	}
+	for _, s := range tp.Schedules {
+		st := okText(s.Enabled, s.Granularity, "disabled")
+		out = append(out, fmt.Sprintf("        schedule %s  %s  %s -> %s", styleBold.Render(s.Namespace+"/"+s.Name), st, s.App, s.Vault))
 	}
 	return out
 }
