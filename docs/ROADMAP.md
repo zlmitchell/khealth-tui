@@ -9,7 +9,7 @@ Done (2026-09):
 
 Partly done:
 
-* CSI backend health - Trident and Rook-Ceph are built from the CRD schemas and unit-tested only (no ONTAP or spare disks in the lab); Portworx and vSphere CNS still only get the generic controller/node-plugin/attachment checks; Longhorn v2 data engine, backing images and system backups are not read
+* CSI backend health - Trident is live-tested up to the backend (no ONTAP for provisioning); Trident Protect, CSI VolumeSnapshots and the NFS CSI driver are live-tested; Rook-Ceph is built from the CRD schemas and unit-tested only; Portworx and vSphere CNS still only get the generic controller/node-plugin/attachment checks; Longhorn v2 data engine, backing images and system backups are not read
 * tab-driven collection - `checks.Evaluate` still reruns for every message burst (only the STIG evaluation has a dirty flag); needs are per tab, not per sub-tab; `tools/perfbench` drives its own probe options rather than the app's tab logic, so the tab-driven savings are measured with `scandrive --perf-log`, not with the bench
 
 Open:

@@ -38,8 +38,10 @@ The lab: rke2 v1.34 single node (Rocky Linux 9.7, Rancher v2.13 management clust
 |---|---|---|
 | Longhorn | tested | volumes, replicas, engines, nodes/disks, instance managers, backups, orphans, settings, node-side devices; chaos-tested (node partitions, replica and instance-manager loss, hung RWX exports, backup failures) |
 | local-path-provisioner / hostPath | tested | PV `du` on the nodes, hung mounts |
-| csi-driver-nfs / SMB | tested (nfs) | the generic controller / node-plugin / attachment checks; hung-mount detection was exercised with Longhorn RWX exports |
-| NetApp Trident | supported | backends, pools, policies, TridentNode registrations from the CRDs; node prerequisites (iscsid, multipath, mount.nfs); unit-tested from the CRD schemas, no ONTAP in the lab |
+| csi-driver-nfs / SMB | tested (nfs) | csi-driver-nfs 4.13.0 against an Unraid export: the generic controller / node-plugin / attachment checks, a claim without snapshot support inside a Trident Protect application; hung-mount detection was exercised with Longhorn RWX exports |
+| NetApp Trident | tested (no provisioning) | Trident 26.06.1 in the lab: operator state, TridentNode registrations and host inventories, a backend config failing against an unreachable LIF, class registration and resolution; provisioning, publications and the backend pools need an ONTAP that the lab lacks (unit-tested from the CRD schemas) |
+| NetApp Trident Protect | tested | 26.06.0 in the lab: vaults (MinIO and an unreachable S3), applications, snapshots/backups (completed and failed), schedules, runs stuck deleting, the application-lock Lease and its stale-holder case |
+| CSI VolumeSnapshots | tested | snapshot.storage.k8s.io classes/snapshots/contents with Longhorn: ready, missing source, no default class for the driver, class for an absent driver |
 | Rook-Ceph | supported | cluster/OSD health from the CRDs; unit-tested only |
 | vSphere CNS, AWS EBS/EFS, Azure Disk/File, OpenStack Cinder, Harvester, Portworx | supported | generic controller / node-plugin / CSINode / VolumeAttachment checks and the cloud-provider checks; not run in the lab (KVM) |
 
