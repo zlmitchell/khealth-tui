@@ -1153,7 +1153,7 @@ func (a *App) helmContent() content {
 			hsegs[3].n++
 		}
 	}
-	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope; enter = values, ", len(rows))) + styleKey.Render("u") + styleDim.Render(" upgrade to latest, ") + styleKey.Render("b") + styleDim.Render(" rollback. Update check: ")}
+	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope; enter = values, ", len(rows))) + styleKey.Render("u") + styleDim.Render(" upgrade to latest, ") + styleKey.Render("b") + styleDim.Render(" rollback, ") + styleKey.Render("B") + styleDim.Render(" roll a failed release back to the last good revision. Update check: ")}
 	if a.helm != nil {
 		hdr[0] += styleOK.Render("on")
 		status := map[string]helmcheck.RepoStatus{}
@@ -1230,7 +1230,7 @@ func (a *App) helmDetail(id string) (string, []string) {
 			}
 		}
 		if len(r.History) > 0 {
-			out = append(out, "", styleTitle.Render("History")+styleDim.Render("  (b on the Helm tab rolls back)"))
+			out = append(out, "", styleTitle.Render("History")+styleDim.Render("  (on the Helm tab: b picks a revision to roll back to, B goes straight to the last one that deployed)"))
 			var rows [][]string
 			for _, h := range r.History {
 				rows = append(rows, []string{fmt.Sprint(h.Revision), h.Status, h.Chart + " " + h.Version, h.AppVersion, age(h.Updated) + " ago", firstLine(h.Description)})

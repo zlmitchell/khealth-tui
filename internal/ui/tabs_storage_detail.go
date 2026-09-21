@@ -310,7 +310,7 @@ func (a *App) volumeDetail(pvc *corev1.PersistentVolumeClaim, pv *corev1.Persist
 		out = append(out, a.longhornVolumeDetail(pvName, ready)...)
 	case driver == "csi.trident.netapp.io":
 		out = append(out, a.tridentVolumeDetail(pv, pvc)...)
-	case (driver == "rbd.csi.ceph.com" || driver == "cephfs.csi.ceph.com") && s.Ceph != nil:
+	case (strings.HasSuffix(driver, "rbd.csi.ceph.com") || strings.HasSuffix(driver, "cephfs.csi.ceph.com")) && s.Ceph != nil:
 		out = append(out, cephVolumeDetail(pv, s.Ceph)...)
 	}
 

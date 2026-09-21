@@ -299,6 +299,17 @@ func TestEvaluateRichCluster(t *testing.T) {
 	}
 }
 
+func TestHelmReleaseFix(t *testing.T) {
+	failed := k8s.HelmRelease{Namespace: "default", Name: "web", Revision: 3, Status: "failed", History: []k8s.HelmRevision{{Revision: 3, Status: "failed"}, {Revision: 2, Status: "deployed"}}}
+	if fix := helmReleaseFix(failed); !strings.Contains(fix, "helm rollback web 2 -n default") || !strings.Contains(fix, "B on the Helm tab") {
+		t.Errorf("failed upgrade fix = %q", fix)
+	}
+	first := k8s.HelmRelease{Namespace: "default", Name: "web", Revision: 1, Status: "failed", History: []k8s.HelmRevision{{Revision: 1, Status: "failed"}}}
+	if fix := helmReleaseFix(first); !strings.Contains(fix, "no revision ever deployed") || !strings.Contains(fix, "helm history web -n default") {
+		t.Errorf("failed install fix = %q", fix)
+	}
+}
+
 func TestEvaluateEmptyAndQuiet(t *testing.T) {
 	if f := Evaluate(Input{}); f != nil {
 		t.Errorf("no snapshot -> nil findings, got %v", f)

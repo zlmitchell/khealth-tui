@@ -45,9 +45,10 @@ type Server struct {
 
 	handler Handler
 	ln      net.Listener
-	config  *ssh.ServerConfig
+	config  *ssh.ServerConfig // callbacks only; host keys live in signers
 
 	mu       sync.Mutex
+	signers  []ssh.Signer // host keys, copied into a fresh config per connection (AddRSAHostKey may run after accept started)
 	conns    map[*ssh.ServerConn]struct{}
 	accepted [][]byte // marshalled public keys that may log in
 	execs    int
@@ -107,7 +108,7 @@ func New(t testing.TB, h Handler) *Server {
 			return nil, nil
 		},
 	}
-	s.config.AddHostKey(hostSigner)
+	s.signers = []ssh.Signer{hostSigner}
 	s.ln, err = net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -159,8 +160,27 @@ func (s *Server) AddRSAHostKey(t testing.TB) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.mu.Lock()
 	s.RSAKey = signer.PublicKey()
-	s.config.AddHostKey(signer)
+	s.signers = append(s.signers, signer)
+	s.mu.Unlock()
+}
+
+// connConfig is the server config for one connection: the shared callbacks
+// plus the host keys registered so far. ssh.ServerConfig is not safe to
+// mutate once NewServerConn reads it, so every connection gets its own copy.
+func (s *Server) connConfig() *ssh.ServerConfig {
+	cfg := &ssh.ServerConfig{
+		PublicKeyCallback:           s.config.PublicKeyCallback,
+		PasswordCallback:            s.config.PasswordCallback,
+		KeyboardInteractiveCallback: s.config.KeyboardInteractiveCallback,
+	}
+	s.mu.Lock()
+	for _, k := range s.signers {
+		cfg.AddHostKey(k)
+	}
+	s.mu.Unlock()
+	return cfg
 }
 
 // KnownHostsLine is the known_hosts entry that accepts this server.
@@ -209,7 +229,7 @@ func (s *Server) accept() {
 }
 
 func (s *Server) handle(nc net.Conn) {
-	sconn, chans, reqs, err := ssh.NewServerConn(nc, s.config)
+	sconn, chans, reqs, err := ssh.NewServerConn(nc, s.connConfig())
 	if err != nil {
 		nc.Close()
 		return

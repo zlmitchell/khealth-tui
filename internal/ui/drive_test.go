@@ -275,6 +275,10 @@ func TestDriveWorkloadsAndHelm(t *testing.T) {
 	} else if a.overlay == ovConfirm {
 		key(t, a, "esc")
 	}
+	keys(t, a, "B")
+	if a.overlay == ovConfirm {
+		key(t, a, "esc")
+	}
 	if a.overlay != ovNone {
 		t.Fatalf("helm: overlay %v left open", a.overlay)
 	}

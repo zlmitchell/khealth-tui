@@ -42,7 +42,7 @@ The lab: rke2 v1.34 single node (Rocky Linux 9.7, Rancher v2.13 management clust
 | NetApp Trident | tested (no provisioning) | Trident 26.06.1 in the lab: operator state, TridentNode registrations and host inventories, a backend config failing against an unreachable LIF, class registration and resolution; provisioning, publications and the backend pools need an ONTAP that the lab lacks (unit-tested from the CRD schemas) |
 | NetApp Trident Protect | tested | 26.06.0 in the lab: vaults (MinIO and an unreachable S3), applications, snapshots/backups (completed and failed), schedules, runs stuck deleting, the application-lock Lease and its stale-holder case |
 | CSI VolumeSnapshots | tested | snapshot.storage.k8s.io classes/snapshots/contents with Longhorn: ready, missing source, no default class for the driver, class for an absent driver |
-| Rook-Ceph | supported | cluster/OSD health from the CRDs; unit-tested only |
+| Rook-Ceph | tested | Rook v1.20.7 / Ceph 20.2 in the lab on loop devices (3 OSDs, ceph-csi-operator drivers `rook-ceph.rbd.csi.ceph.com`): cluster health with the check details ranked by what they mean for the data, pools, capacity, an OSD taken down (OSD_DOWN / PG_DEGRADED), an RBD claim end to end; CephFS and object stores from the schema only |
 | vSphere CNS, AWS EBS/EFS, Azure Disk/File, OpenStack Cinder, Harvester, Portworx | supported | generic controller / node-plugin / CSINode / VolumeAttachment checks and the cloud-provider checks; not run in the lab (KVM) |
 
 ## Cloud providers
@@ -70,6 +70,6 @@ The lab: rke2 v1.34 single node (Rocky Linux 9.7, Rancher v2.13 management clust
 | Registry probes (`registries.yaml` curl + `crictl pull` dry run) | tested | Harbor (token auth, `insecure_skip_verify`), hand-rendered `hosts.toml` failure paths on containerd 2.x |
 | Upgrade readiness: system-upgrade-controller plans | tested | SUC v0.20 on rke2: unpullable image, missing version, skipped minor, unresolvable channel, completed plan |
 | Upgrade readiness: Rancher provisioned-cluster machine plans | supported | unit-tested against the planner's secret layout |
-| Helm actions (`u` upgrade, `b` rollback) | supported | run the `helm` CLI after a confirmation; the overlays and command lines are unit-tested, a live upgrade/rollback has not been run from khealth in the lab |
+| Helm actions (`u` upgrade, `b` rollback, `B` rollback to the last deployed revision) | supported | run the `helm` CLI after a confirmation; the overlays, the last-good revision choice and the command lines are unit-tested, a live upgrade/rollback has not been run from khealth in the lab |
 | Export (`e`, `--export`, JSON + XLSX) | tested | the RHEL 9 cluster with the full STIG scan (five benchmarks, 445 OS rules with per-node columns), the Rancher cluster with `--no-ssh` |
 | Footprint measurement (`P`, `--perf-log`, `tools/perfbench`) | tested | baseline in [PERFORMANCE.md](PERFORMANCE.md) |

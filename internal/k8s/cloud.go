@@ -214,8 +214,9 @@ var (
 		{regexp.MustCompile(`^csi-smb-node`), "SMB CSI node", "smb", "csi-node"},
 		{regexp.MustCompile(`^harvester-csi-driver-controllers`), "Harvester CSI controller", "harvester", "csi-controller"},
 		{regexp.MustCompile(`^harvester-csi-driver$`), "Harvester CSI node", "harvester", "csi-node"},
-		{regexp.MustCompile(`^csi-rbdplugin-provisioner|^csi-cephfsplugin-provisioner`), "Ceph CSI provisioner", "ceph", "csi-controller"},
-		{regexp.MustCompile(`^csi-rbdplugin$|^csi-cephfsplugin$`), "Ceph CSI plugin", "ceph", "csi-node"},
+		{regexp.MustCompile(`^csi-rbdplugin-provisioner|^csi-cephfsplugin-provisioner|\.(rbd|cephfs|nfs)\.csi\.ceph\.com-ctrlplugin$`), "Ceph CSI provisioner", "ceph", "csi-controller"},
+		{regexp.MustCompile(`^csi-rbdplugin$|^csi-cephfsplugin$|\.(rbd|cephfs|nfs)\.csi\.ceph\.com-nodeplugin$`), "Ceph CSI plugin", "ceph", "csi-node"},
+		{regexp.MustCompile(`^rook-ceph-operator$`), "Rook operator", "ceph", "operator"},
 	}
 
 	// csiDriverProvider maps CSIDriver names to the provider keys above.
@@ -224,6 +225,10 @@ var (
 		"disk.csi.azure.com": "azure-disk", "file.csi.azure.com": "azure-file", "cinder.csi.openstack.org": "cinder", "driver.longhorn.io": "longhorn",
 		"nfs.csi.k8s.io": "nfs", "smb.csi.k8s.io": "smb", "driver.harvesterhci.io": "harvester", "rbd.csi.ceph.com": "ceph", "cephfs.csi.ceph.com": "ceph",
 	}
+
+	// csiDriverSuffix catches drivers installed under a prefix (Rook's
+	// <namespace>.rbd.csi.ceph.com).
+	csiDriverSuffix = map[string]string{".rbd.csi.ceph.com": "ceph", ".cephfs.csi.ceph.com": "ceph", ".nfs.csi.ceph.com": "ceph"}
 
 	// providerIDPrefix maps node providerID schemes to providers.
 	providerIDPrefix = map[string]string{"vsphere": "vsphere", "aws": "aws", "azure": "azure", "openstack": "openstack", "harvester": "harvester", "hcloud": "hetzner", "digitalocean": "digitalocean", "gce": "gce", "rke2": "rke2", "k3s": "k3s"}
@@ -473,6 +478,14 @@ func (s *Snapshot) Cloud() CloudInfo {
 	for i := range s.CSIDrivers {
 		name := s.CSIDrivers[i].Name
 		st := CSIStatus{Driver: name, Provider: csiDriverProvider[name], Registered: len(perNode[name]), PVs: pvsPer[name], Failures: failures[name]}
+		if st.Provider == "" {
+			// Rook prefixes the Ceph drivers with its cluster namespace (rook-ceph.rbd.csi.ceph.com)
+			for suffix, prov := range csiDriverSuffix {
+				if strings.HasSuffix(name, suffix) {
+					st.Provider = prov
+				}
+			}
+		}
 		if st.Provider == "" {
 			st.Provider = name
 		}

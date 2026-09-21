@@ -10,3 +10,5 @@ autoinstall/
 hardening/
 .env
 /DEDUP-CHECKLIST.md
+*.test
+node_modules/

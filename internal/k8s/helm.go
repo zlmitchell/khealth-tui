@@ -53,6 +53,33 @@ type HelmRevision struct {
 	Description string
 }
 
+// Healthy reports whether the release's latest revision went through
+// (deployed). failed and the pending-* states a killed helm leaves behind are
+// what a rollback fixes.
+func (r HelmRelease) Healthy() bool {
+	return strings.ToLower(r.Status) == "deployed"
+}
+
+// LastGood returns the newest revision before the current one that was
+// actually deployed: a revision still marked deployed (helm leaves the
+// previous one so after a failed upgrade) or, failing that, one superseded
+// by a later successful upgrade. Failed and pending revisions never
+// qualify, so after several failed attempts this still lands on the release
+// that ran. ok is false when nothing ever deployed (a failed first install).
+func (r HelmRelease) LastGood() (rev HelmRevision, ok bool) {
+	for _, h := range r.History {
+		if h.Revision != r.Revision && strings.ToLower(h.Status) == "deployed" {
+			return h, true
+		}
+	}
+	for _, h := range r.History {
+		if h.Revision != r.Revision && strings.ToLower(h.Status) == "superseded" {
+			return h, true
+		}
+	}
+	return HelmRevision{}, false
+}
+
 type helmReleaseJSON struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`

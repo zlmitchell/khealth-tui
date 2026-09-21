@@ -38,6 +38,35 @@ func TestDecodeHelmRelease(t *testing.T) {
 	}
 }
 
+func TestHelmLastGood(t *testing.T) {
+	rev := func(n int, st string) HelmRevision { return HelmRevision{Revision: n, Status: st} }
+	cases := []struct {
+		name string
+		rel  HelmRelease
+		want int // 0 = none
+	}{
+		// helm leaves the previous revision deployed when an upgrade fails
+		{"failed upgrade", HelmRelease{Revision: 3, Status: "failed", History: []HelmRevision{rev(3, "failed"), rev(2, "deployed"), rev(1, "superseded")}}, 2},
+		// two failed attempts in a row still land on the one that ran
+		{"two failures", HelmRelease{Revision: 4, Status: "failed", History: []HelmRevision{rev(4, "failed"), rev(3, "failed"), rev(2, "deployed"), rev(1, "superseded")}}, 2},
+		{"stuck pending-upgrade", HelmRelease{Revision: 3, Status: "pending-upgrade", History: []HelmRevision{rev(3, "pending-upgrade"), rev(2, "deployed")}}, 2},
+		// a healthy release: the previous (superseded) one is the undo target
+		{"deployed", HelmRelease{Revision: 2, Status: "deployed", History: []HelmRevision{rev(2, "deployed"), rev(1, "superseded")}}, 1},
+		{"failed first install", HelmRelease{Revision: 1, Status: "failed", History: []HelmRevision{rev(1, "failed")}}, 0},
+		{"only failures", HelmRelease{Revision: 2, Status: "failed", History: []HelmRevision{rev(2, "failed"), rev(1, "failed")}}, 0},
+		{"no history", HelmRelease{Revision: 1, Status: "deployed"}, 0},
+	}
+	for _, c := range cases {
+		g, ok := c.rel.LastGood()
+		if ok != (c.want != 0) || g.Revision != c.want {
+			t.Errorf("%s: LastGood = %d,%v want %d", c.name, g.Revision, ok, c.want)
+		}
+	}
+	if !(HelmRelease{Status: "Deployed"}).Healthy() || (HelmRelease{Status: "pending-install"}).Healthy() {
+		t.Errorf("Healthy: deployed only")
+	}
+}
+
 func TestPodStatus(t *testing.T) {
 	p := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: "a", Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}, {Name: "b", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}}}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "a"}, {Name: "b"}}}}
 	if got := PodStatus(p); got != "CrashLoopBackOff" {

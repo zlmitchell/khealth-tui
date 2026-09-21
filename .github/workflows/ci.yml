@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: fmt, vet, tidy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go mod tidy is clean
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: go test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: go.mod
+          go-package: ./...
+
+  build:
+    name: build all targets
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # git describe needs the tags
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build.sh all
+        run: BUILD_LOCAL=1 ./build.sh all
+
+      - name: smoke test
+        run: dist/khealth-linux-amd64 --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: khealth-${{ github.sha }}
+          path: |
+            dist/khealth-*
+            dist/checksums.txt
+          retention-days: 14
+
+  release:
+    name: semantic-release
+    runs-on: ubuntu-latest
+    needs: [test, vulncheck, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write # tag, release, CHANGELOG commit
+      issues: write # comment on issues closed by the release
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # semantic-release computes the next version, calls build.sh with it
+      # (see .releaserc.json), commits CHANGELOG.md, tags vX.Y.Z and uploads
+      # dist/khealth-* + checksums.txt to the GitHub release.
+      - uses: cycjimmy/semantic-release-action@v4
+        with:
+          extra_plugins: |
+            @semantic-release/changelog@6
+            @semantic-release/exec@7
+            @semantic-release/git@10
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

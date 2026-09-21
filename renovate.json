@@ -1,0 +1,59 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "labels": ["dependencies"],
+  "schedule": ["before 6am on monday"],
+  "timezone": "America/New_York",
+  "enabledManagers": ["gomod", "github-actions", "custom.regex"],
+  "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
+  "packageRules": [
+    {
+      "description": "Go minor/patch bumps in one weekly PR",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "go modules"
+    },
+    {
+      "description": "Kubernetes libraries move together (client-go, api, apimachinery share a release)",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["k8s.io/**", "sigs.k8s.io/**"],
+      "groupName": "kubernetes libraries"
+    },
+    {
+      "description": "GitHub Actions in one PR",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    },
+    {
+      "description": "Go toolchain: the go directive, the golang image in build.sh and setup-go all follow the same version",
+      "matchPackageNames": ["go", "golang", "actions/setup-go"],
+      "groupName": "go toolchain"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "golang container image in build.sh",
+      "managerFilePatterns": ["/^build\\.sh$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s*\\n\\s*GO_IMAGE=\\$\\{GO_IMAGE:-[^:]+:(?<currentValue>[^}]+)\\}"
+      ],
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "semantic-release plugins pinned in the release workflow",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": [
+        "\\s+(?<depName>@semantic-release/[a-z-]+)@(?<currentValue>\\d+)"
+      ],
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "npm"
+    }
+  ]
+}

@@ -535,7 +535,7 @@ func Evaluate(in Input) []Finding {
 	for _, rel := range s.HelmReleases {
 		st := strings.ToLower(rel.Status)
 		if st != "deployed" && st != "superseded" {
-			add(SevWarn, "helm", rel.Namespace+"/"+rel.Name, "release status "+rel.Status, "helm history / rollback")
+			add(SevWarn, "helm", rel.Namespace+"/"+rel.Name, "release status "+rel.Status, helmReleaseFix(rel))
 		}
 		if l, ok := in.HelmLatest[rel.Namespace+"/"+rel.Name]; ok && l.Version != "" && helmcheck.CompareVersions(l.Version, rel.Version) > 0 {
 			add(SevInfo, "helm", rel.Namespace+"/"+rel.Name, fmt.Sprintf("chart %s %s -> %s available (%s)", rel.Chart, rel.Version, l.Version, l.Source), "")
@@ -862,6 +862,16 @@ func MergePVCUsage(s *k8s.Snapshot, nodes map[string]*nodeinfo.Info) map[string]
 		}
 	}
 	return out
+}
+
+// helmReleaseFix is the remediation for a release whose latest revision is
+// not deployed: back to the last revision that was, or a reinstall when
+// nothing ever deployed.
+func helmReleaseFix(rel k8s.HelmRelease) string {
+	if g, ok := rel.LastGood(); ok {
+		return fmt.Sprintf("B on the Helm tab rolls back to revision %d (last deployed); helm rollback %s %d -n %s", g.Revision, rel.Name, g.Revision, rel.Namespace)
+	}
+	return fmt.Sprintf("no revision ever deployed: helm history %s -n %s for the error, then helm uninstall and reinstall", rel.Name, rel.Namespace)
 }
 
 func truncList(l []string, n int) string {

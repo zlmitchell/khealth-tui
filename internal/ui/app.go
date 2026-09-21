@@ -1451,6 +1451,13 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			a.startHelmRollback()
 			return a, nil
+		case "B":
+			if a.actionRunning {
+				a.setStatus("an action is still running")
+				return a, nil
+			}
+			a.startHelmRollbackLastGood()
+			return a, nil
 		}
 	}
 	switch key {
@@ -2072,6 +2079,16 @@ func (a *App) layoutDetail() {
 }
 
 func (a *App) openDetail() {
+	if a.selectedID() == "" {
+		// the cursor sits on a heading or blank line (a fresh tab): use the
+		// nearest row that has something to open, and move there
+		c := a.currentContent()
+		rows := a.filteredRows(c)
+		if i := nearestRow(rows, a.cursor[a.tab]); i < len(rows) && rows[i].id != "" {
+			a.cursor[a.tab] = i
+			a.clamp(c)
+		}
+	}
 	title, lines := a.detailFor(a.tab, a.selectedID())
 	if len(lines) == 0 {
 		return
@@ -2585,7 +2602,8 @@ func helpLines(width int) []string {
 		{"", key("t"), "rollout restart (Deployment/DaemonSet/StatefulSet, confirmed)"},
 		{"Helm", key("enter"), "values + history"},
 		{"", key("u"), "upgrade to the newest known version (confirmed)"},
-		{"", key("b"), "rollback (pick revision, confirmed)"},
+		{"", key("b"), "rollback (pick revision; the last one that deployed is preselected, confirmed)"},
+		{"", key("B"), "rollback a failed / pending-* release straight to the last revision that deployed (confirmed)"},
 		{"Nodes", key("enter"), "node dashboard: gauges, security runtime-vs-boot, services, filesystems, certs"},
 		{"etcd", key("enter"), "raw probe output and config dumps"},
 		{"", key("X"), "rescue: rejoin one broken server (quorum fine) or restore a snapshot onto the whole control plane (SSH + actions enabled; preflight, warnings and a typed confirmation first)"},
@@ -2621,7 +2639,7 @@ func helpLines(width int) []string {
 		{"Storage", "StorageClasses, CSI drivers, PVs/PVCs and node filesystems"},
 		{"Events", "warning events"},
 		{"Addons", "CNI, CSI, DNS/ingress/metrics, registry mirrors (registries.yaml on rke2/k3s, containerd certs.d elsewhere), Rancher management + join topology (rke2/k3s, or a cluster registered in Rancher), rke2 HelmCharts"},
-		{"Helm", "releases (enter = values applied), optional update check; u = helm upgrade to the newest known chart version, b = helm rollback to a chosen revision (both confirm first; need the helm CLI; --read-only disables them; rke2-bundled charts are refused)"},
+		{"Helm", "releases (enter = values applied), optional update check; u = helm upgrade to the newest known chart version, b = helm rollback to a chosen revision, B = roll a failed or stuck (pending-*) release back to the last revision that deployed (all confirm first; need the helm CLI; --read-only disables them; rke2-bundled charts are refused for upgrade)"},
 		{"Images", "per-node image inventory, unused images, airgap tarball contents vs running"},
 		{"Security", "Rules: DISA Kubernetes / RKE2 / Rancher MCM STIG + CIS checks from component flags, kubelet config, PSA, RBAC, node facts. Node hardening: per-node runtime vs boot facts (SELinux, FIPS, auditd, firewall...) and the OS STIG summary. OS STIG: every rule of the node's DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG. The whole tab is opt-in: empty until Shift+S runs the scan"},
 		{"Logs", "rke2/kubelet/containerd/rancher-system-agent logs classified into startup-noise / warnings / errors (Rancher plan events flag config rewrites); enter on a node lists its lines, enter on a line shows the full text + explanation, esc goes back, a shows info lines"},

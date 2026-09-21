@@ -97,6 +97,9 @@ func (c *Client) cephInfo(ctx context.Context) *CephInfo {
 				if cc.Details[i].Severity != cc.Details[j].Severity {
 					return cc.Details[i].Severity < cc.Details[j].Severity // HEALTH_ERR before HEALTH_WARN
 				}
+				if wi, wj := cephCheckWeight(cc.Details[i].Name), cephCheckWeight(cc.Details[j].Name); wi != wj {
+					return wi < wj
+				}
 				return cc.Details[i].Name < cc.Details[j].Name
 			})
 		}
@@ -124,6 +127,32 @@ func (c *Client) cephInfo(ctx context.Context) *CephInfo {
 	list("cephfilesystems", cephFilesystemGVR, "CephFilesystem", &ci.Filesys)
 	list("cephobjectstores", cephObjectStoreGVR, "CephObjectStore", &ci.Stores)
 	return ci
+}
+
+// cephCheckWeight orders health checks by what they mean for the data:
+// availability and capacity first, hygiene warnings (insecure key types,
+// telemetry, old crashes) last.
+func cephCheckWeight(name string) int {
+	switch {
+	case strings.HasPrefix(name, "PG_AVAILABILITY"), strings.HasPrefix(name, "OSD_FULL"), strings.HasPrefix(name, "POOL_FULL"), strings.HasPrefix(name, "MON_DOWN"), strings.HasPrefix(name, "MDS_ALL_DOWN"), strings.HasPrefix(name, "OSD_NEARFULL"), strings.HasPrefix(name, "OSD_BACKFILLFULL"):
+		return 0
+	case strings.HasPrefix(name, "OSD_"), strings.HasPrefix(name, "PG_"), strings.HasPrefix(name, "MDS_"), strings.HasPrefix(name, "OBJECT_"), strings.HasPrefix(name, "MON_"), strings.HasPrefix(name, "MGR_"):
+		return 1
+	case strings.HasPrefix(name, "AUTH_INSECURE"), strings.HasPrefix(name, "TELEMETRY"), strings.HasPrefix(name, "RECENT_CRASH"), strings.HasPrefix(name, "POOL_NO_REDUNDANCY"):
+		return 9
+	}
+	return 5
+}
+
+// Critical reports whether a HEALTH_WARN hides a data-availability or
+// capacity problem Ceph itself only rates as a warning.
+func (cc CephCluster) Critical() (bool, string) {
+	for _, d := range cc.Details {
+		if cephCheckWeight(d.Name) == 0 {
+			return true, d.Name + ": " + d.Message
+		}
+	}
+	return false, ""
 }
 
 // Unhealthy lists the pools / filesystems / object stores not in Ready phase.

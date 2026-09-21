@@ -662,7 +662,11 @@ func evalCeph(in Input, d k8s.CSIStatus, seen map[string]bool, add func(Severity
 		case "HEALTH_ERR":
 			add(SevCrit, "storage", obj, "Ceph reports HEALTH_ERR: "+truncList(append(errs, warns...), 3)+" - I/O on the affected pools stalls or fails", "kubectl -n "+cc.Namespace+" exec deploy/rook-ceph-tools -- ceph health detail; ceph -s")
 		case "HEALTH_WARN":
-			add(SevWarn, "storage", obj, "Ceph reports HEALTH_WARN: "+truncList(warns, 3), "kubectl -n "+cc.Namespace+" exec deploy/rook-ceph-tools -- ceph health detail")
+			if crit, why := cc.Critical(); crit {
+				add(SevCrit, "storage", obj, "Ceph reports HEALTH_WARN but "+why+" - PGs inactive, OSDs full or a monitor down mean I/O stalls or data at risk", "kubectl -n "+cc.Namespace+" exec deploy/rook-ceph-tools -- ceph health detail; ceph osd df; ceph mon stat")
+			} else {
+				add(SevWarn, "storage", obj, "Ceph reports HEALTH_WARN: "+truncList(warns, 3), "kubectl -n "+cc.Namespace+" exec deploy/rook-ceph-tools -- ceph health detail")
+			}
 		case "":
 			if cc.Phase != "" && !strings.EqualFold(cc.Phase, "Ready") {
 				add(SevCrit, "storage", obj, "Rook has not reached the Ceph cluster yet (phase "+cc.Phase+", no health reported): "+orDefault(firstLine(cc.Message), "see the operator log"), "kubectl -n "+cc.Namespace+" logs deploy/rook-ceph-operator")

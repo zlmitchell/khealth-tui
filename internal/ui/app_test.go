@@ -419,6 +419,62 @@ func TestHelmActionOverlays(t *testing.T) {
 	}
 }
 
+// TestHelmRollbackFailedRelease: after two failed upgrades the picker must
+// preselect the revision that last deployed (not the previous failure), B
+// goes straight to its confirmation, a failed action refreshes so the new
+// failed revision shows up, and a failed first install explains that there
+// is nothing to roll back to.
+func TestHelmRollbackFailedRelease(t *testing.T) {
+	a := testApp()
+	a.cfg.Actions.HelmBinary = "sh"
+	a.tab = tabHelm
+	rel := &a.snap.HelmReleases[0]
+	rel.Revision, rel.Status, rel.Description = 4, "failed", "Upgrade \"web\" failed: timed out waiting for the condition"
+	rel.History = []k8s.HelmRevision{
+		{Revision: 4, Status: "failed", Chart: "nginx", Version: "16.0.0"},
+		{Revision: 3, Status: "failed", Chart: "nginx", Version: "16.0.0"},
+		{Revision: 2, Status: "deployed", Chart: "nginx", Version: "15.0.0"},
+		{Revision: 1, Status: "superseded", Chart: "nginx", Version: "14.0.0"},
+	}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	if a.overlay != ovRevisions || a.revCursor != 2 {
+		t.Fatalf("picker should preselect revision 2 (index 2), got overlay %v cursor %d status %q", a.overlay, a.revCursor, a.status)
+	}
+	v := ansi.Strip(a.View())
+	if !strings.Contains(v, "last good") || !strings.Contains(v, "Release is failed") {
+		t.Errorf("picker should mark the last good revision and explain the state:\n%s", v)
+	}
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
+
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+	if a.overlay != ovConfirm || a.pendingAct == nil || !strings.Contains(strings.Join(a.pendingAct.argv, " "), "rollback web 2 --namespace default") {
+		t.Fatalf("B should confirm a rollback to revision 2, got %v %+v (status %q)", a.overlay, a.pendingAct, a.status)
+	}
+	v = ansi.Strip(a.View())
+	if !strings.Contains(v, "last one that deployed") || !strings.Contains(v, "timed out waiting") {
+		t.Errorf("confirm should say why revision 2 and quote the failure:\n%s", v)
+	}
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+
+	cmd := a.handleActionDone(actionDoneMsg{act: &action{title: "Upgrade", argv: []string{"helm", "upgrade"}, onFail: "B on the Helm tab rolls web back"}, out: "Error: UPGRADE FAILED", err: fmt.Errorf("exit status 1")})
+	if cmd == nil {
+		t.Errorf("a failed action should trigger a refresh")
+	}
+	if d := ansi.Strip(strings.Join(a.detailRaw, "\n")); !strings.Contains(d, "FAILED") || !strings.Contains(d, "B on the Helm tab") {
+		t.Errorf("failure detail should carry the onFail hint:\n%s", d)
+	}
+	a.overlay = ovNone
+
+	rel.Revision, rel.History = 1, []k8s.HelmRevision{{Revision: 1, Status: "failed", Chart: "nginx", Version: "16.0.0"}}
+	for _, k := range []rune{'b', 'B'} {
+		a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{k}})
+		if a.overlay != ovNone || !strings.Contains(a.status, "nothing to roll back to") || !strings.Contains(a.status, "helm uninstall web -n default") {
+			t.Errorf("%c on a failed first install: overlay %v status %q", k, a.overlay, a.status)
+		}
+	}
+	a.cfg.Actions.Enabled = false
+}
+
 func TestLogsDrillDown(t *testing.T) {
 	a := testApp()
 	a.tab = tabLogs

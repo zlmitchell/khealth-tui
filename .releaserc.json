@@ -1,0 +1,41 @@
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    [
+      "@semantic-release/changelog",
+      {
+        "changelogFile": "CHANGELOG.md"
+      }
+    ],
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "VERSION=v${nextRelease.version} BUILD_LOCAL=1 ./build.sh all",
+        "verifyConditionsCmd": "sh -n build.sh"
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": ["CHANGELOG.md"],
+        "message": "chore(release): ${nextRelease.version}\n\n${nextRelease.notes}"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "assets": [
+          { "path": "dist/khealth-linux-amd64", "label": "khealth linux amd64" },
+          { "path": "dist/khealth-linux-arm64", "label": "khealth linux arm64" },
+          { "path": "dist/khealth-windows-amd64.exe", "label": "khealth windows amd64" },
+          { "path": "dist/khealth-darwin-amd64", "label": "khealth macOS amd64" },
+          { "path": "dist/khealth-darwin-arm64", "label": "khealth macOS arm64" },
+          { "path": "dist/checksums.txt", "label": "sha256 checksums" }
+        ]
+      }
+    ]
+  ]
+}

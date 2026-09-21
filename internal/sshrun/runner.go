@@ -416,6 +416,9 @@ func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
 	case <-ctx.Done():
 		_ = sess.Signal(ssh.SIGKILL)
 		sess.Close()
+		// Run returns once the closed channel drains; wait for it so the
+		// stdout/stderr copies are finished before the buffers are read
+		<-done
 		err = ctx.Err()
 	}
 	res.Finished = time.Now()
