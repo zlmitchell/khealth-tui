@@ -32,6 +32,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
 	"github.com/zlmitchell/khealth-tui/internal/ui"
 )
 
@@ -64,6 +65,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
+	k8s.SetSystemNamespaces(cfg.Namespaces.System)
+	k8s.SetCNINames(cfg.Namespaces.CNI)
 	klog.SetOutput(io.Discard)
 	klog.LogToStderr(false)
 	lipgloss.SetColorProfile(termenv.TrueColor) // frames sized as a real terminal sees them

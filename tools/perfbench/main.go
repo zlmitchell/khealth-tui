@@ -125,6 +125,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
+	k8s.SetSystemNamespaces(cfg.Namespaces.System)
+	k8s.SetCNINames(cfg.Namespaces.CNI)
 	klog.SetOutput(io.Discard)
 	klog.LogToStderr(false)
 

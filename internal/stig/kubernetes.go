@@ -537,7 +537,7 @@ func (e *evaluator) clusterRules() {
 		// on that list is privileged whatever it is labeled
 		var user []string
 		for _, n := range psa.ExemptNamespaces {
-			if !k8s.IsSystemNamespace(n) {
+			if !k8s.IsKnownSystemNamespace(n) {
 				user = append(user, n)
 			}
 		}

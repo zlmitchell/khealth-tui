@@ -45,6 +45,9 @@ type Config struct {
 	// Export is where `e` writes the findings report (JSON + XLSX).
 	Export Export `yaml:"export"`
 
+	// Namespaces names what this deployment treats as infrastructure.
+	Namespaces Namespaces `yaml:"namespaces"`
+
 	Diag bool `yaml:"-"` // --diag: print API/permission diagnostics and exit
 
 	// Bootstrap (--bootstrap-kubeconfig): build a kubeconfig over SSH from a
@@ -55,6 +58,16 @@ type Config struct {
 
 // Export configures the report files `e` writes (internal/export) and the
 // one-shot --export mode.
+// Namespaces extends the built-in notion of a system namespace (kube-*,
+// cattle-*, longhorn-*, ...) with this deployment's own: the STIG/CIS rules
+// about privileged pods, NetworkPolicies and PSA labels, and the "user
+// pods on control-plane nodes" table, leave those alone. The namespaces the
+// PSA admission config exempts count as system too, without listing them.
+type Namespaces struct {
+	System []string `yaml:"system"` // extra system namespaces or prefixes (a trailing - or * marks a prefix)
+	CNI    []string `yaml:"cni"`    // extra CNI agent pod names/prefixes (for MTU and restart checks)
+}
+
 type Export struct {
 	Dir string `yaml:"dir"` // directory for khealth-<context>-<timestamp>.json/.xlsx (default: current directory)
 

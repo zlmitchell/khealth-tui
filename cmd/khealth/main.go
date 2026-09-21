@@ -39,6 +39,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
+	k8s.SetSystemNamespaces(cfg.Namespaces.System)
+	k8s.SetCNINames(cfg.Namespaces.CNI)
 	if cfg.Diag {
 		client, err := k8s.New(cfg.Kubeconfig, cfg.Context)
 		if err != nil {

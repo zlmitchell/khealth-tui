@@ -90,11 +90,20 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 		if d.Provider == "trident" {
 			evalTridentExtra(in, d, add)
 			if len(d.Trident) == 0 && len(s.TridentBackends) == 0 {
-				add(SevWarn, "storage", obj, "Trident is installed but has no TridentBackend: no volume can be provisioned", "create a TridentBackendConfig (ONTAP SVM credentials) in the trident namespace")
+				ns := s.Trident.NS()
+				switch {
+				case s.TridentBackends == nil:
+					// not listed: a 403 (Role instead of ClusterRole), or the CRD is gone
+					add(SevWarn, "storage", obj, "cannot list tridentbackends.trident.netapp.io, so the Trident backends are unknown", "grant list on tridentbackends cluster-wide (Trident keeps them in "+ns+"); --diag shows the refusal")
+				default:
+					// a TridentBackendConfig outside Trident's namespace gets
+					// its own finding (evalTridentExtra): it is never applied
+					add(SevWarn, "storage", obj, "Trident is installed but has no TridentBackend: no volume can be provisioned", "create a TridentBackendConfig (ONTAP SVM credentials) in "+ns+", the namespace Trident runs in")
+				}
 			}
 			for _, b := range d.Trident {
 				if !b.Online || (b.State != "" && b.State != "online") {
-					add(SevCrit, "storage", obj, fmt.Sprintf("Trident backend %s (%s) is %s%s: provisioning and attach on it fail", b.BackendName, b.Driver, strutil.FirstNonEmpty(b.State, "offline"), problemSuffix(b.StateReason)), "tridentctl -n trident get backend "+b.BackendName+"; check SVM credentials, management LIF reachability and the ONTAP aggregate")
+					add(SevCrit, "storage", obj, fmt.Sprintf("Trident backend %s (%s) is %s%s: provisioning and attach on it fail", b.BackendName, b.Driver, strutil.FirstNonEmpty(b.State, "offline"), problemSuffix(b.StateReason)), "tridentctl -n "+s.Trident.NS()+" get backend "+b.BackendName+"; check SVM credentials, management LIF reachability and the ONTAP aggregate")
 				}
 			}
 		}

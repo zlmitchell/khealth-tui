@@ -291,6 +291,7 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		mu.Lock()
 		s.Namespaces = l.Items
 		mu.Unlock()
+		SetRancherSystemNamespaces(RancherSystemNamespaces(l.Items))
 		return nil
 	})
 	run("events", func() error {
@@ -1044,14 +1045,20 @@ func (c *Client) rancherInfo(ctx context.Context) *RancherInfo {
 	info.Server = info.Env["CATTLE_SERVER"]
 	info.ClusterAgent = fmt.Sprintf("%d/%d ready", dep.Status.ReadyReplicas, dep.Status.Replicas)
 	info.ClusterAgentOK = dep.Status.Replicas > 0 && dep.Status.ReadyReplicas == dep.Status.Replicas
-	if fdep, err := c.CS.AppsV1().Deployments("cattle-fleet-system").Get(ctx, "fleet-agent", metav1.GetOptions{}); err == nil {
-		ok := fdep.Status.Replicas > 0 && fdep.Status.ReadyReplicas == fdep.Status.Replicas
-		info.FleetAgentOK = &ok
-		info.FleetNamespace = "cattle-fleet-system"
-	} else if fss, err := c.CS.AppsV1().StatefulSets("cattle-fleet-system").Get(ctx, "fleet-agent", metav1.GetOptions{}); err == nil {
-		ok := fss.Status.Replicas > 0 && fss.Status.ReadyReplicas == fss.Status.Replicas
-		info.FleetAgentOK = &ok
-		info.FleetNamespace = "cattle-fleet-system"
+	// downstream clusters run the fleet-agent in cattle-fleet-system, the
+	// Rancher management cluster its own in cattle-fleet-local-system
+	for _, ns := range []string{"cattle-fleet-system", "cattle-fleet-local-system"} {
+		if fdep, err := c.CS.AppsV1().Deployments(ns).Get(ctx, "fleet-agent", metav1.GetOptions{}); err == nil {
+			ok := fdep.Status.Replicas > 0 && fdep.Status.ReadyReplicas == fdep.Status.Replicas
+			info.FleetAgentOK = &ok
+			info.FleetNamespace = ns
+			break
+		} else if fss, err := c.CS.AppsV1().StatefulSets(ns).Get(ctx, "fleet-agent", metav1.GetOptions{}); err == nil {
+			ok := fss.Status.Replicas > 0 && fss.Status.ReadyReplicas == fss.Status.Replicas
+			info.FleetAgentOK = &ok
+			info.FleetNamespace = ns
+			break
+		}
 	}
 	if sdep, err := c.CS.AppsV1().Deployments("cattle-system").Get(ctx, "system-upgrade-controller", metav1.GetOptions{}); err == nil {
 		ok := sdep.Status.ReadyReplicas == sdep.Status.Replicas

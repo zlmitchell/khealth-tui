@@ -28,6 +28,17 @@ A file bootstrapped earlier is reused while it still connects: matched by server
 
 Started with no usable kubeconfig and no host, khealth asks instead of failing: on a cluster node it offers the local `rke2.yaml` / `k3s.yaml` / `admin.conf` (copied through `sudo` into `~/.kube/khealth-local.yaml` when it is root-only); otherwise it asks for a server node (`[user@]host`, password prompt when there is no key or agent) and bootstraps from it. `--ssh-address` is the node address *type* (InternalIP / ExternalIP / Hostname) used for nodes listed by the API, not a host.
 
+## What counts as a system namespace
+
+Several rules only look at *user* namespaces: privileged / host-namespace pods and missing NetworkPolicies (CIS 5.2.x, 5.3.2), PSA labels (V-254800-ns), the exemption list (V-254800-exempt) and the "user pods on control-plane nodes" table. What is infrastructure is decided in this order, all of it additive:
+
+* the Kubernetes and distribution namespaces, and the common add-ons by their conventional namespace (`monitoring`, `cert-manager`, `velero`, `trident`, ... exact names; `cattle-*`, `calico-*`, `istio-*`, `longhorn-*`, ... as prefixes)
+* on a Rancher-managed cluster, the **System project**: every namespace carries `field.cattle.io/projectId`, `kube-system` is always in that project, so its members are read from the namespace list on every refresh; namespaces Rancher annotates `management.cattle.io/system-namespace` too
+* the namespaces the PSA admission config exempts (`exemptions.namespaces` in `rke2-pss.yaml` or the file config.yaml names) - the operator's own list, read from a server node; the one rule that judges that list does not use it
+* `namespaces.system` in the config: exact names, or prefixes with a trailing `-` or `*` (`platform-*`, `infra`)
+
+`namespaces.cni` adds CNI agent pod names for a CNI khealth does not know; CNI pods are otherwise found by name/label in any namespace. Hints for Longhorn and Trident use the namespace their CRs live in, not a conventional one, and add-ons are found by workload name wherever the chart put them.
+
 ## What SSH needs on the nodes
 
 * a login that can become root: root itself, or a user with `sudo`, `dzdo` (Centrify / Delinea) or `doas`. Each host is probed once (`become: auto` tries them in that order) and the first that works is cached: NOPASSWD is used when granted; otherwise the password is fed on stdin for `sudo` and `dzdo` (`doas` has no such mode and needs `nopass`). Pin a tool with `become: dzdo` / `--become dzdo`. The collection script is POSIX `sh` sent over stdin, no files are written on the node

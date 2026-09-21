@@ -120,10 +120,60 @@ func TestIsSystemNamespace(t *testing.T) {
 			t.Errorf("%s should be system", ns)
 		}
 	}
-	for _, ns := range []string{"web", "prod-api", "team-a", "kubeflow"} {
+	// add-on names are exact, only the families that spawn namespaces are prefixes
+	for _, ns := range []string{"web", "prod-api", "team-a", "kubeflow", "monitoring-team-x", "cdisk", "olmec", "nvidia-lab", "trident-test", "operators-sandbox", "velero-restore-test"} {
 		if IsSystemNamespace(ns) {
 			t.Errorf("%s should not be system", ns)
 		}
+	}
+	// the deployment's own list: exact names, "-"/"*" prefixes; and the PSA
+	// exemptions, which count as system everywhere except for the rule that
+	// judges the exemption list itself
+	SetSystemNamespaces([]string{"infra", "platform-*", "logging-", " "})
+	SetExemptNamespaces([]string{"team-a"})
+	defer SetSystemNamespaces(nil)
+	defer SetExemptNamespaces(nil)
+	for _, ns := range []string{"infra", "platform-db", "logging-x", "team-a"} {
+		if !IsSystemNamespace(ns) {
+			t.Errorf("%s should be system after the config", ns)
+		}
+	}
+	for _, ns := range []string{"infrastructure", "platform", "logging", "web"} {
+		if IsSystemNamespace(ns) {
+			t.Errorf("%s should not be system", ns)
+		}
+	}
+	if IsKnownSystemNamespace("team-a") || !IsKnownSystemNamespace("infra") {
+		t.Error("IsKnownSystemNamespace must include the config but not the exemptions")
+	}
+}
+
+// On a Rancher-managed cluster the System project decides: kube-system's
+// projectId names it, and every namespace in it (plus the ones Rancher
+// annotates as system) is infrastructure, whatever it is called.
+func TestRancherSystemNamespaces(t *testing.T) {
+	ns := func(name string, labels, ann map[string]string) corev1.Namespace {
+		return corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels, Annotations: ann}}
+	}
+	list := []corev1.Namespace{
+		ns("kube-system", map[string]string{"field.cattle.io/projectId": "p-abc12"}, map[string]string{"field.cattle.io/projectId": "c-m-xyz:p-abc12"}),
+		ns("platform-tools", nil, map[string]string{"field.cattle.io/projectId": "c-m-xyz:p-abc12"}),
+		ns("cattle-fleet-system", nil, map[string]string{"management.cattle.io/system-namespace": "true"}),
+		ns("team-a", map[string]string{"field.cattle.io/projectId": "p-team1"}, map[string]string{"field.cattle.io/projectId": "c-m-xyz:p-team1"}),
+		ns("unfiled", nil, nil),
+	}
+	got := RancherSystemNamespaces(list)
+	if strings.Join(got, ",") != "kube-system,platform-tools,cattle-fleet-system" {
+		t.Errorf("system project members: %v", got)
+	}
+	SetRancherSystemNamespaces(got)
+	defer SetRancherSystemNamespaces(nil)
+	if !IsSystemNamespace("platform-tools") || IsSystemNamespace("team-a") || IsSystemNamespace("unfiled") {
+		t.Error("membership not applied")
+	}
+	// not a Rancher cluster: nothing is filed
+	if got := RancherSystemNamespaces([]corev1.Namespace{ns("kube-system", nil, nil), ns("web", nil, nil)}); got != nil {
+		t.Errorf("no projects: %v", got)
 	}
 }
 

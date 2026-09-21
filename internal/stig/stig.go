@@ -116,6 +116,10 @@ func Evaluate(in Input) []Result {
 	e.sched = k8s.ComponentArgs(in.Snap.Pods, "kube-scheduler")
 	e.etcdArgs = k8s.ComponentArgs(in.Snap.Pods, "etcd")
 
+	if psa := e.psaConfig(); psa != nil {
+		// headless runs have no UI handler to install these (see ui/app.go)
+		k8s.SetExemptNamespaces(psa.ExemptNamespaces)
+	}
 	e.apiserverRules()
 	e.cmRules()
 	e.schedulerRules()

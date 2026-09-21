@@ -176,8 +176,24 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 			add(SevWarn, "upgrade", obj, fmt.Sprintf("plan targets %s but no upgrade job exists for %s (%s since the last activity)", target, strutil.TruncList(waiting, 3), in.Now.Sub(lastActivity).Round(time.Minute)), hint)
 		}
 	}
-	if r := s.Rancher; r != nil && r.SystemUpgradeOK != nil && !*r.SystemUpgradeOK && pendingAny {
-		add(SevCrit, "upgrade", "system-upgrade-controller", "system-upgrade-controller is not ready while plans have nodes to upgrade", "kubectl -n cattle-system describe deploy system-upgrade-controller")
+	// the controller itself: cattle-system on Rancher-managed clusters (the
+	// Rancher probe reads it), system-upgrade or wherever the chart put it
+	// otherwise - the deployment is found by name
+	sucNS, sucReady := "", (*bool)(nil)
+	for i := range s.Deployments {
+		if d := &s.Deployments[i]; d.Name == "system-upgrade-controller" {
+			ok := d.Status.ReadyReplicas == d.Status.Replicas && d.Status.Replicas > 0
+			sucNS, sucReady = d.Namespace, &ok
+			break
+		}
+	}
+	if sucReady == nil {
+		if r := s.Rancher; r != nil && r.SystemUpgradeOK != nil {
+			sucNS, sucReady = "cattle-system", r.SystemUpgradeOK
+		}
+	}
+	if sucReady != nil && !*sucReady && pendingAny {
+		add(SevCrit, "upgrade", "system-upgrade-controller", "system-upgrade-controller is not ready while plans have nodes to upgrade", "kubectl -n "+sucNS+" describe deploy system-upgrade-controller")
 	}
 
 	// ---- Rancher management cluster: provisioned clusters ----

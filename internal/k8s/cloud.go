@@ -114,6 +114,27 @@ type TridentInfo struct {
 	StorageClassesListed bool
 }
 
+// NS is the Trident namespace for kubectl hints: what the orchestrator
+// reports, else where its backend configs / nodes live, else "trident".
+func (ti *TridentInfo) NS() string {
+	if ti != nil {
+		if ti.Orchestrator != nil && ti.Orchestrator.Namespace != "" {
+			return ti.Orchestrator.Namespace
+		}
+		for _, b := range ti.BackendConfigs {
+			if b.Namespace != "" {
+				return b.Namespace
+			}
+		}
+		for _, n := range ti.Nodes {
+			if n.Namespace != "" {
+				return n.Namespace
+			}
+		}
+	}
+	return "trident"
+}
+
 // TridentOrchestrator is the trident-operator's install state.
 type TridentOrchestrator struct {
 	Name, Status, Message, Version, Namespace string // Status: Installed, Installing, Failed, Error, Uninstalled, Updating
@@ -132,7 +153,8 @@ type TridentBackendConfig struct {
 // TridentNode is a node registered with the Trident controller.
 type TridentNode struct {
 	Name             string
-	Registered       bool // status.registered (newer Trident) or present at all (older)
+	Namespace        string // of the TridentNode CR (the Trident install namespace)
+	Registered       bool   // status.registered (newer Trident) or present at all (older)
 	IQN, NQN         string
 	PublicationState string // clean, cleanable, dirty
 	Deleted          bool
@@ -558,14 +580,16 @@ func mainImage(cs []corev1.Container) string {
 
 var sidecar = regexp.MustCompile(`^(csi-)?(provisioner|attacher|resizer|snapshotter|node-driver-registrar|liveness-?probe|external-.*|driver-registrar)$|^livenessprobe$`)
 
-// tridentBackends lists trident.netapp.io TridentBackend CRs (nil when the
-// CRD is absent or the token cannot list it).
+// tridentBackends lists trident.netapp.io TridentBackend CRs: nil when the
+// CRD is absent or the token cannot list it (cluster-wide: Trident keeps
+// them in its own namespace, whatever that is), an empty non-nil list when
+// there are none.
 func (c *Client) tridentBackends(ctx context.Context) []TridentBackend {
 	l, err := c.dynList(ctx, "tridentbackends.trident.netapp.io", tridentBackendGVR)
 	if err != nil {
 		return nil
 	}
-	var out []TridentBackend
+	out := []TridentBackend{}
 	for _, it := range l.Items {
 		b := TridentBackend{Namespace: it.GetNamespace(), Name: it.GetName()}
 		b.BackendName, _, _ = unstructured.NestedString(it.Object, "backendName")
@@ -705,7 +729,7 @@ func (c *Client) tridentInfo(ctx context.Context) *TridentInfo {
 	if l, err := c.dynList(ctx, "tridentnodes.trident.netapp.io", tridentNodeGVR); err == nil {
 		found = true
 		for _, it := range l.Items {
-			n := TridentNode{Name: it.GetName(), Registered: true}
+			n := TridentNode{Name: it.GetName(), Namespace: it.GetNamespace(), Registered: true}
 			// Trident 25.x moved the fields under spec/status; older releases keep them top-level
 			if name, _, _ := unstructured.NestedString(it.Object, "spec", "nodeName"); name != "" {
 				n.Name = name

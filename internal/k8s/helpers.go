@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -241,13 +242,143 @@ func ComponentArgs(pods []corev1.Pod, component string) map[string]map[string]st
 	return out
 }
 
-// IsSystemNamespace reports whether a namespace is owned by the platform.
+// builtinSystemNames are the namespaces the common add-ons install into by
+// their conventional names (exact: "monitoring" is system, "monitoring-x"
+// is somebody's), builtinSystemPrefixes the families that really do spawn
+// several namespaces (cattle-*, calico-*, istio-*, ...). A deployment adds
+// its own through SetSystemNamespaces.
+var builtinSystemNames = map[string]bool{
+	"kube-system": true, "kube-public": true, "kube-node-lease": true, "default": true,
+	"monitoring": true, "ingress-nginx": true, "cert-manager": true, "velero": true, "kyverno": true, "neuvector": true, "openebs": true,
+	"olm": true, "operators": true, "local-path-storage": true, "kubevirt": true, "cdi": true, "argocd": true, "gitlab-runner": true,
+	"gpu-operator": true, "nvidia": true, "system-upgrade": true, "trident": true, "portworx": true, "cilium": true, "linkerd": true,
+	"cilium-secrets": true, "calico-apiserver": true, "tigera-operator": true, "metallb-system": true, "gatekeeper-system": true,
+	"longhorn-system": true, "rook-ceph": true, "cis-operator-system": true, "vmware-system-csi": true, "istio-system": true, "linkerd-viz": true,
+}
+
+var builtinSystemPrefixes = []string{"kube-", "cattle-", "fleet-", "rancher-", "calico-", "tigera-", "istio-", "harvester-", "rook-", "longhorn-", "vmware-system-", "cis-operator-", "metallb-", "gatekeeper-"}
+
+// systemNS holds what this deployment adds to the built-in system
+// namespaces: the operator's own list (config namespaces.system) and the
+// namespaces the PSA admission config exempts. Set once from the config
+// and whenever a PSA config is read; read from the UI, the checks and the
+// STIG rules.
+var systemNS struct {
+	sync.RWMutex
+	names    map[string]bool
+	prefixes []string
+	exempt   map[string]bool
+	rancher  map[string]bool
+}
+
+// RancherSystemNamespaces are the namespaces Rancher itself files as
+// system on a managed cluster: the members of the System project (every
+// namespace carries field.cattle.io/projectId, and kube-system is always in
+// that project, so its id names the project without asking the management
+// cluster) and those annotated management.cattle.io/system-namespace.
+// Empty on a cluster Rancher does not manage.
+func RancherSystemNamespaces(nss []corev1.Namespace) []string {
+	projectOf := func(ns *corev1.Namespace) string {
+		if v := ns.Labels["field.cattle.io/projectId"]; v != "" {
+			return v
+		}
+		// the annotation is "<cluster>:<project>"; the label is the project alone
+		v := ns.Annotations["field.cattle.io/projectId"]
+		if i := strings.LastIndex(v, ":"); i >= 0 {
+			v = v[i+1:]
+		}
+		return v
+	}
+	system := ""
+	for i := range nss {
+		if nss[i].Name == "kube-system" {
+			system = projectOf(&nss[i])
+		}
+	}
+	var out []string
+	for i := range nss {
+		ns := &nss[i]
+		if (system != "" && projectOf(ns) == system) || ns.Annotations["management.cattle.io/system-namespace"] == "true" {
+			out = append(out, ns.Name)
+		}
+	}
+	return out
+}
+
+// SetRancherSystemNamespaces installs what RancherSystemNamespaces found;
+// the snapshot does it on every refresh.
+func SetRancherSystemNamespaces(names []string) {
+	systemNS.Lock()
+	defer systemNS.Unlock()
+	systemNS.rancher = map[string]bool{}
+	for _, n := range names {
+		systemNS.rancher[n] = true
+	}
+}
+
+// SetSystemNamespaces installs the operator's extra system namespaces: an
+// entry ending in "-" or "*" is a prefix, anything else an exact name.
+func SetSystemNamespaces(entries []string) {
+	systemNS.Lock()
+	defer systemNS.Unlock()
+	systemNS.names, systemNS.prefixes = map[string]bool{}, nil
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		switch {
+		case e == "":
+		case strings.HasSuffix(e, "*"):
+			systemNS.prefixes = append(systemNS.prefixes, strings.TrimSuffix(e, "*"))
+		case strings.HasSuffix(e, "-"):
+			systemNS.prefixes = append(systemNS.prefixes, e)
+		default:
+			systemNS.names[e] = true
+		}
+	}
+}
+
+// SetExemptNamespaces installs the namespaces the PSA admission config
+// exempts: the operator's own statement of what is infrastructure.
+func SetExemptNamespaces(names []string) {
+	systemNS.Lock()
+	defer systemNS.Unlock()
+	systemNS.exempt = map[string]bool{}
+	for _, n := range names {
+		systemNS.exempt[n] = true
+	}
+}
+
+// IsSystemNamespace reports whether a namespace is owned by the platform:
+// the Kubernetes and distribution namespaces, the common infrastructure
+// add-ons by their conventional names, Rancher's System project, the
+// operator's config (SetSystemNamespaces) and the PSA exemptions.
 func IsSystemNamespace(ns string) bool {
-	switch ns {
-	case "kube-system", "kube-public", "kube-node-lease", "default":
+	if IsKnownSystemNamespace(ns) {
 		return true
 	}
-	for _, p := range []string{"cattle-", "fleet-", "rancher-", "cis-operator", "longhorn-", "calico-", "tigera-", "cilium", "istio-", "linkerd", "kube-", "monitoring", "ingress-nginx", "cert-manager", "metallb-", "velero", "gatekeeper-", "kyverno", "harvester-", "neuvector", "openebs", "rook-", "olm", "operators", "local-path-storage", "kubevirt", "cdi", "argocd", "gitlab-runner", "gpu-operator", "nvidia", "system-upgrade", "trident", "portworx", "vmware-system", "cattle-system"} {
+	systemNS.RLock()
+	defer systemNS.RUnlock()
+	return systemNS.exempt[ns]
+}
+
+// IsKnownSystemNamespace is IsSystemNamespace without the PSA exemptions:
+// what the platform, Rancher and the operator's config call
+// infrastructure. The rule that judges the exemption list itself uses it,
+// or the list would vouch for itself.
+func IsKnownSystemNamespace(ns string) bool {
+	if builtinSystemNames[ns] {
+		return true
+	}
+	for _, p := range builtinSystemPrefixes {
+		if strings.HasPrefix(ns, p) {
+			return true
+		}
+	}
+	systemNS.RLock()
+	defer systemNS.RUnlock()
+	if systemNS.names[ns] || systemNS.rancher[ns] {
+		return true
+	}
+	for _, p := range systemNS.prefixes {
 		if strings.HasPrefix(ns, p) {
 			return true
 		}

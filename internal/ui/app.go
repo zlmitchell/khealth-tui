@@ -1234,6 +1234,13 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.info.MergeSTIG(a.nodes[m.info.Node])
 		m.info.MergeConfig(a.nodes[m.info.Node])
 		a.nodes[m.info.Node] = m.info
+		if m.opts.Config && m.info.ControlPlane {
+			// the PSA config's exempt namespaces are this deployment's own
+			// list of infrastructure namespaces (IsSystemNamespace)
+			if psa := a.psaConfig(); psa != nil {
+				k8s.SetExemptNamespaces(psa.ExemptNamespaces)
+			}
+		}
 		if m.logSum != nil {
 			a.logSum[m.info.Node] = m.logSum
 		}
@@ -2029,7 +2036,7 @@ func (a *App) nsRow(name string, cfg *nodeinfo.PSAConfig) []string {
 	}
 	note := ""
 	switch {
-	case exempt && !k8s.IsSystemNamespace(name):
+	case exempt && !k8s.IsKnownSystemNamespace(name):
 		note = styleWarn.Render("user namespace exempt from PSA")
 	case exempt:
 		note = styleDim.Render("system, exempt")

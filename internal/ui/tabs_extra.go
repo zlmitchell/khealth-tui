@@ -686,46 +686,54 @@ func (a *App) addonsContent() content {
 	add("", styleTitle.Render("Cloud provider (CPI)")+"  "+styleDim.Render("cloud-controller-manager, node initialization, CSI drivers and their backends"))
 	add(a.cloudLines(s)...)
 
-	// system add-ons
+	// system add-ons, found by workload name in whatever namespace the chart
+	// put them (ns is the conventional one, shown dim when it differs)
 	add("", styleTitle.Render("System add-ons"))
 	for _, want := range []struct{ label, ns, name, kind string }{
 		{"CoreDNS", "kube-system", "rke2-coredns-rke2-coredns", "deploy"}, {"CoreDNS", "kube-system", "coredns", "deploy"},
-		{"Ingress", "kube-system", "rke2-ingress-nginx-controller", "ds"}, {"Ingress", "ingress-nginx", "ingress-nginx-controller", "deploy"}, {"Ingress", "kube-system", "traefik", "deploy"},
+		{"Ingress", "kube-system", "rke2-ingress-nginx-controller", "ds"}, {"Ingress", "ingress-nginx", "ingress-nginx-controller", "deploy"}, {"Ingress", "ingress-nginx", "ingress-nginx-controller", "ds"}, {"Ingress", "kube-system", "traefik", "deploy"},
 		{"metrics-server", "kube-system", "rke2-metrics-server", "deploy"}, {"metrics-server", "kube-system", "metrics-server", "deploy"},
 		{"Snapshot controller", "kube-system", "rke2-snapshot-controller", "deploy"}, {"Snapshot controller", "kube-system", "snapshot-controller", "deploy"},
 		{"Longhorn", "longhorn-system", "longhorn-manager", "ds"}, {"cert-manager", "cert-manager", "cert-manager", "deploy"},
 		{"Rancher webhook", "cattle-system", "rancher-webhook", "deploy"}, {"kube-proxy", "kube-system", "kube-proxy", "ds"},
-		{"CIS operator", "cis-operator-system", "cis-operator", "deploy"}, {"Prometheus operator", "cattle-monitoring-system", "rancher-monitoring-operator", "deploy"},
+		{"CIS operator", "cis-operator-system", "cis-operator", "deploy"}, {"Prometheus operator", "cattle-monitoring-system", "rancher-monitoring-operator", "deploy"}, {"Prometheus operator", "monitoring", "prometheus-operator", "deploy"},
 		{"NeuVector", "cattle-neuvector-system", "neuvector-controller-pod", "deploy"}, {"Kyverno", "kyverno", "kyverno-admission-controller", "deploy"},
 		{"Velero", "velero", "velero", "deploy"}, {"MetalLB", "metallb-system", "metallb-controller", "deploy"},
+		{"Trident", "trident", "trident-controller", "deploy"}, {"Trident", "trident", "trident-csi", "deploy"},
 	} {
-		var status string
-		found := false
+		type hit struct{ ns, status string }
+		var hits []hit
 		if want.kind == "deploy" {
 			for i := range s.Deployments {
 				d := &s.Deployments[i]
-				if d.Namespace == want.ns && d.Name == want.name {
-					found = true
-					status = okText(d.Status.ReadyReplicas == d.Status.Replicas && d.Status.Replicas > 0, fmt.Sprintf("%d/%d", d.Status.ReadyReplicas, d.Status.Replicas), fmt.Sprintf("%d/%d", d.Status.ReadyReplicas, d.Status.Replicas))
-					if len(d.Spec.Template.Spec.Containers) > 0 {
-						status += styleDim.Render("  " + d.Spec.Template.Spec.Containers[0].Image)
-					}
+				if d.Name != want.name {
+					continue
 				}
+				st := okText(d.Status.ReadyReplicas == d.Status.Replicas && d.Status.Replicas > 0, fmt.Sprintf("%d/%d", d.Status.ReadyReplicas, d.Status.Replicas), fmt.Sprintf("%d/%d", d.Status.ReadyReplicas, d.Status.Replicas))
+				if len(d.Spec.Template.Spec.Containers) > 0 {
+					st += styleDim.Render("  " + d.Spec.Template.Spec.Containers[0].Image)
+				}
+				hits = append(hits, hit{d.Namespace, st})
 			}
 		} else {
 			for i := range s.DaemonSets {
 				d := &s.DaemonSets[i]
-				if d.Namespace == want.ns && d.Name == want.name {
-					found = true
-					status = okText(d.Status.NumberReady == d.Status.DesiredNumberScheduled, fmt.Sprintf("%d/%d", d.Status.NumberReady, d.Status.DesiredNumberScheduled), fmt.Sprintf("%d/%d", d.Status.NumberReady, d.Status.DesiredNumberScheduled))
-					if len(d.Spec.Template.Spec.Containers) > 0 {
-						status += styleDim.Render("  " + d.Spec.Template.Spec.Containers[0].Image)
-					}
+				if d.Name != want.name {
+					continue
 				}
+				st := okText(d.Status.NumberReady == d.Status.DesiredNumberScheduled, fmt.Sprintf("%d/%d", d.Status.NumberReady, d.Status.DesiredNumberScheduled), fmt.Sprintf("%d/%d", d.Status.NumberReady, d.Status.DesiredNumberScheduled))
+				if len(d.Spec.Template.Spec.Containers) > 0 {
+					st += styleDim.Render("  " + d.Spec.Template.Spec.Containers[0].Image)
+				}
+				hits = append(hits, hit{d.Namespace, st})
 			}
 		}
-		if found {
-			add(fmt.Sprintf("  %-20s %s/%s  %s", want.label, want.ns, want.name, status))
+		for _, h := range hits {
+			ns := h.ns
+			if ns != want.ns {
+				ns = h.ns + styleDim.Render(" (not "+want.ns+")")
+			}
+			add(fmt.Sprintf("  %-20s %s/%s  %s", want.label, ns, want.name, h.status))
 		}
 	}
 

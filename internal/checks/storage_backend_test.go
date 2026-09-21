@@ -301,6 +301,29 @@ func TestTridentExtraFindings(t *testing.T) {
 			t.Errorf("missing %s finding containing %q", w.sev, w.substr)
 		}
 	}
+	// Trident in netapp: a TridentBackendConfig in another namespace is never
+	// reconciled (no phase), the hints name the real namespace, and "no
+	// backend" is told apart from "could not list backends"
+	s.Trident.Orchestrator.Namespace = "netapp"
+	s.Trident.BackendConfigs = []k8s.TridentBackendConfig{{Namespace: "trident", Name: "tbc-lost", Driver: "ontap-nas"}}
+	s.TridentBackends = []k8s.TridentBackend{}
+	f2 := Evaluate(in)
+	if w := findingWith(f2, SevCrit, "storage", "TridentBackendConfig tbc-lost is in namespace trident but Trident runs in netapp"); w == nil || !strings.Contains(w.Hint, "kubectl -n netapp get tbc") {
+		t.Errorf("TBC outside Trident's namespace: %+v", w)
+	}
+	if w := findingWith(f2, SevWarn, "storage", "Trident is installed but has no TridentBackend"); w == nil || !strings.Contains(w.Hint, "in netapp, the namespace Trident runs in") {
+		t.Errorf("no backend hint: %+v", w)
+	}
+	if w := findingWith(f2, SevCrit, "storage", "StorageClass ghost is not registered"); w == nil || !strings.Contains(w.Hint, "kubectl -n netapp logs deploy/trident-controller") {
+		t.Errorf("kubectl hint namespace: %+v", w)
+	}
+	if w := findingWith(f2, SevCrit, "storage", "StorageClass platinum selects no Trident backend"); w == nil || !strings.Contains(w.Hint, "tridentctl -n netapp ") {
+		t.Errorf("tridentctl hint namespace: %+v", w)
+	}
+	s.TridentBackends = nil // the list itself failed
+	if w := findingWith(Evaluate(in), SevWarn, "storage", "cannot list tridentbackends.trident.netapp.io"); w == nil || !strings.Contains(w.Hint, "Trident keeps them in netapp") {
+		t.Errorf("backends not listed: %+v", w)
+	}
 	for _, x := range f {
 		if strings.Contains(x.Message, "pvc-b") {
 			t.Errorf("multi-writer volume reported as split brain: %s", x.Message)

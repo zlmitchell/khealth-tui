@@ -3,6 +3,7 @@ package k8s
 import (
 	"sort"
 	"strings"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -53,15 +54,41 @@ func (s *Snapshot) IsServiceIP(ip string) bool {
 var cniPodPrefixes = []string{"rke2-canal-", "rke2-calico-node-", "rke2-cilium-", "rke2-flannel-", "rke2-multus-", "canal-", "calico-node-", "cilium-", "kube-flannel-", "flannel-", "kube-ovn-", "weave-net-", "antrea-agent-", "aws-node-", "azure-cni-"}
 var cniPodLabels = []string{"canal", "calico-node", "cilium", "flannel", "kube-flannel", "weave-net", "antrea-agent", "aws-node"}
 
-// CNIPods are the CNI agent pods (one per node for a daemonset CNI).
+// cniExtra are the operator's own CNI pod names/prefixes (config
+// namespaces.cni), for a CNI khealth does not know or a renamed one.
+var cniExtra struct {
+	sync.RWMutex
+	names []string
+}
+
+// SetCNINames installs extra CNI agent pod names (a prefix when the entry
+// ends in "-" or "*", else an exact name or app label).
+func SetCNINames(entries []string) {
+	cniExtra.Lock()
+	defer cniExtra.Unlock()
+	cniExtra.names = nil
+	for _, e := range entries {
+		if e = strings.TrimSpace(e); e != "" {
+			cniExtra.names = append(cniExtra.names, e)
+		}
+	}
+}
+
+// CNIPods are the CNI agent pods (one per node for a daemonset CNI), in
+// whatever namespace the CNI was installed (cilium, calico and kube-ovn
+// charts default to their own): a system namespace or a DaemonSet owner,
+// plus the name/label match, is selective enough.
 func (s *Snapshot) CNIPods() []*corev1.Pod {
 	var out []*corev1.Pod
 	for i := range s.Pods {
 		p := &s.Pods[i]
-		if p.Namespace != "kube-system" && !strings.HasSuffix(p.Namespace, "-system") {
-			continue
+		ds := IsSystemNamespace(p.Namespace)
+		for _, o := range p.OwnerReferences {
+			if o.Kind == "DaemonSet" {
+				ds = true
+			}
 		}
-		if isCNIPod(p) {
+		if ds && isCNIPod(p) {
 			out = append(out, p)
 		}
 	}
@@ -76,6 +103,17 @@ func isCNIPod(p *corev1.Pod) bool {
 	}
 	for _, pre := range cniPodPrefixes {
 		if strings.HasPrefix(p.Name, pre) {
+			return true
+		}
+	}
+	cniExtra.RLock()
+	defer cniExtra.RUnlock()
+	for _, e := range cniExtra.names {
+		if strings.HasSuffix(e, "-") || strings.HasSuffix(e, "*") {
+			if strings.HasPrefix(p.Name, strings.TrimSuffix(e, "*")) {
+				return true
+			}
+		} else if p.Name == e || p.Labels["k8s-app"] == e || p.Labels["app"] == e || p.Labels["app.kubernetes.io/name"] == e {
 			return true
 		}
 	}

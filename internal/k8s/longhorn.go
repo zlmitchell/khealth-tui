@@ -22,6 +22,7 @@ import (
 
 // LonghornInfo is the Longhorn control-plane picture.
 type LonghornInfo struct {
+	Namespace        string // where Longhorn is installed (the namespace of its CRs); "" = not seen yet
 	Volumes          []LonghornVolume
 	Nodes            []LonghornNode
 	InstanceManagers []LonghornInstanceManager
@@ -32,6 +33,15 @@ type LonghornInfo struct {
 	Orphans          []LonghornOrphan
 	Settings         map[string]string // name -> value (raw; JSON for the per-data-engine ones)
 	EnginesFrom      time.Time         // when the engine facts were listed (carried forward between refreshes)
+}
+
+// NS is the Longhorn namespace for kubectl hints: the one its CRs live in,
+// else the conventional longhorn-system.
+func (li *LonghornInfo) NS() string {
+	if li != nil && li.Namespace != "" {
+		return li.Namespace
+	}
+	return "longhorn-system"
 }
 
 // LonghornVolume is a longhorn.io Volume with what its Replicas, Engine and
@@ -240,6 +250,9 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 	ttl := c.Opts.DiscoveryTTL
 	unhealthy := false
 	for _, it := range vols.Items {
+		if li.Namespace == "" {
+			li.Namespace = it.GetNamespace()
+		}
 		rob, _, _ := unstructured.NestedString(it.Object, "status", "robustness")
 		st, _, _ := unstructured.NestedString(it.Object, "status", "state")
 		if rob != "healthy" && st != "detached" && st != "" {
@@ -471,6 +484,9 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 	if nodes != nil {
 		for _, it := range nodes.Items {
 			o := it.Object
+			if li.Namespace == "" {
+				li.Namespace = it.GetNamespace()
+			}
 			n := LonghornNode{Name: it.GetName(), Conditions: map[string]LonghornCond{}, InstanceManager: imState[it.GetName()]}
 			n.AllowScheduling, _, _ = unstructured.NestedBool(o, "spec", "allowScheduling")
 			n.Eviction, _, _ = unstructured.NestedBool(o, "spec", "evictionRequested")

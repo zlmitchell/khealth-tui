@@ -69,6 +69,10 @@ perf:                             # the tool's own footprint (docs/PERFORMANCE.m
 export:                           # e writes the findings report (JSON + XLSX, one sheet per benchmark); tools/findings -json/-xlsx headlessly
   dir: ""                         # directory for khealth-<context>-<timestamp>.json/.xlsx (--export-dir; default: the current directory)
 
+namespaces:                       # what this deployment treats as infrastructure, on top of the built-ins (kube-*, cattle-*, longhorn-*, cert-manager, ...)
+  system: []                      # extra system namespaces: exact names, or prefixes with a trailing - or * (platform-*, infra, logging); the PSA config's exempt namespaces count without being listed
+  cni: []                         # extra CNI agent pod names/prefixes (kube-ovn-cni, kube-router) for the MTU and restart checks
+
 actions:
   enabled: true                   # Helm tab: u = helm upgrade, b = helm rollback (always confirmed); --read-only disables
   helm_binary: helm               # helm CLI used for actions (with --kubeconfig/--kube-context of this session)
