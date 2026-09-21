@@ -58,7 +58,7 @@ func evalNetwork(in Input, add func(Severity, string, string, string, string)) {
 				continue
 			}
 			if since := in.Now.Sub(c.LastTransitionTime.Time); since < time.Hour && since >= 0 {
-				add(SevInfo, "network", n.Name, fmt.Sprintf("network was unavailable until %s ago (NetworkUnavailable cleared %s)", durText(since), c.LastTransitionTime.Time.Format("15:04:05")), "the CNI (re)started on this node: check its pod's restarts and the node's journal for the reason")
+				add(SevInfo, "network", n.Name, fmt.Sprintf("network was unavailable until %s ago (NetworkUnavailable cleared %s)", roundDur(since), c.LastTransitionTime.Time.Format("15:04:05")), "the CNI (re)started on this node: check its pod's restarts and the node's journal for the reason")
 			}
 		}
 	}
@@ -69,7 +69,7 @@ func evalNetwork(in Input, add func(Severity, string, string, string, string)) {
 			}
 			last := ""
 			if t := cs.LastTerminationState.Terminated; t != nil && !t.FinishedAt.IsZero() {
-				last = fmt.Sprintf(", last %s ago", durText(in.Now.Sub(t.FinishedAt.Time)))
+				last = fmt.Sprintf(", last %s ago", roundDur(in.Now.Sub(t.FinishedAt.Time)))
 				if t.Reason != "" {
 					last += " (" + t.Reason + ")"
 				}
@@ -246,17 +246,4 @@ func shortFile(p string) string {
 		return p[i+1:]
 	}
 	return p
-}
-
-// durText renders a duration for a finding: "3m", "2h10m", "5d".
-func durText(d time.Duration) string {
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
-	}
-	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }

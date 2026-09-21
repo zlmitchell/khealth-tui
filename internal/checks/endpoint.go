@@ -3,7 +3,6 @@ package checks
 import (
 	"fmt"
 	"net/url"
-	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -64,7 +63,7 @@ func Endpoint(apiServer string, nodes []corev1.Node, infos map[string]*nodeinfo.
 			}
 		}
 	}
-	for _, name := range sortedNames(infos) {
+	for _, name := range sortedKeys(infos) {
 		ni := infos[name]
 		if ni == nil || ni.Err != nil || !ni.ControlPlane {
 			continue
@@ -96,15 +95,6 @@ func Endpoint(apiServer string, nodes []corev1.Node, infos map[string]*nodeinfo.
 		rep.Servers = append(rep.Servers, s)
 	}
 	return rep
-}
-
-func sortedNames(m map[string]*nodeinfo.Info) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // evalEndpoint turns the report into findings.

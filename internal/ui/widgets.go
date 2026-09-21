@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -235,13 +236,7 @@ func maxOf(vals []float64) float64 {
 	if len(vals) == 0 {
 		return math.NaN()
 	}
-	m := vals[0]
-	for _, v := range vals[1:] {
-		if v > m {
-			m = v
-		}
-	}
-	return m
+	return slices.Max(vals)
 }
 
 func nan() float64 { return math.NaN() }

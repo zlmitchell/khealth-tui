@@ -7,6 +7,7 @@ package stig
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"k8s-health-tui/internal/nodeinfo"
@@ -693,7 +694,7 @@ func init() {
 				if !strings.HasPrefix(m.Source, "/dev/") || m.Target == "/" || strings.Contains(m.Source, "[") {
 					continue
 				}
-				if !hasOpt(m.Options, "nodev") {
+				if !slices.Contains(m.Options, "nodev") {
 					bad = append(bad, m.Target)
 				}
 			}

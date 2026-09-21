@@ -2,6 +2,7 @@ package nodeinfo
 
 import (
 	"encoding/json"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,14 +127,7 @@ type MountOpt struct {
 }
 
 // Has reports whether the mount carries the option.
-func (m MountOpt) Has(opt string) bool {
-	for _, o := range m.Options {
-		if o == opt {
-			return true
-		}
-	}
-	return false
-}
+func (m MountOpt) Has(opt string) bool { return slices.Contains(m.Options, opt) }
 
 // ModprobeLine is an install/blacklist directive.
 type ModprobeLine struct {

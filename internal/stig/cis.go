@@ -7,6 +7,8 @@ package stig
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -24,7 +26,7 @@ func (e *evaluator) cisRules() {
 
 func (e *evaluator) cisControlPlaneRules() {
 	{
-		nodes := keys(e.apiserver)
+		nodes := slices.Collect(maps.Keys(e.apiserver))
 		g := "apiserver"
 		rk := func(node string) map[string]string { return e.apiserver[node] }
 		e.perNode("CIS-1.2.14", "NodeRestriction admission plugin enabled", "II", g, "kube-apiserver-arg: enable-admission-plugins=NodeRestriction,...", nodes, func(n string) (Status, string) {
@@ -43,14 +45,14 @@ func (e *evaluator) cisControlPlaneRules() {
 		})
 	}
 	{
-		nodes := keys(e.cm)
+		nodes := slices.Collect(maps.Keys(e.cm))
 		g := "controller-manager"
 		rk := func(node string) map[string]string { return e.cm[node] }
 		e.perNode("CIS-1.3.5", "Controller manager root-ca-file set", "II", g, "kube-controller-manager-arg: root-ca-file=<ca>", nodes, func(n string) (Status, string) { return flagSet(rk(n), "root-ca-file") })
 		e.perNode("CIS-1.3.4", "Controller manager service-account-private-key-file set", "II", g, "kube-controller-manager-arg: service-account-private-key-file=<key>", nodes, func(n string) (Status, string) { return flagSet(rk(n), "service-account-private-key-file") })
 	}
 	{
-		nodes := keys(e.sched)
+		nodes := slices.Collect(maps.Keys(e.sched))
 		g := "scheduler"
 		rk := func(node string) map[string]string { return e.sched[node] }
 		e.perNode("CIS-1.4.1", "Scheduler profiling disabled", "II", g, "kube-scheduler-arg: profiling=false", nodes, func(n string) (Status, string) { return flagEq(rk(n), "profiling", "false") })

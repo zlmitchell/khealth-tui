@@ -31,9 +31,9 @@ func S3CheckScript(url, caFile, caPEM string, skipVerify bool) string {
 		b.WriteString(strings.TrimSpace(caPEM))
 		b.WriteString("\nKHEALTH_EOF_CA\n")
 	} else if caFile != "" {
-		b.WriteString("CA='" + clean(caFile) + "'\n")
+		b.WriteString("CA='" + Clean(caFile) + "'\n")
 	}
-	b.WriteString("URL='" + clean(url) + "'\n")
+	b.WriteString("URL='" + Clean(url) + "'\n")
 	b.WriteString("if ! command -v curl >/dev/null 2>&1; then echo 'curl-missing'; else\n")
 	b.WriteString("  ARGS='-sS -m 8 -o /dev/null -w %{http_code}'\n")
 	if skipVerify {

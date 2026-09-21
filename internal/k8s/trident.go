@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -373,10 +374,10 @@ func (ti *TridentInfo) ResolveStorageClasses(classes []storagev1.StorageClass, b
 			}
 			var pools []TridentPool
 			for _, pool := range b.Pools {
-				if len(wantPools) > 0 && !containsStr(wantPools, pool.Name) {
+				if len(wantPools) > 0 && !slices.Contains(wantPools, pool.Name) {
 					continue
 				}
-				if ex, ok := exclude[b.BackendName]; ok && (len(ex) == 0 || containsStr(ex, pool.Name)) {
+				if ex, ok := exclude[b.BackendName]; ok && (len(ex) == 0 || slices.Contains(ex, pool.Name)) {
 					continue
 				}
 				if r.Selector != "" && !labelSelectorMatch(r.Selector, pool.Labels) {
@@ -408,13 +409,4 @@ func (ti *TridentInfo) ResolveStorageClasses(classes []storagev1.StorageClass, b
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
-}
-
-func containsStr(l []string, s string) bool {
-	for _, x := range l {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }

@@ -4,9 +4,10 @@ package ui
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -2663,14 +2664,7 @@ func firstLine(s string) string {
 	return s
 }
 
-func sortedKeys[T any](m map[string]T) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
+func sortedKeys[T any](m map[string]T) []string { return slices.Sorted(maps.Keys(m)) }
 
 // inNamespace reports whether an object namespace matches the active filter.
 func (a *App) inNamespace(ns string) bool {

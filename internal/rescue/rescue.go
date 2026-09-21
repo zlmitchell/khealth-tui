@@ -23,7 +23,6 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -230,10 +229,6 @@ func (p *Plan) JoinURL() string {
 	return "https://" + p.Target.IP + ":" + port
 }
 
-var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9_./:@%=+,-]`)
-
-func clean(s string) string { return unsafeChars.ReplaceAllString(s, "") }
-
 // render returns the common prelude plus the named script with every
 // __KEY__ placeholder substituted (values sanitized to a safe character set).
 func (p *Plan) render(name string, n Node, vars map[string]string) string {
@@ -249,7 +244,7 @@ func (p *Plan) render(name string, n Node, vars map[string]string) string {
 		all[k] = v
 	}
 	for k, v := range all {
-		s = strings.ReplaceAll(s, "__"+k+"__", clean(v))
+		s = strings.ReplaceAll(s, "__"+k+"__", etcd.Clean(v))
 	}
 	return s
 }

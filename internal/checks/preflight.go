@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,7 +115,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		// storage drivers execute host binaries the distribution's rules do not cover
 		if fa.Permissive != "1" && (len(fa.K8sRules) > 0 || !isRancher) {
 			for _, d := range p.CSI.HostDirs {
-				if d == "/var/lib/longhorn" && contains(p.CSI.HostDirs, "/var/lib/longhorn/engine-binaries") {
+				if d == "/var/lib/longhorn" && slices.Contains(p.CSI.HostDirs, "/var/lib/longhorn/engine-binaries") {
 					continue
 				}
 				if _, ok := fa.Covers(d); ok {
@@ -640,15 +641,6 @@ func ruleDir(rule string) string {
 		return d
 	}
 	return ""
-}
-
-func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 // csiOwner names the storage driver that executes from a host directory.

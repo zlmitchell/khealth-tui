@@ -602,7 +602,7 @@ func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, 
 			byNode[o.Node]++
 		}
 		var parts []string
-		for _, n := range sortedKeysInt(byNode) {
+		for _, n := range sortedKeys(byNode) {
 			parts = append(parts, fmt.Sprintf("%s x%d", n, byNode[n]))
 		}
 		add(SevWarn, "storage", d.Driver, fmt.Sprintf("%d orphaned replica directories on the Longhorn disks (%s): leftover data of deleted or failed replicas taking space", len(li.Orphans), strings.Join(parts, ", ")), "kubectl -n longhorn-system get orphans; delete them (kubectl delete orphan <name>) or enable orphan-resource-auto-deletion")
@@ -875,24 +875,6 @@ func imageTag(img string) string {
 	return img
 }
 
-func sortedKeysOf(m map[string][]nodeinfo.StaleMount) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func sortedKeysInt(m map[string]int) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // evalStorageNode cross-checks a node's storage facts with the cluster:
 // network mounts that stopped answering, and Longhorn block devices the
 // node still presents for volumes the cluster has attached elsewhere or
@@ -904,7 +886,7 @@ func evalStorageNode(name string, ni *nodeinfo.Info, in Input, add func(Severity
 	for _, m := range ni.StaleMounts {
 		bySource[m.Source] = append(bySource[m.Source], m)
 	}
-	for _, src := range sortedKeysOf(bySource) {
+	for _, src := range sortedKeys(bySource) {
 		ms := bySource[src]
 		hint := "the server behind the mount is unreachable from this node; processes in D state cannot be killed until it answers or the mount is forced off (umount -f -l)"
 		if in.Snap.IsServiceIP(strings.SplitN(src, ":", 2)[0]) || strings.Contains(ms[0].Mountpoint, "driver.longhorn.io") {

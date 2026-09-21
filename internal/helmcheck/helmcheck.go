@@ -11,12 +11,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,7 +89,7 @@ type Checker struct {
 func New(cfg config.Helm) *Checker {
 	c := &Checker{cfg: cfg, client: &http.Client{Timeout: cfg.Timeout}, indexes: map[string]map[string][]indexEntry{}, fetched: map[string]time.Time{}, extra: map[string]Repo{}, status: map[string]RepoStatus{}}
 	seen := map[string]bool{}
-	for _, name := range sortedNames(cfg.Repos) {
+	for _, name := range slices.Sorted(maps.Keys(cfg.Repos)) {
 		c.repos = append(c.repos, Repo{Name: name, URL: cfg.Repos[name]})
 		seen[name] = true
 	}
@@ -128,15 +129,6 @@ func (c *Checker) Status() []RepoStatus {
 		out = append(out, st)
 	}
 	return out
-}
-
-func sortedNames(m map[string]string) []string {
-	names := make([]string, 0, len(m))
-	for k := range m {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // Lookup returns the latest version for each release, keyed by Release.Key.
@@ -179,19 +171,10 @@ func (c *Checker) allRepos() []Repo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	repos := append([]Repo{}, c.repos...)
-	for _, u := range sortedKeys(c.extra) {
+	for _, u := range slices.Sorted(maps.Keys(c.extra)) {
 		repos = append(repos, c.extra[u])
 	}
 	return repos
-}
-
-func sortedKeys(m map[string]Repo) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func (c *Checker) refreshIndexes(ctx context.Context) {

@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -546,7 +547,7 @@ func (c *Client) ListResources(ctx context.Context) ([]CRDInfo, error) {
 			continue
 		}
 		for _, r := range l.APIResources {
-			if strings.Contains(r.Name, "/") || !hasVerb(r.Verbs, "list") || !hasVerb(r.Verbs, "get") {
+			if strings.Contains(r.Name, "/") || !slices.Contains(r.Verbs, "list") || !slices.Contains(r.Verbs, "get") {
 				continue
 			}
 			name := r.Name
@@ -586,15 +587,6 @@ func (c *Client) ListResources(ctx context.Context) ([]CRDInfo, error) {
 		return out[i].Kind < out[j].Kind
 	})
 	return out, nil
-}
-
-func hasVerb(verbs []string, v string) bool {
-	for _, x := range verbs {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 // CountCRs fills Count for each CRD using limit=1 list calls (parallel).

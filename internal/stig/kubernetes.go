@@ -7,6 +7,8 @@ package stig
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -16,7 +18,7 @@ import (
 )
 
 func (e *evaluator) apiserverRules() {
-	nodes := keys(e.apiserver)
+	nodes := slices.Collect(maps.Keys(e.apiserver))
 	g := "apiserver"
 	rk := func(node string) map[string]string { return e.apiserver[node] }
 	e.perNode("V-242390", "API server anonymous authentication disabled", "I", g, "kube-apiserver-arg: anonymous-auth=false", nodes, func(n string) (Status, string) { return flagEq(rk(n), "anonymous-auth", "false") })
@@ -73,7 +75,7 @@ func (e *evaluator) apiserverRules() {
 }
 
 func (e *evaluator) cmRules() {
-	nodes := keys(e.cm)
+	nodes := slices.Collect(maps.Keys(e.cm))
 	g := "controller-manager"
 	rk := func(node string) map[string]string { return e.cm[node] }
 	e.perNode("V-242381", "Controller manager uses individual service account credentials", "I", g, "kube-controller-manager-arg: use-service-account-credentials=true", nodes, func(n string) (Status, string) { return flagEq(rk(n), "use-service-account-credentials", "true") })
@@ -89,7 +91,7 @@ func (e *evaluator) cmRules() {
 }
 
 func (e *evaluator) schedulerRules() {
-	nodes := keys(e.sched)
+	nodes := slices.Collect(maps.Keys(e.sched))
 	g := "scheduler"
 	rk := func(node string) map[string]string { return e.sched[node] }
 	e.perNode("V-242384", "Scheduler bound to localhost", "II", g, "kube-scheduler-arg: bind-address=127.0.0.1", nodes, func(n string) (Status, string) {
@@ -105,7 +107,7 @@ func (e *evaluator) schedulerRules() {
 func (e *evaluator) etcdRules() {
 	g := "etcd"
 	// Source of truth: kubeadm mirror pod args, or the rke2 generated etcd config file (via SSH probe).
-	nodes := keys(e.etcdArgs)
+	nodes := slices.Collect(maps.Keys(e.etcdArgs))
 	cfgNodes := map[string]string{}
 	for n, p := range e.in.Etcd {
 		for _, cf := range p.ConfigDump {

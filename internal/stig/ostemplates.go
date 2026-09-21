@@ -9,6 +9,7 @@ package stig
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -268,15 +269,6 @@ func fstabOptions(info *nodeinfo.Info, target string) ([]string, bool) {
 	return nil, false
 }
 
-func hasOpt(opts []string, want string) bool {
-	for _, o := range opts {
-		if o == want {
-			return true
-		}
-	}
-	return false
-}
-
 func evalMount(info *nodeinfo.Info, c stigdata.Check, _ string) (Status, string) {
 	mp := c.Str("MOUNTPOINT")
 	if findMount(info, mp) != nil {
@@ -296,10 +288,10 @@ func evalMountOption(info *nodeinfo.Info, c stigdata.Check, _ string) (Status, s
 		return Pass, ""
 	}
 	var probs []string
-	if !hasOpt(m.Options, opt) {
+	if !slices.Contains(m.Options, opt) {
 		probs = append(probs, "mounted without "+opt)
 	}
-	if fo, ok := fstabOptions(info, mp); ok && !hasOpt(fo, opt) {
+	if fo, ok := fstabOptions(info, mp); ok && !slices.Contains(fo, opt) {
 		probs = append(probs, "fstab entry lacks "+opt)
 	}
 	if len(probs) > 0 {
@@ -314,7 +306,7 @@ func evalMountOptionRemote(info *nodeinfo.Info, c stigdata.Check, _ string) (Sta
 	for _, m := range info.Findmnt {
 		switch m.FSType {
 		case "nfs", "nfs4", "cifs", "smb3":
-			if !hasOpt(m.Options, opt) {
+			if !slices.Contains(m.Options, opt) {
 				probs = append(probs, m.Target)
 			}
 		}

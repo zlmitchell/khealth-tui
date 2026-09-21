@@ -242,7 +242,9 @@ type SnapshotFile struct {
 
 var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9_./:@%=+,-]`)
 
-func clean(s string) string { return unsafeChars.ReplaceAllString(s, "") }
+// Clean strips every character outside the set safe to substitute into a
+// shell script.
+func Clean(s string) string { return unsafeChars.ReplaceAllString(s, "") }
 
 // Script renders the probe script with config overrides. full=true also
 // runs the rarely-changing sections (config sources/dumps, snapshot
@@ -253,16 +255,16 @@ func clean(s string) string { return unsafeChars.ReplaceAllString(s, "") }
 func Script(cfg config.Etcd, full, etcdctl bool) string {
 	dirs := make([]string, 0, len(cfg.BackupDirs))
 	for _, d := range cfg.BackupDirs {
-		if c := clean(d); c != "" {
+		if c := Clean(d); c != "" {
 			dirs = append(dirs, c)
 		}
 	}
 	s := script
 	s = strings.ReplaceAll(s, "__EXTRA_DIRS__", strings.Join(dirs, " "))
-	s = strings.ReplaceAll(s, "__EP__", clean(cfg.Endpoint))
-	s = strings.ReplaceAll(s, "__CA__", clean(cfg.CACert))
-	s = strings.ReplaceAll(s, "__CERT__", clean(cfg.ClientCert))
-	s = strings.ReplaceAll(s, "__KEY__", clean(cfg.ClientKey))
+	s = strings.ReplaceAll(s, "__EP__", Clean(cfg.Endpoint))
+	s = strings.ReplaceAll(s, "__CA__", Clean(cfg.CACert))
+	s = strings.ReplaceAll(s, "__CERT__", Clean(cfg.ClientCert))
+	s = strings.ReplaceAll(s, "__KEY__", Clean(cfg.ClientKey))
 	s = strings.ReplaceAll(s, "__FULL__", map[bool]string{true: "1", false: "0"}[full])
 	s = strings.ReplaceAll(s, "__CTL__", map[bool]string{true: "1", false: "0"}[etcdctl])
 	// PERF footer goes before the END marker the parsers look for

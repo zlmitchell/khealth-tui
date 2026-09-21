@@ -459,9 +459,3 @@ func TestConditionSummary(t *testing.T) {
 		t.Errorf("healthy: %q %v", s, bad)
 	}
 }
-
-func TestHasVerb(t *testing.T) {
-	if !hasVerb([]string{"get", "list"}, "list") || hasVerb([]string{"get"}, "list") || hasVerb(nil, "get") {
-		t.Error("hasVerb")
-	}
-}

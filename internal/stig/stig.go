@@ -232,14 +232,6 @@ func (e *evaluator) sshNodes() []string {
 	return nodes
 }
 
-func keys(m map[string]map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
-}
-
 func flagEq(flags map[string]string, name, want string) (Status, string) {
 	v, ok := flags[name]
 	if !ok {
