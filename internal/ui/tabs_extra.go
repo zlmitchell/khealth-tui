@@ -36,7 +36,7 @@ func (a *App) etcdContent() content {
 			etcdNodes++
 		}
 	}
-	add(styleTitle.Render("etcd") + "  " + kv("distribution", s.Distribution) + "  " + kv("etcd nodes", fmt.Sprint(etcdNodes)) + "  " + kv("probes", fmt.Sprintf("%d done, %d pending", len(a.etcd), len(a.etcdPend))) + styleDim.Render("   enter = full config dumps   X = rescue (restore a snapshot)"))
+	add(styleTitle.Render("etcd") + "  " + kv("distribution", s.Distribution) + "  " + kv("etcd nodes", fmt.Sprint(etcdNodes)) + "  " + kv("probes", fmt.Sprintf("%d done, %d pending", len(a.etcd), len(a.etcdPend))) + styleDim.Render("   enter = full config dumps   X = rescue (restore a snapshot)   D = defrag all members, one at a time"))
 	add(a.etcdTiles()...)
 	if !a.sshEnabled {
 		add(styleWarn.Render("SSH collection is off - etcd internals need SSH to the control-plane nodes. API-side view only."))
@@ -620,9 +620,7 @@ func (a *App) etcdDetail() (string, []string) {
 		}
 		for _, cf := range p.ConfigDump {
 			out = append(out, "", styleBold.Render("--- "+cf.Path))
-			for _, l := range strings.Split(cf.Content, "\n") {
-				out = append(out, wrap(l, w)...)
-			}
+			out = append(out, fileLines(cf.Path, cf.Content, w)...)
 		}
 		if p.EtcdctlOut != "" {
 			out = append(out, "", styleBold.Render("--- etcdctl"))
@@ -932,9 +930,7 @@ func (a *App) addonsDetail(id string) (string, []string) {
 	dump := func(files []nodeinfo.ConfigFile) {
 		for _, f := range files {
 			out = append(out, styleBold.Render("--- "+f.Path))
-			for _, l := range strings.Split(f.Content, "\n") {
-				out = append(out, wrap(l, w)...)
-			}
+			out = append(out, fileLines(f.Path, f.Content, w)...)
 		}
 	}
 	switch kind {
@@ -999,15 +995,11 @@ func (a *App) addonsDetail(id string) (string, []string) {
 			}
 			if hc.ValuesContent != "" {
 				out = append(out, "", styleTitle.Render("HelmChart valuesContent"))
-				for _, l := range strings.Split(hc.ValuesContent, "\n") {
-					out = append(out, wrap(l, w)...)
-				}
+				out = append(out, yamlLines(hc.ValuesContent, w)...)
 			}
 			if hc.HasConfig {
 				out = append(out, "", styleTitle.Render("HelmChartConfig overrides"))
-				for _, l := range strings.Split(hc.ConfigValues, "\n") {
-					out = append(out, wrap(l, w)...)
-				}
+				out = append(out, yamlLines(hc.ConfigValues, w)...)
 			} else {
 				out = append(out, "", styleDim.Render("no HelmChartConfig override"))
 			}
@@ -1030,21 +1022,15 @@ func (a *App) addonsDump() (string, []string) {
 		out = append(out, styleTitle.Render("== "+n+" =="))
 		for _, f := range ni.ConfigFiles {
 			out = append(out, styleBold.Render("--- "+f.Path))
-			for _, l := range strings.Split(f.Content, "\n") {
-				out = append(out, wrap(l, w)...)
-			}
+			out = append(out, fileLines(f.Path, f.Content, w)...)
 		}
 		for _, f := range ni.Registries {
 			out = append(out, styleBold.Render("--- "+f.Path))
-			for _, l := range strings.Split(f.Content, "\n") {
-				out = append(out, wrap(l, w)...)
-			}
+			out = append(out, fileLines(f.Path, f.Content, w)...)
 		}
 		for _, f := range ni.ContainerdConfig {
 			out = append(out, styleBold.Render("--- "+f.Path))
-			for _, l := range strings.Split(f.Content, "\n") {
-				out = append(out, wrap(l, w)...)
-			}
+			out = append(out, fileLines(f.Path, f.Content, w)...)
 		}
 		out = append(out, "")
 	}
@@ -1052,9 +1038,7 @@ func (a *App) addonsDump() (string, []string) {
 		for _, hc := range s.HelmCharts {
 			if hc.HasConfig {
 				out = append(out, styleBold.Render("--- HelmChartConfig "+hc.Namespace+"/"+hc.Name))
-				for _, l := range strings.Split(hc.ConfigValues, "\n") {
-					out = append(out, wrap(l, w)...)
-				}
+				out = append(out, yamlLines(hc.ConfigValues, w)...)
 			}
 		}
 	}
@@ -1133,8 +1117,10 @@ func (a *App) helmContent() content {
 			latest = styleDim.Render("off (helm.check_updates)")
 		}
 		name := r.Name
-		if r.Bundled {
+		if r.CRShipped {
 			name += styleDim.Render(" (rke2)")
+		} else if r.Bundled {
+			name += styleDim.Render(" (HelmChart)")
 		}
 		rows = append(rows, []string{r.Namespace, name, r.Chart, r.Version, r.AppVersion, fmt.Sprintf("%d/%d", r.Revision, len(r.History)), st, age(r.Updated), latest})
 		ids = append(ids, r.Namespace+"/"+r.Name)
@@ -1214,7 +1200,11 @@ func (a *App) helmDetail(id string) (string, []string) {
 		}
 		out = append(out, "", styleTitle.Render("Origin")+styleDim.Render("  helm does not record the repository a chart was pulled from; this is the evidence in the release's Chart.yaml"))
 		if r.ChartRepo != "" {
-			out = append(out, kv("rke2 HelmChart", r.ChartRepo))
+			if r.CRShipped {
+				out = append(out, kv("rke2 HelmChart", r.ChartRepo)+"  "+styleDim.Render("shipped with rke2 (spec.chartContent); upgraded with the rke2 release, values via HelmChartConfig"))
+			} else {
+				out = append(out, kv("HelmChart CR", r.CRNamespace+"/"+r.Name)+"  "+kv("source", r.ChartRepo)+"  "+styleDim.Render("your own HelmChart manifest; u patches its spec.version"))
+			}
 		}
 		if r.Home != "" {
 			out = append(out, kv("home", r.Home))
@@ -1244,9 +1234,7 @@ func (a *App) helmDetail(id string) (string, []string) {
 			out = append(out, "", styleTitle.Render("User-supplied values (helm get values)"), styleDim.Render("(none - chart defaults)"))
 		} else {
 			out = append(out, "", styleTitle.Render("User-supplied values (helm get values)")+styleDim.Render(fmt.Sprintf("  %d lines", strings.Count(r.ValuesYAML, "\n")+1)))
-			for _, l := range strings.Split(r.ValuesYAML, "\n") {
-				out = append(out, wrap(l, a.width-6)...)
-			}
+			out = append(out, yamlLines(r.ValuesYAML, a.width-6)...)
 		}
 		return "Helm release " + id, out
 	}

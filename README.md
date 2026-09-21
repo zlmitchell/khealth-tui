@@ -34,11 +34,11 @@ Walkthrough videos (mp4, open the link or clone the repo):
 | 1   | Overview | API`readyz`/`livez`, cluster summary, ranked findings CRIT/WARN/INFO                                                                                    |
 | 2   | Nodes    | conditions, version skew, live CPU/mem/load, disks, unit state; Enter: mounts, certs, sysctls, kubelet args                                                 |
 | 3   | Inspect  | controllers / pods / every API type incl. CRDs; object inspector that drills through owner, children, secrets, PVCs;`L` tails logs                        |
-| 4   | etcd     | members, leader, health, db size, latency, alarms, config source, snapshots;**Triage** cases; `X` = rescue (rejoin a server / restore a snapshot)   |
+| 4   | etcd     | members, leader, health, db size, latency, alarms, config source, snapshots;**Triage** cases; `X` = rescue (rejoin a server / restore a snapshot); `D` = defrag all members one at a time |
 | 5   | Storage  | StorageClasses, CSI drivers, PVC used capacity, backend health (Longhorn, Trident, Ceph); Enter: full claim/volume detail                                   |
 | 6   | Events   | warning events, newest first                                                                                                                                |
 | 7   | Addons   | CNI + MTU + node-side network probes, CoreDNS/ingress/metrics-server, Rancher agents,`registries.yaml` vs containerd, upgrade plans, provisioned clusters |
-| 8   | Helm     | releases from`sh.helm.release.v1` secrets, values, history, update check; `u` upgrade, `b` rollback, `B` roll a failed release back to the last deployed revision |
+| 8   | Helm     | releases from`sh.helm.release.v1` secrets, values, history, update check; `u` upgrade (helm, or your HelmChart CR's spec.version), `b` rollback, `B` roll a failed release back to the last deployed revision |
 | 9   | Images   | per node: images, unused images, airgap tarballs vs what is running                                                                                         |
 | 0   | Security | opt-in scan (`Shift+S`): Kubernetes / RKE2 / Rancher MCM STIG, CIS, node hardening, full OS STIG per node                                                 |
 | =   | RKE2     | control-plane isolation,`config.yaml(.d)` per node, manifests, config drift between servers                                                               |

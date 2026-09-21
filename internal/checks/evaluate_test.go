@@ -299,6 +299,43 @@ func TestEvaluateRichCluster(t *testing.T) {
 	}
 }
 
+// TestServiceUnitPairs: rke2/k3s ship both the server and the agent unit;
+// the inactive one next to the active one is normal, and a leftover
+// etcd.service on a static-pod distribution is not the cluster's etcd.
+func TestServiceUnitPairs(t *testing.T) {
+	eval := func(cp bool, dist string, svcs ...nodeinfo.Service) []string {
+		ni := &nodeinfo.Info{Node: "n1", Dist: dist, ControlPlane: cp, Services: svcs, Collected: time.Now()}
+		var got []string
+		for _, f := range Evaluate(Input{Snap: &k8s.Snapshot{Nodes: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}}}, Nodes: map[string]*nodeinfo.Info{"n1": ni}, SSHEnabled: true, Cfg: config.Default()}) {
+			if strings.HasPrefix(f.Message, "service ") {
+				got = append(got, f.Message)
+			}
+		}
+		return got
+	}
+	dead := func(n string) nodeinfo.Service {
+		return nodeinfo.Service{Name: n, Load: "loaded", Active: "inactive", Sub: "dead"}
+	}
+	up := func(n string) nodeinfo.Service {
+		return nodeinfo.Service{Name: n, Load: "loaded", Active: "active", Sub: "running"}
+	}
+	if got := eval(true, "rke2", up("rke2-server"), dead("rke2-agent"), dead("etcd")); len(got) != 0 {
+		t.Errorf("server node with the agent unit idle: %v", got)
+	}
+	if got := eval(false, "rke2", dead("rke2-server"), up("rke2-agent")); len(got) != 0 {
+		t.Errorf("agent node with the server unit idle: %v", got)
+	}
+	if got := eval(true, "rke2", dead("rke2-server"), dead("rke2-agent")); len(got) != 1 || !strings.Contains(got[0], "rke2-server") {
+		t.Errorf("server node with nothing running should name rke2-server only: %v", got)
+	}
+	if got := eval(false, "k3s", dead("k3s"), dead("k3s-agent")); len(got) != 1 || !strings.Contains(got[0], "k3s-agent") {
+		t.Errorf("k3s agent node with nothing running should name k3s-agent only: %v", got)
+	}
+	if got := eval(true, "rke2", up("rke2-server"), dead("kubelet")); len(got) != 1 || !strings.Contains(got[0], "kubelet") {
+		t.Errorf("kubelet stays critical: %v", got)
+	}
+}
+
 func TestHelmReleaseFix(t *testing.T) {
 	failed := k8s.HelmRelease{Namespace: "default", Name: "web", Revision: 3, Status: "failed", History: []k8s.HelmRevision{{Revision: 3, Status: "failed"}, {Revision: 2, Status: "deployed"}}}
 	if fix := helmReleaseFix(failed); !strings.Contains(fix, "helm rollback web 2 -n default") || !strings.Contains(fix, "B on the Helm tab") {

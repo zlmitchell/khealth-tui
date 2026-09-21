@@ -419,6 +419,76 @@ func TestHelmActionOverlays(t *testing.T) {
 	}
 }
 
+// TestEtcdDefragKey: D on the etcd tab needs the kubectl-exec probe, then
+// confirms a member-by-member defrag whose overlay lists every member with
+// its reclaimable share, the leader marked last.
+func TestEtcdDefragKey(t *testing.T) {
+	a := testApp()
+	a.tab = tabEtcd
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if a.overlay != ovNone || !strings.Contains(a.status, "kubectl exec probe") {
+		t.Fatalf("without the exec probe D should explain: overlay %v status %q", a.overlay, a.status)
+	}
+	a.etcdExec = &etcd.Probe{Node: "cp-1", Dist: "rke2", EtcdctlVia: "kubectl exec etcd-cp-1",
+		Members:  []etcd.Member{{ID: "1", Name: "cp-1", ClientURLs: []string{"https://10.0.0.1:2379"}}, {ID: "2", Name: "cp-2", ClientURLs: []string{"https://10.0.0.2:2379"}}},
+		Statuses: []etcd.EndpointStatus{{MemberID: "1", Leader: "1", DBSize: 4 << 20, DBSizeInUse: 1 << 20}, {MemberID: "2", Leader: "1", DBSize: 4 << 20, DBSizeInUse: 3 << 20}},
+		Alarms:   []etcd.Alarm{{MemberID: "2", Type: "NOSPACE"}}}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if a.overlay != ovConfirm || a.pendingAct == nil || a.pendingAct.run == nil {
+		t.Fatalf("D should confirm the defrag, got %v (status %q)", a.overlay, a.status)
+	}
+	v := ansi.Strip(a.View())
+	for _, want := range []string{"Defragment etcd: 2 members", "cp-1 (leader, last)", "75% reclaimable", "25% reclaimable", "NOSPACE@2", "etcd-cp-1"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("confirm overlay should contain %q: %s", want, v)
+		}
+	}
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
+	a.actionRunning = true
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if !strings.Contains(a.status, "still running") {
+		t.Errorf("D while an action runs: %q", a.status)
+	}
+	a.actionRunning = false
+	a.cfg.Actions.Enabled = false
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if a.overlay != ovNone || !strings.Contains(a.status, "disabled") {
+		t.Errorf("read-only should block defrag: %q", a.status)
+	}
+}
+
+// TestHelmChartUpgrade: a release owned by the rke2/k3s helm controller is
+// upgraded by patching its HelmChart CR (no helm binary), unless the chart
+// ships inside rke2 (chartContent), which is refused with an explanation.
+func TestHelmChartUpgrade(t *testing.T) {
+	a := testApp()
+	a.cfg.Actions.HelmBinary = "definitely-not-a-binary-on-this-host"
+	a.tab = tabHelm
+	rel := &a.snap.HelmReleases[0]
+	rel.Bundled, rel.CRNamespace, rel.ChartRepo = true, "kube-system", "https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts csi-driver-nfs"
+	a.helmLatest["default/web"] = helmcheck.Latest{Version: "16.0.0", Source: "repo"}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if a.overlay != ovConfirm || a.pendingAct == nil || a.pendingAct.run == nil || !strings.Contains(a.pendingAct.title, "Upgrade HelmChart kube-system/web") {
+		t.Fatalf("u on a user HelmChart should confirm a CR patch, got %v %+v (status %q)", a.overlay, a.pendingAct, a.status)
+	}
+	if v := ansi.Strip(a.View()); !strings.Contains(v, "spec.version") || !strings.Contains(v, "(API call)") {
+		t.Errorf("confirm should describe the patch:\n%s", v)
+	}
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if v := ansi.Strip(a.currentContent().rows[0].text); !strings.Contains(v, "(HelmChart)") {
+		t.Errorf("row should be tagged (HelmChart), got %q", v)
+	}
+	rel.CRShipped = true
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if a.overlay != ovNone || !strings.Contains(a.status, "shipped inside rke2") {
+		t.Errorf("u on an rke2-shipped chart should refuse: overlay %v status %q", a.overlay, a.status)
+	}
+	if v := ansi.Strip(a.currentContent().rows[0].text); !strings.Contains(v, "(rke2)") {
+		t.Errorf("row should be tagged (rke2), got %q", v)
+	}
+	a.cfg.Actions.Enabled = false
+}
+
 // TestHelmRollbackFailedRelease: after two failed upgrades the picker must
 // preselect the revision that last deployed (not the previous failure), B
 // goes straight to its confirmation, a failed action refreshes so the new
@@ -676,5 +746,76 @@ func TestPodLogsRenderCache(t *testing.T) {
 	lv.lines = lv.lines[10:]
 	if v := a.logVisibleLines(); len(v) != 41 || !strings.Contains(v[0], "line 10") {
 		t.Errorf("trimmed buffer render: %d lines, first %q", len(v), v[0])
+	}
+}
+
+// TestScrollAboveFirstRow: on a tab whose first selectable row sits below a
+// page of explanatory text, k at that row scrolls the page up so the text
+// can be read (the cursor stays), g goes to the true top, and the next
+// cursor move pins the view to the cursor again.
+func TestScrollAboveFirstRow(t *testing.T) {
+	a := testApp()
+	a.tab = tabAddons
+	c := a.currentContent()
+	rows := a.filteredRows(c)
+	first := nearestRow(rows, 0)
+	if !c.selectable || first < 3 || rows[first].id == "" {
+		t.Skipf("Addons fixture has no text above its first row (first=%d)", first)
+	}
+	// a screen where the first row does not fit on the first page
+	a.height = len(c.header) + 5 + first/2
+	a.frame = frameCache{}
+	_ = a.View()
+	// entering: the page starts at its first line, the cursor on the first
+	// row below the fold
+	if a.cursor[a.tab] != first || a.scroll[a.tab] != 0 {
+		t.Fatalf("entering: cursor %d (want %d) scroll %d (want 0)", a.cursor[a.tab], first, a.scroll[a.tab])
+	}
+	// j with the cursor below the fold scrolls one line, the cursor stays
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_ = a.View()
+	if a.cursor[a.tab] != first || a.scroll[a.tab] != 1 {
+		t.Fatalf("j below the fold: cursor %d scroll %d (want %d, 1)", a.cursor[a.tab], a.scroll[a.tab], first)
+	}
+	// keep going until the row is on screen, then j moves the cursor
+	visible := a.bodyHeight() - len(c.header)
+	for n := 0; n < first && first >= a.scroll[a.tab]+visible; n++ {
+		a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	}
+	if a.cursor[a.tab] != first {
+		t.Fatalf("scrolling to the row must not move the cursor: %d", a.cursor[a.tab])
+	}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if a.cursor[a.tab] <= first {
+		t.Fatalf("once the row is on screen j moves the cursor: %d", a.cursor[a.tab])
+	}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	_ = a.View()
+	before := a.scroll[a.tab]
+	if a.cursor[a.tab] != first || before == 0 {
+		t.Fatalf("j,k: cursor %d scroll %d", a.cursor[a.tab], before)
+	}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	_ = a.View()
+	if a.scroll[a.tab] != before-1 || a.cursor[a.tab] != first {
+		t.Errorf("k at the first row should scroll up one line and keep the cursor: scroll %d->%d cursor %d", before, a.scroll[a.tab], a.cursor[a.tab])
+	}
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	_ = a.View()
+	if a.scroll[a.tab] != 0 || a.cursor[a.tab] != first {
+		t.Errorf("g should show the top of the page: scroll %d cursor %d", a.scroll[a.tab], a.cursor[a.tab])
+	}
+	for n := 0; n <= first && a.cursor[a.tab] == first; n++ {
+		a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	}
+	_ = a.View()
+	if a.cursor[a.tab] <= first || a.cursor[a.tab] >= a.scroll[a.tab]+visible || a.cursor[a.tab] < a.scroll[a.tab] {
+		t.Errorf("j should move the cursor and bring it back on screen: cursor %d scroll %d visible %d", a.cursor[a.tab], a.scroll[a.tab], visible)
+	}
+	// the filter resets everything, including the free scroll
+	a.freeScroll[a.tab] = true
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if a.freeScroll[a.tab] {
+		t.Errorf("a problems toggle should re-pin the view")
 	}
 }

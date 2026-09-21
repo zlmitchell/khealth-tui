@@ -161,12 +161,16 @@ type App struct {
 	// may have changed it: building a tab (highlighting every log line,
 	// measuring every table cell) costs tens of milliseconds on a busy
 	// node's log view, and View runs on every spinner tick and keypress.
-	frame    frameCache
-	cursor   [tabCount]int
-	scroll   [tabCount]int
-	filters  [tabCount]string
-	filter   textinput.Model
-	filterOn bool
+	frame  frameCache
+	cursor [tabCount]int
+	scroll [tabCount]int
+	// the view was scrolled away from the cursor on purpose (k at the first
+	// row to read the text above a table, j past the last row, g): clamp
+	// leaves the scroll alone until the cursor moves again
+	freeScroll [tabCount]bool
+	filters    [tabCount]string
+	filter     textinput.Model
+	filterOn   bool
 
 	overlay      overlayKind
 	nsInput      textinput.Model
@@ -177,6 +181,8 @@ type App struct {
 	detailRaw    []string // the detail as produced: long lines intact
 	detailLines  []string // detailRaw laid out for the overlay (wrapped when detailWrap)
 	detailWrap   bool     // w in the overlay; remembered for the session
+	detailFind   textFind // / in the overlay
+	inspectFind  textFind // / in the inspector (YAML and the rest of the page)
 	detailScroll int
 	status       string
 	statusAt     time.Time
@@ -251,6 +257,7 @@ func (a *App) inInspect() bool { return a.subName() == subInspect }
 // showInspect switches to the tab's Inspect sub-tab, or opens the overlay
 // when the tab has none.
 func (a *App) showInspect() {
+	a.inspectFind.clear() // a new page: the find belongs to the page it was typed on
 	for i, n := range subTabs[a.tab] {
 		if n == subInspect {
 			a.sub[a.tab] = i
@@ -1364,11 +1371,13 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			a.filter, cmd = a.filter.Update(m)
 			a.filters[a.tab] = a.filter.Value()
-			a.cursor[a.tab] = 0
-			a.scroll[a.tab] = 0
+			a.cursor[a.tab], a.scroll[a.tab], a.freeScroll[a.tab] = 0, 0, false
 			return a, cmd
 		}
 		return a, nil
+	}
+	if a.inInspect() && a.inspectFind.typing {
+		return a.handleInspectKey(key) // digits and - = are query text, not tab keys
 	}
 	for i, k := range tabKeys {
 		if key == k {
@@ -1378,7 +1387,7 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if a.inInspect() {
 		switch key {
-		case "esc", "backspace", "q", "j", "k", "down", "up", "enter", "J", "K", "pgdown", "pgup", " ", "ctrl+d", "ctrl+u", "g", "G", "home", "end":
+		case "esc", "backspace", "q", "j", "k", "down", "up", "enter", "J", "K", "pgdown", "pgup", " ", "ctrl+d", "ctrl+u", "g", "G", "home", "end", "/", "n", "N":
 			// q steps back out of the inspector like esc; it only quits from a top-level view
 			return a.handleInspectKey(key)
 		}
@@ -1418,6 +1427,14 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if a.tab == tabEtcd && key == "X" {
 		return a, a.openRescue()
+	}
+	if a.tab == tabEtcd && key == "D" {
+		if a.actionRunning {
+			a.setStatus("an action is still running")
+			return a, nil
+		}
+		a.startEtcdDefrag()
+		return a, nil
 	}
 	if a.tab == tabHelm && a.snap != nil {
 		switch key {
@@ -1525,13 +1542,11 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.logsAll = !a.logsAll
 		}
 		a.problemOnly = !a.problemOnly
-		a.cursor[a.tab] = 0
-		a.scroll[a.tab] = 0
+		a.cursor[a.tab], a.scroll[a.tab], a.freeScroll[a.tab] = 0, 0, false
 	case "m":
 		if a.tab == tabSecurity {
 			a.hideManual = !a.hideManual
-			a.cursor[a.tab] = 0
-			a.scroll[a.tab] = 0
+			a.cursor[a.tab], a.scroll[a.tab], a.freeScroll[a.tab] = 0, 0, false
 		}
 	case "/":
 		a.filterOn = true
@@ -1577,12 +1592,16 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k", "up":
 		a.move(-1)
 	case "g", "home":
+		// the top of the page, text above the first row included; the cursor
+		// sits on the first row even when that is below the fold
 		a.cursor[a.tab] = 0
 		a.scroll[a.tab] = 0
+		a.freeScroll[a.tab] = true
 		a.clamp(a.currentContent())
 	case "G", "end":
 		a.cursor[a.tab] = 1 << 30
 		a.scroll[a.tab] = 1 << 30
+		a.freeScroll[a.tab] = false
 		a.clamp(a.currentContent())
 	case "pgdown", "ctrl+d", " ":
 		a.move(a.bodyHeight() - 2)
@@ -1600,6 +1619,18 @@ func (a *App) move(delta int) {
 		return
 	}
 	rows := a.filteredRows(c)
+	// the cursor is off screen (a fresh page shows its top, the cursor sits
+	// on the first row below the fold): scroll the page toward it line by
+	// line instead of leaping to the next row
+	if a.freeScroll[a.tab] {
+		visible := a.bodyHeight() - len(c.header)
+		cur := a.cursor[a.tab]
+		if cur < a.scroll[a.tab] || cur >= a.scroll[a.tab]+visible {
+			a.scroll[a.tab] += delta
+			a.clamp(c)
+			return
+		}
+	}
 	target := a.cursor[a.tab] + delta
 	if target < 0 {
 		target = 0
@@ -1612,13 +1643,21 @@ func (a *App) move(delta int) {
 		dir = -1
 	}
 	// headings and blank lines carry no id: land on the next real row in the
-	// direction of travel, or stay put when there is none
+	// direction of travel
 	for i := target; i >= 0 && i < len(rows); i += dir {
 		if rows[i].id != "" {
-			a.cursor[a.tab] = i
-			break
+			if i != a.cursor[a.tab] {
+				a.cursor[a.tab] = i
+				a.freeScroll[a.tab] = false
+			}
+			a.clamp(c)
+			return
 		}
 	}
+	// no row that way: scroll the page instead, so the text above the first
+	// table row (or below the last) can be read; the cursor stays where it is
+	a.scroll[a.tab] += delta
+	a.freeScroll[a.tab] = true
 	a.clamp(c)
 }
 
@@ -1640,13 +1679,28 @@ func (a *App) clamp(c content) {
 			a.cursor[a.tab] = len(rows) - 1
 		}
 		if rows[a.cursor[a.tab]].id == "" {
+			// a fresh page (cursor and scroll at 0): the cursor takes the first
+			// real row but the view stays at the top, so the text above the
+			// first table is what you see first, not the last lines before it
+			fresh := a.cursor[a.tab] == 0 && a.scroll[a.tab] == 0
 			a.cursor[a.tab] = nearestRow(rows, a.cursor[a.tab])
+			if fresh {
+				a.freeScroll[a.tab] = true
+			}
 		}
-		if a.cursor[a.tab] < a.scroll[a.tab] {
-			a.scroll[a.tab] = a.cursor[a.tab]
-		}
-		if a.cursor[a.tab] >= a.scroll[a.tab]+visible {
-			a.scroll[a.tab] = a.cursor[a.tab] - visible + 1
+		if a.freeScroll[a.tab] {
+			// page scrolling with the cursor pinned at an edge: keep the scroll
+			// inside the content, the cursor may be off screen
+			if maxScroll := len(rows) - visible; a.scroll[a.tab] > maxScroll {
+				a.scroll[a.tab] = maxScroll
+			}
+		} else {
+			if a.cursor[a.tab] < a.scroll[a.tab] {
+				a.scroll[a.tab] = a.cursor[a.tab]
+			}
+			if a.cursor[a.tab] >= a.scroll[a.tab]+visible {
+				a.scroll[a.tab] = a.cursor[a.tab] - visible + 1
+			}
 		}
 	} else {
 		maxScroll := len(rows) - visible
@@ -1682,7 +1736,7 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := m.String()
 	// tab switching is disabled while a modal view is open: say so instead
 	// of silently swallowing the key (pod logs use tab/[ ] for containers)
-	if a.overlay != ovPodLogs && a.overlay != ovNamespace && a.overlay != ovRescue {
+	if a.overlay != ovPodLogs && a.overlay != ovNamespace && a.overlay != ovRescue && !(a.overlay == ovDetail && a.detailFind.typing) {
 		switch key {
 		case "tab", "shift+tab", "[", "]", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "left", "right", "h", "l":
 			if a.overlay != ovInspect || key == "tab" || key == "shift+tab" {
@@ -1739,7 +1793,7 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				a.namespace = ns
 				for t := range a.cursor {
-					a.cursor[t], a.scroll[t] = 0, 0
+					a.cursor[t], a.scroll[t], a.freeScroll[t] = 0, 0, false
 				}
 			}
 			a.overlay = ovNone
@@ -1761,8 +1815,36 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case ovDetail:
 		visible := a.height - 6
+		if consumed, changed := a.detailFind.handleKey(key); consumed {
+			if changed {
+				a.detailFind.run(a.detailLines, a.detailScroll)
+				if h, ok := a.detailFind.current(); ok {
+					a.detailScroll = jumpScroll(h, visible, len(a.detailLines)-visible)
+				}
+			}
+			return a, nil
+		}
 		switch key {
-		case "esc", "q", "enter":
+		case "/":
+			a.detailFind = textFind{typing: true}
+			return a, nil
+		case "n", "N":
+			d := 1
+			if key == "N" {
+				d = -1
+			}
+			if h, ok := a.detailFind.step(d); ok {
+				a.detailScroll = jumpScroll(h, visible, len(a.detailLines)-visible)
+			} else if a.detailFind.query == "" {
+				a.setStatus("/ finds text in this view first; n/N then jump between the hits")
+			}
+		case "esc":
+			if a.detailFind.active() {
+				a.detailFind.clear()
+			} else {
+				a.overlay = ovNone
+			}
+		case "q", "enter":
 			a.overlay = ovNone
 		case "j", "down":
 			a.detailScroll++
@@ -1821,7 +1903,7 @@ func (a *App) switchContext(c k8s.ContextInfo) tea.Cmd {
 	a.hist, a.crdCounts, a.inspect = nil, nil, nil
 	a.logsNode, a.namespace = "", ""
 	for t := range a.cursor {
-		a.cursor[t], a.scroll[t], a.filters[t] = 0, 0, ""
+		a.cursor[t], a.scroll[t], a.filters[t], a.freeScroll[t] = 0, 0, "", false
 	}
 	if a.cfg.SSH.Enabled {
 		// the cluster remembers how its nodes were reached (khealth context
@@ -2044,6 +2126,7 @@ func (a *App) selectedID() string {
 // unless wrapping is on (w toggles it; the choice sticks for the session).
 func (a *App) setDetail(title string, lines []string) {
 	a.detailTitle, a.detailRaw, a.detailScroll = title, lines, 0
+	a.detailFind.clear()
 	a.layoutDetail()
 	a.overlay = ovDetail
 }
@@ -2060,6 +2143,9 @@ func (a *App) layoutDetail() {
 		out = append(out, wrapStyled(l, w)...)
 	}
 	a.detailLines = out
+	if a.detailFind.query != "" {
+		a.detailFind.run(a.detailLines, a.detailScroll)
+	}
 }
 
 func (a *App) openDetail() {
@@ -2378,7 +2464,7 @@ func (a *App) renderFooter() string {
 	// row is inactive until it closes
 	switch a.overlay {
 	case ovDetail, ovHelp:
-		keys = []string{"esc close", "j/k scroll", "PgUp/PgDn page", "g/G top/bottom", "(tabs resume after esc)"}
+		keys = []string{"esc close", "j/k scroll", "PgUp/PgDn page", "g/G top/bottom", "/ find", "n/N next/prev hit", "(tabs resume after esc)"}
 	case ovConfirm, ovRevisions:
 		keys = []string{"esc cancel", "enter confirm", "j/k choose", "(tabs resume after esc)"}
 	case ovNamespace:
@@ -2386,9 +2472,9 @@ func (a *App) renderFooter() string {
 	case ovContext:
 		keys = []string{"esc cancel", "enter switch", "j/k choose"}
 	case ovInspect:
-		keys = []string{"esc back", "enter drill down", "j/k move", "q close", "(tabs resume after esc)"}
+		keys = []string{"esc back", "enter drill down", "j/k move", "/ find", "n/N next/prev hit", "q close", "(tabs resume after esc)"}
 	case ovPodLogs:
-		keys = []string{"esc close", "[ ]/tab container", "{ } pod", "p previous", "f follow", "w wrap", "T timestamps", "H highlight", "r reload"}
+		keys = []string{"esc close", "[ ]/tab container", "{ } pod", "p previous", "f follow", "w wrap", "/ find", "n/N hit", "& only hits", "T timestamps", "H highlight", "r reload"}
 	case ovRescue:
 		keys = []string{"esc cancel/back", "j/k choose", "enter next"}
 		if r := a.rescue; r != nil {
@@ -2505,11 +2591,17 @@ func (a *App) renderOverlay() string {
 		if end > len(a.detailLines) {
 			end = len(a.detailLines)
 		}
-		lines = append(lines, a.detailLines[a.detailScroll:end]...)
+		for i := a.detailScroll; i < end; i++ {
+			lines = append(lines, a.detailFind.render(a.detailLines[i], i))
+		}
+		find := a.detailFind.status()
+		if find != "" {
+			find = "  " + find
+		}
 		if len(a.detailLines) > visible {
-			lines = append(lines, styleDim.Render(fmt.Sprintf("-- %d-%d of %d (j/k, PgUp/PgDn, w wrap, esc closes) --", a.detailScroll+1, end, len(a.detailLines))))
+			lines = append(lines, styleDim.Render(fmt.Sprintf("-- %d-%d of %d (j/k, PgUp/PgDn, / find, w wrap, esc closes) --", a.detailScroll+1, end, len(a.detailLines)))+find)
 		} else {
-			lines = append(lines, styleDim.Render("-- w wrap, esc closes --"))
+			lines = append(lines, styleDim.Render("-- / find, w wrap, esc closes --")+find)
 		}
 	}
 	inner := a.width - 4
@@ -2568,7 +2660,7 @@ func helpLines(width int) []string {
 
 	section("Everywhere", keyCols, [][]string{
 		{key("n"), "choose namespace (shows PSA level + privileged pods; filters Inspect, Events, Storage, Helm)"},
-		{key("/"), "filter rows on the current tab (substring); esc clears"},
+		{key("/"), "filter rows on the current tab (substring); esc clears. Inside a detail view, the inspector or the pod log tailer: find text in that page (the YAML included), hits highlighted as you type, n/N jump to the next/previous hit, esc clears; in the tailer & narrows the view to the matching lines"},
 		{key("a"), "toggle problems-only view (Overview, Inspect, Events, Security, Resources)"},
 		{key("r"), "refresh now (API + light SSH collection)"},
 		{key("R"), "full refresh: journal logs, images, tarballs, PV du (not the OS STIG)"},
@@ -2585,12 +2677,13 @@ func helpLines(width int) []string {
 		{"", key("p"), "jump to the Pods sub-tab"},
 		{"", key("t"), "rollout restart (Deployment/DaemonSet/StatefulSet, confirmed)"},
 		{"Helm", key("enter"), "values + history"},
-		{"", key("u"), "upgrade to the newest known version (confirmed)"},
+		{"", key("u"), "upgrade to the newest known version: helm upgrade, or spec.version on your HelmChart CR (confirmed)"},
 		{"", key("b"), "rollback (pick revision; the last one that deployed is preselected, confirmed)"},
 		{"", key("B"), "rollback a failed / pending-* release straight to the last revision that deployed (confirmed)"},
 		{"Nodes", key("enter"), "node dashboard: gauges, security runtime-vs-boot, services, filesystems, certs"},
 		{"etcd", key("enter"), "raw probe output and config dumps"},
 		{"", key("X"), "rescue: rejoin one broken server (quorum fine) or restore a snapshot onto the whole control plane (SSH + actions enabled; preflight, warnings and a typed confirmation first)"},
+		{"", key("D"), "defragment every etcd member, one at a time (followers first, leader last, health check between; etcdctl via kubectl exec; confirmed)"},
 		{"Logs", key("enter"), "node lines; enter again = full line + explanation"},
 		{"", key("a"), "include info lines"},
 		{"Events", key("enter"), "open the involved object in the inspector"},
@@ -2623,7 +2716,7 @@ func helpLines(width int) []string {
 		{"Storage", "StorageClasses, CSI drivers, PVs/PVCs and node filesystems"},
 		{"Events", "warning events"},
 		{"Addons", "CNI, CSI, DNS/ingress/metrics, registry mirrors (registries.yaml on rke2/k3s, containerd certs.d elsewhere), Rancher management + join topology (rke2/k3s, or a cluster registered in Rancher), rke2 HelmCharts"},
-		{"Helm", "releases (enter = values applied), optional update check; u = helm upgrade to the newest known chart version, b = helm rollback to a chosen revision, B = roll a failed or stuck (pending-*) release back to the last revision that deployed (all confirm first; need the helm CLI; --read-only disables them; rke2-bundled charts are refused for upgrade)"},
+		{"Helm", "releases (enter = values applied), optional update check; u = upgrade to the newest known chart version (helm upgrade, or a spec.version patch on your own HelmChart CR when the rke2/k3s helm controller owns the release), b = helm rollback to a chosen revision, B = roll a failed or stuck (pending-*) release back to the last revision that deployed (all confirm first; helm/rollback need the helm CLI; --read-only disables them; charts shipped inside rke2 are refused for upgrade)"},
 		{"Images", "per-node image inventory, unused images, airgap tarball contents vs running"},
 		{"Security", "Rules: DISA Kubernetes / RKE2 / Rancher MCM STIG + CIS checks from component flags, kubelet config, PSA, RBAC, node facts. Node hardening: per-node runtime vs boot facts (SELinux, FIPS, auditd, firewall...) and the OS STIG summary. OS STIG: every rule of the node's DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG. The whole tab is opt-in: empty until Shift+S runs the scan"},
 		{"Logs", "rke2/kubelet/containerd/rancher-system-agent logs classified into startup-noise / warnings / errors (Rancher plan events flag config rewrites); enter on a node lists its lines, enter on a line shows the full text + explanation, esc goes back, a shows info lines"},

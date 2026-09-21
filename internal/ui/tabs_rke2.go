@@ -285,15 +285,11 @@ func (a *App) rke2Detail(node string) (string, []string) {
 	}
 	for _, f := range ni.ConfigFiles {
 		add(styleBold.Render("--- " + f.Path))
-		for _, l := range strings.Split(f.Content, "\n") {
-			add(wrap(l, w)...)
-		}
+		add(fileLines(f.Path, f.Content, w)...)
 	}
 	for _, f := range ni.ExtraFiles {
 		add(styleBold.Render("--- " + f.Path))
-		for _, l := range strings.Split(f.Content, "\n") {
-			add(wrap(l, w)...)
-		}
+		add(fileLines(f.Path, f.Content, w)...)
 	}
 
 	if len(ni.Manifests) > 0 {
@@ -320,9 +316,7 @@ func (a *App) rke2Detail(node string) (string, []string) {
 				continue
 			}
 			add("", styleBold.Render("--- "+m.Path))
-			for _, l := range strings.Split(m.Content, "\n") {
-				add(wrap(l, w)...)
-			}
+			add(fileLines(m.Path, m.Content, w)...)
 		}
 	} else if ni.ControlPlane {
 		add("", styleDim.Render("server/manifests: no files found"))
@@ -350,15 +344,11 @@ func (a *App) rke2Detail(node string) (string, []string) {
 	if kc := a.snap.Kubeadm; kc != nil && !distro.IsRancher(voc.Name) {
 		if kc.Raw != "" {
 			add("", styleTitle.Render("kube-system/kubeadm-config ClusterConfiguration")+styleDim.Render("  cluster-wide; the same on every node"))
-			for _, l := range strings.Split(strings.TrimRight(kc.Raw, "\n"), "\n") {
-				add(wrap(l, w)...)
-			}
+			add(yamlLines(kc.Raw, w)...)
 		}
 		if kc.KubeletRaw != "" {
 			add("", styleTitle.Render("kube-system/kubelet-config KubeletConfiguration")+styleDim.Render("  cluster default; compare with /var/lib/kubelet/config.yaml above"))
-			for _, l := range strings.Split(strings.TrimRight(kc.KubeletRaw, "\n"), "\n") {
-				add(wrap(l, w)...)
-			}
+			add(yamlLines(kc.KubeletRaw, w)...)
 		}
 	}
 	return title, out

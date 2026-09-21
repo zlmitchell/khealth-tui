@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/helmcheck"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/strutil"
@@ -73,17 +74,44 @@ func (a *App) selectedRelease() *k8s.HelmRelease {
 	return nil
 }
 
-// startHelmUpgrade prepares "helm upgrade" to the newest known chart version.
-func (a *App) startHelmUpgrade() {
-	if !a.actionsAllowed() {
-		return
+// helmChartManifest finds the server/manifests file a user HelmChart CR
+// came from, best effort: a non-bundled manifest on any server whose
+// content declares that HelmChart.
+func (a *App) helmChartManifest(name string) string {
+	for _, n := range strutil.SortedKeys(a.nodes) {
+		ni := a.nodes[n]
+		if ni == nil {
+			continue
+		}
+		for _, m := range ni.Manifests {
+			if m.Bundled || !strings.Contains(m.Kinds, "HelmChart") || !strings.Contains(m.Content, "kind: HelmChart\n") {
+				continue
+			}
+			if strings.Contains(m.Content, "name: "+name+"\n") || strings.Contains(m.Content, "name: "+name+" ") {
+				return n + ":" + m.Path
+			}
+		}
 	}
+	return ""
+}
+
+// startHelmUpgrade prepares the upgrade to the newest known chart version:
+// "helm upgrade" for a release helm installed, a spec.version patch on the
+// HelmChart CR for one the rke2/k3s helm controller owns.
+func (a *App) startHelmUpgrade() {
 	rel := a.selectedRelease()
 	if rel == nil {
 		return
 	}
+	if rel.Bundled && rel.CRShipped {
+		a.setStatus(rel.Name + " is a chart shipped inside rke2/k3s (HelmChart spec.chartContent): its version moves with the rke2 release; a HelmChartConfig changes only its values")
+		return
+	}
 	if rel.Bundled {
-		a.setStatus("release is managed by the rke2/k3s HelmChart controller: change its HelmChartConfig or upgrade rke2 instead")
+		a.startHelmChartUpgrade(rel)
+		return
+	}
+	if !a.actionsAllowed() {
 		return
 	}
 	l, ok := a.helmLatest[helmKey(*rel)]
@@ -151,6 +179,52 @@ func (a *App) lastGoodOrExplain(rel *k8s.HelmRelease) (k8s.HelmRevision, bool) {
 	}
 	a.setStatus(fmt.Sprintf("%s/%s: no earlier revision ever deployed (all %d are failed/pending); b lets you pick one anyway, or helm uninstall and reinstall", rel.Namespace, rel.Name, len(rel.History)))
 	return k8s.HelmRevision{}, false
+}
+
+// startHelmChartUpgrade upgrades a release the rke2/k3s helm controller
+// owns by patching spec.version on its HelmChart CR (no helm binary
+// needed): the controller re-runs its helm job with the new version.
+func (a *App) startHelmChartUpgrade(rel *k8s.HelmRelease) {
+	if !a.cfg.Actions.Enabled {
+		a.setStatus("mutating actions are disabled (--read-only / actions.enabled: false)")
+		return
+	}
+	l, ok := a.helmLatest[helmKey(*rel)]
+	if !ok || l.Version == "" {
+		a.setStatus("no newer version known for " + rel.Chart + " (the HelmChart's spec.repo index could not be read; see the LATEST column)")
+		return
+	}
+	if helmcheck.CompareVersions(l.Version, rel.Version) <= 0 {
+		a.setStatus(rel.Name + " is already at the latest known version " + rel.Version)
+		return
+	}
+	crNS, name, version := rel.CRNamespace, rel.Name, l.Version
+	if crNS == "" {
+		crNS = rel.Namespace
+	}
+	client := a.client
+	desc := []string{
+		"Source: " + rel.ChartRepo + " (" + l.Source + ")",
+		fmt.Sprintf("Patches spec.version of HelmChart %s/%s; the rke2/k3s helm controller then runs a helm-install-%s job that upgrades the release with the CR's valuesContent plus any HelmChartConfig, the same way it installed it.", crNS, name, name),
+	}
+	if f := a.helmChartManifest(name); f != "" {
+		desc = append(desc, styleWarn.Render("The CR comes from "+f+": set version: "+version+" there too, or the next edit of that file puts "+rel.Version+" back."))
+	} else {
+		desc = append(desc, "If this HelmChart is applied from a file under server/manifests (or a GitOps repo), update spec.version there too or the next apply reverts it.")
+	}
+	desc = append(desc, "Progress: the Addons tab (rke2 HelmCharts) shows the job; "+fmt.Sprintf("B on the Helm tab rolls back to revision %d if it fails.", rel.Revision))
+	a.pendingAct = &action{
+		title:  fmt.Sprintf("Upgrade HelmChart %s/%s: %s %s -> %s", crNS, name, rel.Chart, rel.Version, version),
+		desc:   desc,
+		onFail: "the CR was not changed; kubectl -n " + crNS + " get helmchart " + name + " -o yaml shows its state",
+		run: func(ctx context.Context) (string, error) {
+			if err := client.SetHelmChartVersion(ctx, crNS, name, version); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("helmchart.helm.cattle.io/%s patched: spec.version=%s\nthe helm controller's job helm-install-%s runs the upgrade now; refresh (r) to follow the release revision", name, version, name), nil
+		},
+	}
+	a.overlay = ovConfirm
 }
 
 // startHelmRollback opens the revision picker for the selected release,
@@ -221,7 +295,7 @@ func (a *App) confirmRollback(rev k8s.HelmRevision) {
 	}
 	desc = append(desc, "helm creates a new revision that reproduces the selected one (values and chart).")
 	if rel.Bundled {
-		desc = append(desc, styleWarn.Render("This release is managed by the rke2/k3s HelmChart controller, which re-applies its own version on the next reconcile; the rollback is a stopgap."))
+		desc = append(desc, styleWarn.Render("This release is owned by the rke2/k3s helm controller: it re-runs its helm job (back to the HelmChart's version and values) whenever the HelmChart CR or its HelmChartConfig changes, so the rollback holds only until then."))
 	}
 	a.pendingAct = &action{
 		title: fmt.Sprintf("Rollback %s/%s to revision %d (%s %s, %s)", rel.Namespace, rel.Name, rev.Revision, rev.Chart, rev.Version, rev.Status),
@@ -368,4 +442,83 @@ func (a *App) renderActionOverlay() (string, []string) {
 		return "Rollback " + rel.Namespace + "/" + rel.Name, lines
 	}
 	return "", nil
+}
+
+// startEtcdDefrag prepares a cluster-wide etcd defragmentation: every
+// member in turn through the etcd static pod (kubectl exec), followers
+// first, the leader last, a health check after each. Forced: it runs
+// whatever the fragmentation is; the confirmation shows what it will
+// reclaim.
+func (a *App) startEtcdDefrag() {
+	if !a.cfg.Actions.Enabled {
+		a.setStatus("mutating actions are disabled (--read-only / actions.enabled: false)")
+		return
+	}
+	x := a.etcdExec
+	if x == nil || x.Err != nil || len(x.Members) == 0 {
+		a.setStatus("defrag needs the kubectl exec probe (etcdctl inside the etcd static pod; pods/exec on kube-system): it has not answered yet, or was refused")
+		return
+	}
+	pod := strings.TrimPrefix(x.EtcdctlVia, "kubectl exec ")
+	if a.snap == nil || pod == "" {
+		return
+	}
+	if p, ok := a.snap.EtcdPods()[x.Node]; ok {
+		pod = p.Name
+	}
+	leader := x.Leader()
+	var rows []string
+	frag := false
+	for _, m := range x.Members {
+		line := m.Name
+		if m.ID == leader {
+			line += " (leader, last)"
+		}
+		if m.IsLearner {
+			line += " (learner, skipped)"
+		}
+		if st := x.Status(m.ID); st != nil && st.DBSize > 0 {
+			f := 0.0
+			if st.DBSizeInUse > 0 {
+				f = float64(st.DBSize-st.DBSizeInUse) / float64(st.DBSize) * 100
+			}
+			if f >= float64(a.cfg.Thresholds.EtcdFragWarnPct) {
+				frag = true
+			}
+			line += fmt.Sprintf(": db %s, %s in use, %.0f%% reclaimable", humanBytes(float64(st.DBSize)), humanBytes(float64(st.DBSizeInUse)), f)
+		}
+		rows = append(rows, "  "+line)
+	}
+	desc := []string{
+		"Runs `etcdctl defrag` against one member at a time inside " + pod + " (kubectl exec), followers first and the leader last, and checks `endpoint health` after each; a member that does not come back healthy stops the run so at most one member is ever affected.",
+		"Each member is blocked for the duration of its own defrag (seconds per GB of db, longer on slow disks): reads and writes to that member stall, and while the leader defragments the whole cluster's writes stall. Run it in a quiet moment.",
+		"Defrag only rewrites the db file: it reclaims what compaction already freed (etcd's auto-compaction, or `etcdctl compact <rev>`). A NOSPACE alarm still needs `etcdctl alarm disarm` afterwards.",
+		"Members now:",
+	}
+	desc = append(desc, rows...)
+	if !frag {
+		desc = append(desc, styleWarn.Render(fmt.Sprintf("No member is above the %d%% fragmentation threshold: this is a forced defrag, it will reclaim little.", a.cfg.Thresholds.EtcdFragWarnPct)))
+	}
+	if len(x.Alarms) > 0 {
+		var al []string
+		for _, al2 := range x.Alarms {
+			al = append(al, al2.Type+"@"+al2.MemberID)
+		}
+		desc = append(desc, styleCrit.Render("Active alarms: "+strings.Join(al, " ")+" - disarm them after the defrag (etcdctl alarm disarm)."))
+	}
+	client := a.client
+	members, dist := x.Members, x.Dist
+	a.pendingAct = &action{
+		title:  fmt.Sprintf("Defragment etcd: %d members, one at a time", len(members)),
+		desc:   desc,
+		onFail: "check `etcdctl endpoint health` on every member before anything else; the etcd tab (r) shows which member is unhealthy",
+		run: func(ctx context.Context) (string, error) {
+			rep := etcd.Defrag(ctx, client, pod, dist, members, leader)
+			if rep.Aborted != "" {
+				return rep.String(), fmt.Errorf("%s", rep.Aborted)
+			}
+			return rep.String(), nil
+		},
+	}
+	a.overlay = ovConfirm
 }

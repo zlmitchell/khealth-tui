@@ -258,8 +258,35 @@ func Evaluate(in Input) []Finding {
 			add(SevWarn, "node", name, fmt.Sprintf("load %.1f on %d CPUs", ni.Load1, ni.CPUs), "")
 		}
 		evalPreflight(name, ni, in, add) // swap, fapolicyd, auditd, mounts, accounts, proxies, vSphere ISO, registries (preflight.go)
+		active := map[string]bool{}
+		for _, svc := range ni.Services {
+			if svc.Active == "active" {
+				active[svc.Name] = true
+			}
+		}
 		for _, svc := range ni.Services {
 			critical := svc.Name == "kubelet" || svc.Name == "containerd" || svc.Name == "rke2-server" || svc.Name == "rke2-agent" || svc.Name == "k3s" || svc.Name == "k3s-agent" || svc.Name == "etcd"
+			// rke2/k3s install both unit files on every node and exactly one
+			// runs: the server unit carries the agent (kubelet, containerd)
+			// too, so an inactive agent unit next to an active server is
+			// the normal state. Only the unit the node's role calls for is
+			// required.
+			switch svc.Name {
+			case "rke2-agent", "k3s-agent":
+				if active[strings.TrimSuffix(svc.Name, "-agent")] || ni.ControlPlane {
+					continue
+				}
+			case "rke2-server", "k3s":
+				if active[svc.Name+"-agent"] || !ni.ControlPlane {
+					continue
+				}
+			case "etcd":
+				// rke2, k3s and kubeadm run etcd as a static pod; a leftover
+				// etcd.service unit on such a node is not the cluster's etcd
+				if distro.IsRancher(ni.Dist) || ni.Dist == "kubeadm" || !ni.ControlPlane {
+					continue
+				}
+			}
 			if critical && svc.Active != "active" {
 				add(SevCrit, "node", name, fmt.Sprintf("service %s is %s/%s", svc.Name, svc.Active, svc.Sub), "systemctl status "+svc.Name+"; see Logs tab")
 			}
@@ -663,15 +690,15 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 				pct := m.DBSize / m.Quota * 100
 				switch {
 				case pct >= 95:
-					add(SevCrit, "etcd", name, fmt.Sprintf("db size %.0f%% of quota (%s / %s)", pct, strutil.HumanBytes(m.DBSize), strutil.HumanBytes(m.Quota)), "compact + defrag now, raise quota-backend-bytes")
+					add(SevCrit, "etcd", name, fmt.Sprintf("db size %.0f%% of quota (%s / %s)", pct, strutil.HumanBytes(m.DBSize), strutil.HumanBytes(m.Quota)), "compact + defrag now (D on the etcd tab defrags member by member), raise quota-backend-bytes")
 				case pct >= float64(thr.EtcdDBWarnPct):
-					add(SevWarn, "etcd", name, fmt.Sprintf("db size %.0f%% of quota (%s / %s)", pct, strutil.HumanBytes(m.DBSize), strutil.HumanBytes(m.Quota)), "etcdctl defrag")
+					add(SevWarn, "etcd", name, fmt.Sprintf("db size %.0f%% of quota (%s / %s)", pct, strutil.HumanBytes(m.DBSize), strutil.HumanBytes(m.Quota)), "etcdctl defrag (D on the etcd tab)")
 				}
 			}
 			if m.DBSize > 100e6 && m.DBSizeInUse > 0 {
 				frag := (m.DBSize - m.DBSizeInUse) / m.DBSize * 100
 				if frag >= float64(thr.EtcdFragWarnPct) {
-					add(SevInfo, "etcd", name, fmt.Sprintf("db %.0f%% fragmented (%s allocated, %s in use)", frag, strutil.HumanBytes(m.DBSize), strutil.HumanBytes(m.DBSizeInUse)), "etcdctl defrag (one member at a time)")
+					add(SevInfo, "etcd", name, fmt.Sprintf("db %.0f%% fragmented (%s allocated, %s in use)", frag, strutil.HumanBytes(m.DBSize), strutil.HumanBytes(m.DBSizeInUse)), "etcdctl defrag, one member at a time (D on the etcd tab)")
 				}
 			}
 			if m.WalFsyncAvgMs > thr.EtcdFsyncWarnMs {

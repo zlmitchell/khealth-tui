@@ -59,6 +59,7 @@ The lab: rke2 v1.34 single node (Rocky Linux 9.7, Rancher v2.13 management clust
 | Health findings, node preflight, log classification | tested | all three lab clusters, continuously |
 | Bootstrap a kubeconfig over SSH (`khealth user@node`) | tested | rke2 and kubeadm servers, VIP/SAN ranking |
 | etcd triage (quorum, leader, latency, member vs node reconciliation) | tested | rke2 and kubeadm; exec-based member view and the SSH fallbacks |
+| etcd defrag (`D`, member by member via kubectl exec) | supported | ordering, health gate and abort are unit-tested against a scripted etcdctl; not yet run against a live cluster from khealth |
 | etcd rescue - rejoin one broken server | tested | rke2 3-server (RHEL 9 STIG) and kubeadm 3-node (Ubuntu STIG): stop, move data aside, member remove/add, rejoin, CNI restart, endpoint check |
 | etcd rescue - restore a snapshot, single node | tested | rke2 single server and kubeadm single node |
 | etcd rescue - restore a snapshot, whole control plane | tested | rke2 3-server (`cluster-reset`, VIP + shared token pre-flight) and kubeadm 3-node, restored from any of the servers |
@@ -70,6 +71,6 @@ The lab: rke2 v1.34 single node (Rocky Linux 9.7, Rancher v2.13 management clust
 | Registry probes (`registries.yaml` curl + `crictl pull` dry run) | tested | Harbor (token auth, `insecure_skip_verify`), hand-rendered `hosts.toml` failure paths on containerd 2.x |
 | Upgrade readiness: system-upgrade-controller plans | tested | SUC v0.20 on rke2: unpullable image, missing version, skipped minor, unresolvable channel, completed plan |
 | Upgrade readiness: Rancher provisioned-cluster machine plans | supported | unit-tested against the planner's secret layout |
-| Helm actions (`u` upgrade, `b` rollback, `B` rollback to the last deployed revision) | supported | run the `helm` CLI after a confirmation; the overlays, the last-good revision choice and the command lines are unit-tested, a live upgrade/rollback has not been run from khealth in the lab |
+| Helm actions (`u` upgrade - helm or HelmChart CR spec.version, `b` rollback, `B` rollback to the last deployed revision) | supported | run the `helm` CLI after a confirmation; the overlays, the last-good revision choice and the command lines are unit-tested, a live upgrade/rollback has not been run from khealth in the lab |
 | Export (`e`, `--export`, JSON + XLSX) | tested | the RHEL 9 cluster with the full STIG scan (five benchmarks, 445 OS rules with per-node columns), the Rancher cluster with `--no-ssh` |
 | Footprint measurement (`P`, `--perf-log`, `tools/perfbench`) | tested | baseline in [PERFORMANCE.md](PERFORMANCE.md) |

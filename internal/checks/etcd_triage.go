@@ -597,7 +597,7 @@ func etcdCause(in Input, t *etcdTriage, rt etcdRuntime) (string, []string) {
 	case has("etcd-nospace") || hasAlarm(t, "NOSPACE"):
 		return "NOSPACE alarm - the database hit quota-backend-bytes; the cluster is read-only until cleared", []string{
 			"rev=$(etcdctl endpoint status -w json | grep -o '\"revision\":[0-9]*' | head -1 | cut -d: -f2); etcdctl compact $rev",
-			"etcdctl defrag --endpoints=<one member at a time>; wait for each to come back healthy",
+			"etcdctl defrag --endpoints=<one member at a time>; wait for each to come back healthy (D on the etcd tab does exactly that)",
 			"etcdctl alarm disarm; then raise the quota if the working set really is this big (" + quotaHint(rt) + ")",
 		}
 	case has("disk-full") || dataDirFull(t, in):

@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 )
 
@@ -29,7 +31,9 @@ type HelmRelease struct {
 	Description string
 	ValuesYAML  string // user-supplied values (helm get values)
 	Storage     string // secret | configmap
-	Bundled     bool   // installed by rke2/k3s HelmChart controller
+	Bundled     bool   // installed by the rke2/k3s HelmChart controller (a HelmChart CR exists)
+	CRNamespace string // namespace of that HelmChart CR (usually kube-system, not the release's)
+	CRShipped   bool   // the CR carries rke2's own chart tarball (spec.chartContent): upgraded with rke2, not by hand
 	History     []HelmRevision
 
 	// Origin evidence from Chart.yaml (Helm does not store the repo a chart
@@ -151,7 +155,11 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 		}
 	}
 	// releases installed by the rke2/k3s HelmChart controller carry the CR name
-	bundled := map[string]string{}
+	type chartCR struct {
+		src, ns string
+		shipped bool
+	}
+	bundled := map[string]chartCR{}
 	if l, err := c.dynList(ctx, "helmcharts.helm.cattle.io", helmChartGVR); err == nil {
 		for _, it := range l.Items {
 			ns, _, _ := unstructured.NestedString(it.Object, "spec", "targetNamespace")
@@ -160,6 +168,7 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 			}
 			repo, _, _ := unstructured.NestedString(it.Object, "spec", "repo")
 			chart, _, _ := unstructured.NestedString(it.Object, "spec", "chart")
+			content, _, _ := unstructured.NestedString(it.Object, "spec", "chartContent")
 			src := chart
 			if repo != "" {
 				src = repo + " " + chart
@@ -167,7 +176,7 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 			if src == "" {
 				src = "HelmChart CR (chartContent)"
 			}
-			bundled[ns+"/"+it.GetName()] = src
+			bundled[ns+"/"+it.GetName()] = chartCR{src: src, ns: it.GetNamespace(), shipped: content != ""}
 		}
 	}
 	out := make([]HelmRelease, 0, len(latest))
@@ -175,9 +184,11 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 		h := history[key]
 		sort.Slice(h, func(i, j int) bool { return h[i].Revision > h[j].Revision })
 		r.History = h
-		if src, ok := bundled[key]; ok {
+		if cr, ok := bundled[key]; ok {
 			r.Bundled = true
-			r.ChartRepo = src
+			r.ChartRepo = cr.src
+			r.CRNamespace = cr.ns
+			r.CRShipped = cr.shipped
 		}
 		r.Origin = helmOrigin(&r)
 		out = append(out, r)
@@ -186,11 +197,21 @@ func (c *Client) helmReleases(ctx context.Context) ([]HelmRelease, error) {
 	return out, nil
 }
 
+// SetHelmChartVersion patches spec.version of a HelmChart CR; the rke2/k3s
+// helm controller then runs a helm upgrade job for the release.
+func (c *Client) SetHelmChartVersion(ctx context.Context, crNamespace, name, version string) error {
+	patch := fmt.Sprintf(`{"spec":{"version":%q}}`, version)
+	_, err := c.Dyn.Resource(helmChartGVR).Namespace(crNamespace).Patch(ctx, name, types.MergePatchType, []byte(patch), metav1.PatchOptions{FieldManager: "khealth"})
+	return err
+}
+
 // helmOrigin summarizes where a chart most likely came from.
 func helmOrigin(r *HelmRelease) string {
 	switch {
-	case r.ChartRepo != "":
+	case r.ChartRepo != "" && r.CRShipped:
 		return "rke2 HelmChart: " + r.ChartRepo
+	case r.ChartRepo != "":
+		return "HelmChart CR: " + r.ChartRepo
 	case r.Annotations["catalog.cattle.io/certified"] != "" || r.Annotations["catalog.cattle.io/release-name"] != "":
 		return "Rancher catalog (" + r.Annotations["catalog.cattle.io/certified"] + ")"
 	case r.Annotations["artifacthub.io/links"] != "" || r.Annotations["artifacthub.io/changes"] != "":

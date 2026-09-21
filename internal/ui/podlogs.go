@@ -29,9 +29,11 @@ type logView struct {
 	previous   bool
 	follow     bool
 	wrap       bool
-	tsMode     int  // 0 short HH:MM:SS, 1 hidden, 2 full RFC3339
-	plain      bool // no syntax highlighting
-	filter     string
+	tsMode     int      // 0 short HH:MM:SS, 1 hidden, 2 full RFC3339
+	plain      bool     // no syntax highlighting
+	filter     string   // only lines containing this are rendered (& with a find query)
+	find       textFind // / find; n/N jump; & narrows the view to the hits
+	only       bool
 	lines      []string
 	scroll     int
 	err        string
@@ -216,6 +218,7 @@ func (a *App) logVisibleLines() []string {
 	if rc.key != key || rc.n > len(lv.lines) || (rc.n > 0 && rc.first != lv.lines[0]) {
 		// settings changed, or the buffer was trimmed at the head
 		rc.key, rc.n, rc.out = key, 0, nil
+		lv.find.hits, lv.find.scanned = nil, 0
 	}
 	for _, l := range lv.lines[rc.n:] {
 		rc.out = append(rc.out, a.renderPodLogLine(lv, l)...)
@@ -224,6 +227,7 @@ func (a *App) logVisibleLines() []string {
 	if rc.n > 0 {
 		rc.first = lv.lines[0]
 	}
+	lv.find.extend(rc.out) // new lines of the stream join the hits
 	return rc.out
 }
 
@@ -299,8 +303,22 @@ func wrapStyled(s string, width int) []string {
 
 var reSGR = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
+// logPageLines is how many log lines fit in the overlay: the box (title
+// and border) plus the viewer's own header and status lines come off the
+// body height.
+func (a *App) logPageLines() int {
+	n := a.bodyHeight() + 1 - 7
+	if lv := a.logs; lv != nil && lv.err != "" {
+		n--
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 func (a *App) logMaxScroll() int {
-	n := len(a.logVisibleLines()) - (a.height - 8)
+	n := len(a.logVisibleLines()) - a.logPageLines()
 	if n < 0 {
 		return 0
 	}
@@ -313,12 +331,51 @@ func (a *App) handleLogKey(key string) (tea.Model, tea.Cmd) {
 		a.overlay = ovNone
 		return a, nil
 	}
-	page := a.height - 10
+	visible := a.logPageLines()
+	page := visible - 2
 	if page < 1 {
 		page = 1
 	}
+	jump := func(h int) { lv.scroll = jumpScroll(h, visible, a.logMaxScroll()) }
+	if consumed, changed := lv.find.handleKey(key); consumed {
+		if changed {
+			a.logFindChanged()
+			if h, ok := lv.find.current(); ok {
+				jump(h)
+			}
+		}
+		return a, nil
+	}
 	switch key {
+	case "/":
+		lv.find = textFind{typing: true}
+		a.logFindChanged()
+		return a, nil
+	case "n", "N":
+		d := 1
+		if key == "N" {
+			d = -1
+		}
+		if h, ok := lv.find.step(d); ok {
+			jump(h)
+		} else if lv.find.query == "" {
+			a.setStatus("/ finds text in the log first; n/N then jump between the hits, & shows only the hits")
+		}
+		return a, nil
+	case "&":
+		lv.only = !lv.only
+		a.logFindChanged()
+		if lv.only && lv.find.query == "" {
+			a.setStatus("& shows only the lines a / find matches: type a query first")
+		}
+		lv.scroll = a.logMaxScroll()
 	case "esc", "q":
+		if key == "esc" && lv.find.active() {
+			lv.find.clear()
+			lv.only = false
+			a.logFindChanged()
+			return a, nil
+		}
 		a.closePodLogs()
 		a.overlay = ovNone
 	case "]", "c", "tab":
@@ -381,6 +438,22 @@ func (a *App) handleLogKey(key string) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// logFindChanged applies the find query to the view: with & on, only the
+// matching lines are rendered (the render cache re-keys on lv.filter),
+// then the hits are recomputed over what is displayed.
+func (a *App) logFindChanged() {
+	lv := a.logs
+	if lv == nil {
+		return
+	}
+	lv.filter = ""
+	if lv.only {
+		lv.filter = lv.find.query
+	}
+	vis := a.logVisibleLines()
+	lv.find.run(vis, lv.scroll)
+}
+
 // renderPodLogs draws the log viewer overlay.
 func (a *App) renderPodLogs() (string, []string) {
 	lv := a.logs
@@ -412,7 +485,7 @@ func (a *App) renderPodLogs() (string, []string) {
 	}
 	lines := []string{
 		kv("containers", strings.Join(ctrs, " ")) + "   " + strings.Join(mode, "  "),
-		styleDim.Render("[ ] or tab switch container · { } next/prev pod of the same controller · p previous · f follow · w wrap · T timestamps (short/off/full) · H highlighting on/off · r reload · j/k G g scroll · esc close"),
+		styleDim.Render("[ ] or tab switch container · { } next/prev pod of the same controller · p previous · f follow · w wrap · T timestamps (short/off/full) · H highlighting on/off · r reload · / find, n/N next/prev, & only hits · j/k G g scroll · esc close"),
 	}
 	if len(lv.pods) > 1 {
 		lines[0] += "   " + kv("pod", fmt.Sprintf("%d/%d", lv.podIdx+1, len(lv.pods)))
@@ -422,7 +495,7 @@ func (a *App) renderPodLogs() (string, []string) {
 		lines = append(lines, styleCrit.Render(lv.err))
 	}
 	vis := a.logVisibleLines()
-	visible := a.height - 8
+	visible := a.logPageLines()
 	end := lv.scroll + visible
 	if end > len(vis) {
 		end = len(vis)
@@ -430,11 +503,20 @@ func (a *App) renderPodLogs() (string, []string) {
 	if lv.scroll > end {
 		lv.scroll = end
 	}
-	lines = append(lines, vis[lv.scroll:end]...)
+	for i := lv.scroll; i < end; i++ {
+		lines = append(lines, lv.find.render(vis[i], i))
+	}
 	if len(vis) == 0 && lv.err == "" && !lv.streaming {
 		lines = append(lines, styleDim.Render("(no output)"))
 	}
-	lines = append(lines, styleDim.Render(fmt.Sprintf("-- lines %d-%d of %d --", lv.scroll+1, end, len(vis))))
+	status := styleDim.Render(fmt.Sprintf("-- lines %d-%d of %d --", lv.scroll+1, end, len(vis)))
+	if lv.only && lv.find.query != "" {
+		status += "  " + styleWarn.Render("only matching lines (& shows all)")
+	}
+	if f := lv.find.status(); f != "" {
+		status += "  " + f
+	}
+	lines = append(lines, status)
 	return title, lines
 }
 

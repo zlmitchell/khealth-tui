@@ -126,6 +126,9 @@ func levelFromObject(u *unstructured.Unstructured, snap *k8s.Snapshot) inspectLe
 		}
 	}
 	lvl.dump = strings.Split(strings.TrimRight(k8s.DumpYAML(u), "\n"), "\n")
+	for i, l := range lvl.dump {
+		lvl.dump[i] = hlYAML(l)
+	}
 	return lvl
 }
 
@@ -159,8 +162,37 @@ func (a *App) handleInspectKey(key string) (tea.Model, tea.Cmd) {
 	}
 	top := &a.inspect[len(a.inspect)-1]
 	visible := a.height - 8
+	jump := func(h int) { top.scroll = jumpScroll(h, visible, len(top.dump)-3) }
+	if consumed, changed := a.inspectFind.handleKey(key); consumed {
+		if changed {
+			a.inspectFind.run(top.dump, top.scroll)
+			if h, ok := a.inspectFind.current(); ok {
+				jump(h)
+			}
+		}
+		return a, nil
+	}
 	switch key {
+	case "/":
+		a.inspectFind = textFind{typing: true}
+		return a, nil
+	case "n", "N":
+		d := 1
+		if key == "N" {
+			d = -1
+		}
+		if h, ok := a.inspectFind.step(d); ok {
+			jump(h)
+		} else if a.inspectFind.query == "" {
+			a.setStatus("/ finds text in this page first; n/N then jump between the hits")
+		}
+		return a, nil
 	case "esc", "backspace", "q":
+		if key == "esc" && a.inspectFind.active() {
+			a.inspectFind.clear()
+			return a, nil
+		}
+		a.inspectFind.clear()
 		a.inspect = a.inspect[:len(a.inspect)-1]
 		if len(a.inspect) == 0 {
 			if a.overlay == ovInspect {
@@ -275,7 +307,7 @@ func (a *App) renderInspect() (string, []string) {
 		}
 	}
 	if len(top.dump) > 0 {
-		hint := "  j/k scroll · J/K page · g top · esc back"
+		hint := "  j/k scroll · J/K page · g top · / find · esc back"
 		if top.scroll > 0 {
 			// scrolled into the YAML: the page scrolls, i.e. the metadata and
 			// reference list go off the top and the YAML gets the whole body
@@ -283,9 +315,14 @@ func (a *App) renderInspect() (string, []string) {
 			lines = lines[:0]
 			hint = "  k back to line 1 shows the references again · J/K page · esc back"
 		}
-		lines = append(lines, "", styleTitle.Render("YAML")+styleDim.Render(fmt.Sprintf("  (line %d of %d)%s", top.scroll+1, len(top.dump), hint)))
-		for i := top.scroll; i < len(top.dump); i++ {
-			lines = append(lines, trunc(top.dump[i], w))
+		find := a.inspectFind.status()
+		if find != "" {
+			find = "  " + find
+		}
+		lines = append(lines, "", styleTitle.Render("YAML")+styleDim.Render(fmt.Sprintf("  (line %d of %d)%s", top.scroll+1, len(top.dump), hint))+find)
+		// only what fits: the overlay cuts at the screen height anyway
+		for i := top.scroll; i < len(top.dump) && len(lines) < a.height; i++ {
+			lines = append(lines, trunc(a.inspectFind.render(top.dump[i], i), w))
 		}
 	}
 	return title, lines
