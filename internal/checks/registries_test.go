@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"k8s-health-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 )
 
 // On upstream/kubeadm nodes containerd only reads certs.d/<registry>/hosts.toml

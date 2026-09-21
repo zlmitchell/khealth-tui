@@ -9,7 +9,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"k8s-health-tui/internal/logs"
+	"github.com/zlmitchell/khealth-tui/internal/logs"
 )
 
 func containsPlain(v, sub string) bool { return strings.Contains(ansi.Strip(v), sub) }

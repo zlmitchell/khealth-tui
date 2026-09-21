@@ -16,7 +16,7 @@ set -e
 GO_IMAGE=${GO_IMAGE:-golang:1.26}
 TARGETS="linux/amd64 linux/arm64 windows/amd64 darwin/amd64 darwin/arm64"
 VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}
-LDFLAGS="-s -w -X k8s-health-tui/internal/config.Version=$VERSION"
+LDFLAGS="-s -w -X github.com/zlmitchell/khealth-tui/internal/config.Version=$VERSION"
 
 DIST=${DIST:-dist}
 mkdir -p "$DIST"

@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
-	"k8s-health-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
 )
 
 // controllerKinds are the pod owners that get their own rows; pods owned by

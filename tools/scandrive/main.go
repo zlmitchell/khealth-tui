@@ -31,8 +31,8 @@ import (
 	"github.com/muesli/termenv"
 	"k8s.io/klog/v2"
 
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/ui"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/ui"
 )
 
 type pressMsg struct{}

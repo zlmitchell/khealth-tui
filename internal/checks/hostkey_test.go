@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 )
 
 // Nodes presenting the same SSH host key (clones never re-keyed) are flagged,

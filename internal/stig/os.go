@@ -17,9 +17,9 @@ import (
 	"sort"
 	"strings"
 
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/stigdata"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/stigdata"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // OSBenchmark is one DISA OS STIG release: the embedded table plus the

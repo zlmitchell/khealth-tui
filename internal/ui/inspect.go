@@ -10,8 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // inspectLevel is one page of the object inspector (a stack of these forms

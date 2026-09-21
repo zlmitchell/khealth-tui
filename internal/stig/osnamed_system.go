@@ -10,8 +10,8 @@ import (
 	"slices"
 	"strings"
 
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // ---------- auditd.conf / audit rules ----------

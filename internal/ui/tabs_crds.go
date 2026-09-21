@@ -8,7 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"k8s-health-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
 )
 
 type crdCountMsg struct {

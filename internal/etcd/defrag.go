@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // defragHealthWait is the pause between health checks after a member's

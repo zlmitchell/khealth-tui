@@ -10,15 +10,15 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/distro"
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/helmcheck"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/logs"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/stig"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/distro"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/helmcheck"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/logs"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/stig"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // Severity of a finding.

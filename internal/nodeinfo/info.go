@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s-health-tui/internal/perf"
+	"github.com/zlmitchell/khealth-tui/internal/perf"
 )
 
 // Info is everything collected from one node.

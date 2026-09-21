@@ -24,8 +24,8 @@ import (
 	"sync"
 	"time"
 
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 type namedEval func(info *nodeinfo.Info) (Status, string)

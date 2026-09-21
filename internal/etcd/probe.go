@@ -15,10 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/perf"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/perf"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // Probe is the result of probing etcd on one node.

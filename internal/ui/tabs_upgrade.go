@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // upgradeSection renders the upgrade-readiness block of the Addons tab:

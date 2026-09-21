@@ -23,14 +23,14 @@ import (
 	"golang.org/x/term"
 	"k8s.io/klog/v2"
 
-	"k8s-health-tui/internal/bootstrap"
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/export"
-	"k8s-health-tui/internal/headless"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/sshrun"
-	"k8s-health-tui/internal/ui"
+	"github.com/zlmitchell/khealth-tui/internal/bootstrap"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/export"
+	"github.com/zlmitchell/khealth-tui/internal/headless"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun"
+	"github.com/zlmitchell/khealth-tui/internal/ui"
 )
 
 func main() {

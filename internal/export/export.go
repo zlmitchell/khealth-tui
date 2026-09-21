@@ -21,10 +21,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"k8s-health-tui/internal/checks"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/stig"
+	"github.com/zlmitchell/khealth-tui/internal/checks"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/stig"
 )
 
 // Input is everything the report is built from.

@@ -23,9 +23,9 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/sshrun"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun"
 )
 
 // Source is what the node reported.

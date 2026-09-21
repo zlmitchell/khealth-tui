@@ -1,4 +1,4 @@
-module k8s-health-tui
+module github.com/zlmitchell/khealth-tui
 
 go 1.26
 

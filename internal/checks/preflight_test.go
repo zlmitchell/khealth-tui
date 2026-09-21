@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"k8s-health-tui/internal/distro"
-	"k8s-health-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/distro"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 )
 
 // preflightInfo builds a node with the facts a hardened, mis-tuned RKE2

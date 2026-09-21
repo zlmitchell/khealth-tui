@@ -9,15 +9,15 @@ import (
 	"strings"
 	"time"
 
-	"k8s-health-tui/internal/checks"
-	"k8s-health-tui/internal/distro"
-	etcdpkg "k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/helmcheck"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/logs"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/stig"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/checks"
+	"github.com/zlmitchell/khealth-tui/internal/distro"
+	etcdpkg "github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/helmcheck"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/logs"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/stig"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 var _ = math.NaN

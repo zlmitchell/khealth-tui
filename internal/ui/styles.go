@@ -8,9 +8,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"k8s-health-tui/internal/checks"
-	"k8s-health-tui/internal/stig"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/checks"
+	"github.com/zlmitchell/khealth-tui/internal/stig"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 var (

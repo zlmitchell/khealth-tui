@@ -9,10 +9,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/helmcheck"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/helmcheck"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // action is a mutating CLI command that needs explicit confirmation.

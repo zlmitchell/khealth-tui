@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 
 	"golang.org/x/crypto/ssh"
 )

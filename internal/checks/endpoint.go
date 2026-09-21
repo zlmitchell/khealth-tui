@@ -7,10 +7,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"k8s-health-tui/internal/distro"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/distro"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // EndpointReport compares the API endpoint the kubeconfig uses with what the

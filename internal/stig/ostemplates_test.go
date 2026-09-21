@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/stigdata"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/stigdata"
 )
 
 func chk(t string, params map[string]any, resolved map[string]string) stigdata.Check {

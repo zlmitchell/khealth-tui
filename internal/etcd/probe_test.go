@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"k8s-health-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/config"
 )
 
 const sample = `

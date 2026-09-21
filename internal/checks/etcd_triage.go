@@ -9,10 +9,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // raftLagWarn is how many raft entries a healthy member may trail the leader

@@ -20,8 +20,8 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // Runner holds SSH connections to nodes and runs scripts on them.

@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s-health-tui/internal/distro"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/distro"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // evalCloud raises the cloud provider (CPI / cloud-controller-manager) and

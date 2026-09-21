@@ -7,9 +7,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"k8s-health-tui/internal/checks"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/checks"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // Storage tab detail: enter on a PVC or PV row gathers everything the

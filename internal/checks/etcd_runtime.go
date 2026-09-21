@@ -3,7 +3,7 @@ package checks
 import (
 	"strings"
 
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 
 	corev1 "k8s.io/api/core/v1"
 )

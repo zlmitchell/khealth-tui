@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/logs"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/logs"
 )
 
 func s3Probe(node string, kv map[string]string) *etcd.Probe {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"k8s-health-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/config"
 )
 
 func TestCompareVersions(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"k8s-health-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
 )
 
 // TestEtcdSummaryFallsBackToExec: with no usable SSH probe the tiles must be

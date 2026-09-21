@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // Execer runs a command inside a pod (satisfied by *k8s.Client).

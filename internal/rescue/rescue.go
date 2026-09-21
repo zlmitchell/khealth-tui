@@ -30,9 +30,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/sshrun"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 //go:embed scripts/*.sh

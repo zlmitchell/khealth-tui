@@ -12,11 +12,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	corev1 "k8s.io/api/core/v1"
 
-	"k8s-health-tui/internal/checks"
-	etcdpkg "k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/rescue"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/checks"
+	etcdpkg "github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/rescue"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // etcd rescue (X on the etcd tab): restore a snapshot over SSH. The overlay

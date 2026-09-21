@@ -15,7 +15,7 @@ import (
 
 	"k8s.io/client-go/tools/clientcmd"
 
-	"k8s-health-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 )
 
 const rke2yaml = `apiVersion: v1

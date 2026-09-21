@@ -15,8 +15,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
 )
 
 // The kubeconfig's server is unreachable; a peer the etcd probe found on

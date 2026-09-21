@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s-health-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 )
 
 func (e *evaluator) rke2Rules() {

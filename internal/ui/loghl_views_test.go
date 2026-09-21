@@ -11,7 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
-	"k8s-health-tui/internal/logs"
+	"github.com/zlmitchell/khealth-tui/internal/logs"
 )
 
 // TestLogDetailHighlighting: every log view colors lines through the same

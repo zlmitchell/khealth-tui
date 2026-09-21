@@ -9,8 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/sshrun"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun"
 )
 
 // scanning returns a test app with a two-node scan in flight, cp-1 answered.

@@ -25,7 +25,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"k8s-health-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/config"
 )
 
 // Latest is the newest known version of a chart.

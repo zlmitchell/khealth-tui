@@ -141,7 +141,7 @@ func TestLoadFindsConfigFile(t *testing.T) {
 		t.Errorf("no file: %s", cfg.Refresh)
 	}
 	// the user-level file
-	userCfg := filepath.Join(home, ".config", "k8s-health-tui", "config.yaml")
+	userCfg := filepath.Join(home, ".config", "khealth", "config.yaml")
 	_ = os.MkdirAll(filepath.Dir(userCfg), 0o700)
 	_ = os.WriteFile(userCfg, []byte("refresh: 50s\n"), 0o600)
 	if cfg, err := Load(nil); err != nil || cfg.Refresh != 50*time.Second {
@@ -152,13 +152,14 @@ func TestLoadFindsConfigFile(t *testing.T) {
 	if cfg, _ := Load(nil); cfg.Refresh != 60*time.Second {
 		t.Errorf("khealth.yaml: %s", cfg.Refresh)
 	}
+	// the pre-1.0 name is still read, after khealth.yaml
+	_ = os.Remove("khealth.yaml")
 	_ = os.WriteFile("k8s-health-tui.yaml", []byte("refresh: 70s\n"), 0o600)
 	if cfg, _ := Load(nil); cfg.Refresh != 70*time.Second {
 		t.Errorf("k8s-health-tui.yaml: %s", cfg.Refresh)
 	}
 	// a directory of that name is not a config file
 	_ = os.Remove("k8s-health-tui.yaml")
-	_ = os.Remove("khealth.yaml")
 	_ = os.Mkdir("khealth.yaml", 0o700)
 	if got := findConfigFile(); got != userCfg {
 		t.Errorf("directory skipped: %q", got)

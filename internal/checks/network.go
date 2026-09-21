@@ -8,8 +8,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // CNI / overlay network findings, area "network":

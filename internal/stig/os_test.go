@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 )
 
 // TestOSGroupWaitsForCollection: before S (no OS STIG facts) the OS group is

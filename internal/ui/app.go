@@ -17,18 +17,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"k8s-health-tui/internal/checks"
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/distro"
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/helmcheck"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/logs"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/perf"
-	"k8s-health-tui/internal/sshrun"
-	"k8s-health-tui/internal/stig"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/checks"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/distro"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/helmcheck"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/logs"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/perf"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun"
+	"github.com/zlmitchell/khealth-tui/internal/stig"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 type tab int
@@ -2725,7 +2725,7 @@ func helpLines(width int) []string {
 	})
 
 	lines = append(lines, "")
-	for _, l := range wrap("Config: ~/.config/k8s-health-tui/config.yaml (khealth --init-config writes the annotated example)", width) {
+	for _, l := range wrap("Config: ~/.config/khealth/config.yaml (khealth --init-config writes the annotated example)", width) {
 		lines = append(lines, styleDim.Render(l))
 	}
 	lines = append(lines, styleDim.Render("khealth "+config.Version+" - created by Zach Mitchell"))

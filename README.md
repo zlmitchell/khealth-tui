@@ -1,4 +1,4 @@
-# k8s-health-tui (`khealth`)
+# khealth-tui
 
 ![etcd tab: triage of a stopped rke2-server and a stale member](docs/media/etcd-troubelshooting.png)
 
@@ -29,20 +29,18 @@ Walkthrough videos (mp4, open the link or clone the repo):
 
 ## Tabs
 
-| Key | Tab      | In one line                                                                                                                                                 |
-| --- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Overview | API`readyz`/`livez`, cluster summary, ranked findings CRIT/WARN/INFO                                                                                    |
-| 2   | Nodes    | conditions, version skew, live CPU/mem/load, disks, unit state; Enter: mounts, certs, sysctls, kubelet args                                                 |
-| 3   | Inspect  | controllers / pods / every API type incl. CRDs; object inspector that drills through owner, children, secrets, PVCs;`L` tails logs                        |
-| 4   | etcd     | members, leader, health, db size, latency, alarms, config source, snapshots;**Triage** cases; `X` = rescue (rejoin a server / restore a snapshot); `D` = defrag all members one at a time |
-| 5   | Storage  | StorageClasses, CSI drivers, PVC used capacity, backend health (Longhorn, Trident, Ceph); Enter: full claim/volume detail                                   |
-| 6   | Events   | warning events, newest first                                                                                                                                |
-| 7   | Addons   | CNI + MTU + node-side network probes, CoreDNS/ingress/metrics-server, Rancher agents,`registries.yaml` vs containerd, upgrade plans, provisioned clusters |
-| 8   | Helm     | releases from`sh.helm.release.v1` secrets, values, history, update check; `u` upgrade (helm, or your HelmChart CR's spec.version), `b` rollback, `B` roll a failed release back to the last deployed revision |
-| 9   | Images   | per node: images, unused images, airgap tarballs vs what is running                                                                                         |
-| 0   | Security | opt-in scan (`Shift+S`): Kubernetes / RKE2 / Rancher MCM STIG, CIS, node hardening, full OS STIG per node                                                 |
-| =   | RKE2     | control-plane isolation,`config.yaml(.d)` per node, manifests, config drift between servers                                                               |
-| -   | Logs     | rke2/kubelet/containerd journal classified into noise / warnings / errors with explanations                                                                 |
+- `1` **Overview** - API `readyz`/`livez`, cluster summary, ranked findings CRIT/WARN/INFO
+- `2` **Nodes** - conditions, version skew, live CPU/mem/load, disks, unit state; Enter: mounts, certs, sysctls, kubelet args
+- `3` **Inspect** - controllers / pods / every API type incl. CRDs; object inspector that drills through owner, children, secrets, PVCs; `L` tails logs
+- `4` **etcd** - members, leader, health, db size, latency, alarms, config source, snapshots; **Triage** cases; `X` = rescue (rejoin a server / restore a snapshot); `D` = defrag all members one at a time
+- `5` **Storage** - StorageClasses, CSI drivers, PVC used capacity, backend health (Longhorn, Trident, Ceph); Enter: full claim/volume detail
+- `6` **Events** - warning events, newest first
+- `7` **Addons** - CNI + MTU + node-side network probes, CoreDNS/ingress/metrics-server, Rancher agents, `registries.yaml` vs containerd, upgrade plans, provisioned clusters
+- `8` **Helm** - releases from `sh.helm.release.v1` secrets, values, history, update check; `u` upgrade (helm, or your HelmChart CR's `spec.version`), `b` rollback, `B` roll a failed release back to the last deployed revision
+- `9` **Images** - per node: images, unused images, airgap tarballs vs what is running
+- `0` **Security** - opt-in scan (`Shift+S`): Kubernetes / RKE2 / Rancher MCM STIG, CIS, node hardening, full OS STIG per node
+- `=` **RKE2** - control-plane isolation, `config.yaml(.d)` per node, manifests, config drift between servers
+- `-` **Logs** - rke2/kubelet/containerd journal classified into noise / warnings / errors with explanations
 
 Every column and keypress: [docs/TABS.md](docs/TABS.md).
 
@@ -51,8 +49,8 @@ Every column and keypress: [docs/TABS.md](docs/TABS.md).
 - **release binary**: download `khealth-<os>-<arch>` and `checksums.txt` from the latest release, verify, rename to `khealth`
 
   ```sh
-  curl -LO https://github.com/<owner>/k8s-health-tui/releases/latest/download/khealth-linux-amd64
-  curl -LO https://github.com/<owner>/k8s-health-tui/releases/latest/download/checksums.txt
+  curl -LO https://github.com/zlmitchell/khealth-tui/releases/latest/download/khealth-linux-amd64
+  curl -LO https://github.com/zlmitchell/khealth-tui/releases/latest/download/checksums.txt
   sha256sum --ignore-missing -c checksums.txt && install -m 0755 khealth-linux-amd64 ~/.local/bin/khealth
   ```
 - **no Go**: `./build.sh` (Docker) -> `dist/khealth-linux-amd64`; `./build.sh windows amd64`; `./build.sh all` builds every target and writes `dist/checksums.txt`
@@ -80,21 +78,19 @@ khealth --export ./reports --export-scan  # no TUI: one cycle + the security sca
 
 ## Docs
 
-| Doc                                    | What it covers                                                                                                  |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| [WHY.md](docs/WHY.md)                   | the tools that exist, what each covers, the gap this fills                                                      |
-| [TABS.md](docs/TABS.md)                 | every tab, column and key binding                                                                               |
-| [RUNNING.md](docs/RUNNING.md)           | kubeconfig bootstrap, config file, cluster menu, SSH auth and`become`, RBAC, collection tiers                 |
-| [ETCD.md](docs/ETCD.md)                 | triage cases, the rescue overview, S3 snapshots, how etcd is discovered per layout                              |
-| [RESCUE.md](docs/RESCUE.md)             | every step, command and check of`X`: rejoin one server, restore a snapshot; what was learned on real clusters |
-| [SECURITY.md](docs/SECURITY.md)         | STIG / CIS releases applied, scores, running the OS STIG scan                                                   |
-| [STIG.md](docs/STIG.md)                 | where the rules come from, how the OS tables are generated, adding rules                                        |
-| [SUPPORT.md](docs/SUPPORT.md)           | support matrix: what was run against a real cluster vs built from schemas                                       |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | the update loop, tab-driven collection, repository layout                                                       |
-| [PERFORMANCE.md](docs/PERFORMANCE.md)   | measured footprint, what keeps it small, knobs                                                                  |
-| [REFRESH.md](docs/REFRESH.md)           | refresh tiers and tuning                                                                                        |
-| [FAPOLICYD.md](docs/FAPOLICYD.md)       | running the probes on fapolicyd-hardened hosts                                                                  |
-| [ROADMAP.md](docs/ROADMAP.md)           | done, partly done, open                                                                                         |
+- [WHY.md](docs/WHY.md) - the tools that exist, what each covers, the gap this fills
+- [TABS.md](docs/TABS.md) - every tab, column and key binding
+- [RUNNING.md](docs/RUNNING.md) - kubeconfig bootstrap, config file, cluster menu, SSH auth and `become`, RBAC, collection tiers
+- [ETCD.md](docs/ETCD.md) - triage cases, the rescue overview, S3 snapshots, how etcd is discovered per layout
+- [RESCUE.md](docs/RESCUE.md) - every step, command and check of `X`: rejoin one server, restore a snapshot; what was learned on real clusters
+- [SECURITY.md](docs/SECURITY.md) - STIG / CIS releases applied, scores, running the OS STIG scan
+- [STIG.md](docs/STIG.md) - where the rules come from, how the OS tables are generated, adding rules
+- [SUPPORT.md](docs/SUPPORT.md) - support matrix: what was run against a real cluster vs built from schemas
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) - the update loop, tab-driven collection, repository layout
+- [PERFORMANCE.md](docs/PERFORMANCE.md) - measured footprint, what keeps it small, knobs
+- [REFRESH.md](docs/REFRESH.md) - refresh tiers and tuning
+- [FAPOLICYD.md](docs/FAPOLICYD.md) - running the probes on fapolicyd-hardened hosts
+- [ROADMAP.md](docs/ROADMAP.md) - done, partly done, open
 
 ## Releases
 

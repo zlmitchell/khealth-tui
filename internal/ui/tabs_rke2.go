@@ -5,10 +5,10 @@ import (
 	"sort"
 	"strings"
 
-	"k8s-health-tui/internal/checks"
-	"k8s-health-tui/internal/distro"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/checks"
+	"github.com/zlmitchell/khealth-tui/internal/distro"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // settings that should normally agree across nodes of the same role

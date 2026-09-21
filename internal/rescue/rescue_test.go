@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/sshrun"
-	"k8s-health-tui/internal/sshrun/sshtest"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun/sshtest"
 )
 
 // fakeCluster is the etcd membership the fake nodes share.

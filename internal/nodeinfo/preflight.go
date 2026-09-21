@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // Preflight holds the facts scripts/preflight.sh collects: what stops rke2

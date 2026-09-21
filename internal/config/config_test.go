@@ -40,7 +40,7 @@ func TestWriteExampleConfig(t *testing.T) {
 	if _, err := WriteExampleConfig(target); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("second write must refuse: %v", err)
 	}
-	if p, err := DefaultConfigPath(); err != nil || !strings.HasSuffix(filepath.ToSlash(p), "k8s-health-tui/config.yaml") {
+	if p, err := DefaultConfigPath(); err != nil || !strings.HasSuffix(filepath.ToSlash(p), "/khealth/config.yaml") {
 		t.Errorf("default path: %q %v", p, err)
 	}
 }

@@ -1,5 +1,5 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS = -s -w -X k8s-health-tui/internal/config.Version=$(VERSION)
+LDFLAGS = -s -w -X github.com/zlmitchell/khealth-tui/internal/config.Version=$(VERSION)
 
 .PHONY: build test vet fmt tidy-check dist docker-build
 

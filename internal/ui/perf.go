@@ -8,10 +8,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/nodeinfo"
-	"k8s-health-tui/internal/perf"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/perf"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // footprint tracks what khealth itself costs the cluster and this machine

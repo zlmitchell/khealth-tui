@@ -7,8 +7,8 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"k8s-health-tui/internal/logs"
-	"k8s-health-tui/internal/stig"
+	"github.com/zlmitchell/khealth-tui/internal/logs"
+	"github.com/zlmitchell/khealth-tui/internal/stig"
 )
 
 // logsLinesApp is a Logs-lines view over a realistic journal: 3 units x

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/export"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/export"
 )
 
 // exportInput is everything the report needs from the app.

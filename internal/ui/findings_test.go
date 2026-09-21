@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"k8s-health-tui/internal/checks"
+	"github.com/zlmitchell/khealth-tui/internal/checks"
 )
 
 func TestFindingKeyIgnoresDigitsAndSeverity(t *testing.T) {

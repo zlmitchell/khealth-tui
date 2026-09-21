@@ -258,7 +258,7 @@ func Default() Config {
 	}
 }
 
-// Version is set at build time via -ldflags "-X k8s-health-tui/internal/config.Version=...".
+// Version is set at build time via -ldflags "-X github.com/zlmitchell/khealth-tui/internal/config.Version=...".
 var Version = "dev"
 
 // Load builds the configuration from defaults, the config file and flags.
@@ -267,7 +267,7 @@ func Load(args []string) (Config, error) {
 
 	fs := flag.NewFlagSet("khealth", flag.ContinueOnError)
 	var (
-		cfgPath      = fs.String("config", "", "config file (default: $XDG_CONFIG_HOME/k8s-health-tui/config.yaml or ./k8s-health-tui.yaml)")
+		cfgPath      = fs.String("config", "", "config file (default: $XDG_CONFIG_HOME/khealth/config.yaml or ./khealth.yaml)")
 		kubeconfig   = fs.String("kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
 		kctx         = fs.String("context", "", "kubeconfig context to use")
 		ns           = fs.String("n", "", "initial namespace filter (empty = all)")
@@ -529,8 +529,8 @@ func Load(args []string) (Config, error) {
 var ExampleConfig string
 
 // DefaultConfigPath is where --init-config writes and the first user-level
-// place the config is looked for: $XDG_CONFIG_HOME/k8s-health-tui/config.yaml
-// (%AppData%/k8s-health-tui/config.yaml on Windows).
+// place the config is looked for: $XDG_CONFIG_HOME/khealth/config.yaml
+// (%AppData%/khealth/config.yaml on Windows).
 func DefaultConfigPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -540,7 +540,7 @@ func DefaultConfigPath() (string, error) {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "k8s-health-tui", "config.yaml"), nil
+	return filepath.Join(dir, "khealth", "config.yaml"), nil
 }
 
 // WriteExampleConfig writes ExampleConfig to path (or DefaultConfigPath when
@@ -566,12 +566,17 @@ func WriteExampleConfig(path string) (string, error) {
 }
 
 func findConfigFile() string {
-	candidates := []string{"k8s-health-tui.yaml", "khealth.yaml"}
+	// working directory first (k8s-health-tui.yaml is the pre-1.0 name), then
+	// the user-level file, then its pre-1.0 location so an existing setup keeps working
+	candidates := []string{"khealth.yaml", "k8s-health-tui.yaml"}
 	if dir, err := os.UserConfigDir(); err == nil {
-		candidates = append(candidates, filepath.Join(dir, "k8s-health-tui", "config.yaml"))
+		candidates = append(candidates, filepath.Join(dir, "khealth", "config.yaml"))
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".config", "k8s-health-tui", "config.yaml"))
+		candidates = append(candidates, filepath.Join(home, ".config", "khealth", "config.yaml"))
+	}
+	if dir, err := os.UserConfigDir(); err == nil {
+		candidates = append(candidates, filepath.Join(dir, "k8s-health-tui", "config.yaml"))
 	}
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {

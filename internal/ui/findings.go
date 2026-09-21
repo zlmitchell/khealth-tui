@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s-health-tui/internal/checks"
+	"github.com/zlmitchell/khealth-tui/internal/checks"
 )
 
 // Findings are recomputed from scratch on every refresh, so the Overview

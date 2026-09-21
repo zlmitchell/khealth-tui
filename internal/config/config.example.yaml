@@ -1,6 +1,6 @@
 # khealth configuration. `khealth --init-config` writes this file to
-# ~/.config/k8s-health-tui/config.yaml (%AppData%/k8s-health-tui/config.yaml
-# on Windows); ./k8s-health-tui.yaml and ./khealth.yaml are also picked up.
+# ~/.config/khealth/config.yaml (%AppData%/khealth/config.yaml
+# on Windows); ./khealth.yaml in the working directory is also picked up.
 # Every key is optional and flags override the file (`khealth -h`).
 
 kubeconfig: ~/.kube/config        # default: $KUBECONFIG / ~/.kube/config

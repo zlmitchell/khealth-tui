@@ -23,9 +23,9 @@ import (
 	"strconv"
 	"strings"
 
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 )
 
 // Benchmark names a reference document the rule IDs were written against.

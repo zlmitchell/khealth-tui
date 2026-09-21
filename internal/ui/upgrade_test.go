@@ -10,7 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"k8s-health-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
 )
 
 // The Addons tab shows the upgrade plans and, on a management cluster, the

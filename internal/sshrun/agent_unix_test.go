@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/crypto/ssh/agent"
 
-	"k8s-health-tui/internal/sshrun/sshtest"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun/sshtest"
 )
 
 // An ssh-agent holding the client key is enough to log in; a socket that

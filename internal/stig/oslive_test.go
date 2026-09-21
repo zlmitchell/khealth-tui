@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 )
 
 // Opt-in harness: run the STIG probe on a real host or container

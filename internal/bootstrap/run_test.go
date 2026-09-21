@@ -17,9 +17,9 @@ import (
 
 	"k8s.io/client-go/tools/clientcmd"
 
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/sshrun"
-	"k8s-health-tui/internal/sshrun/sshtest"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun/sshtest"
 )
 
 // apiserver is a TLS server answering /version; its certificate (valid for

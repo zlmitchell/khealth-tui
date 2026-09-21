@@ -16,8 +16,8 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
-	"k8s-health-tui/internal/config"
-	"k8s-health-tui/internal/sshrun/sshtest"
+	"github.com/zlmitchell/khealth-tui/internal/config"
+	"github.com/zlmitchell/khealth-tui/internal/sshrun/sshtest"
 )
 
 // hostHandler models a node: uid, installed tools, which of them work

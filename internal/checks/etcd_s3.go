@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"k8s-health-tui/internal/etcd"
-	"k8s-health-tui/internal/k8s"
-	"k8s-health-tui/internal/strutil"
+	"github.com/zlmitchell/khealth-tui/internal/etcd"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // S3Config is the effective etcd snapshot S3 configuration of one server:

@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 
-	"k8s-health-tui/internal/perf"
-	"k8s-health-tui/internal/stigdata"
+	"github.com/zlmitchell/khealth-tui/internal/perf"
+	"github.com/zlmitchell/khealth-tui/internal/stigdata"
 )
 
 // Options controls what the node script collects.
