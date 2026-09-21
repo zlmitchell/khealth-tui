@@ -38,7 +38,7 @@ done
 # by the curl probe (config tier) and the crictl pull dry run (heavy tier)
 T=$(printf '\037')
 regyaml() {
-  awk '
+  asyaml "$1" | awk '
     function cflush() { if (top=="configs" && reg!="") printf "C\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", reg, u, p, ca, ce, ke, ins; u=p=ca=ce=ke=ins="" }
     function mflush() { if (top=="mirrors" && reg!="" && reg!="*" && neps==0) print "M\037" reg "\037" }
     function val(s,  i) { i=index(s,":"); s=substr(s,i+1); sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+#.*$/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^["'\'']|["'\'']$/,"",s); return s }
@@ -50,7 +50,7 @@ regyaml() {
     top=="configs" && /^  [^[:space:]]/ { cflush(); reg=$0; sub(/^  /,"",reg); sub(/:[[:space:]]*$/,"",reg); gsub(/["'\'']/,"",reg); next }
     top=="configs" && reg!="" { l=$0; sub(/^[[:space:]]+/,"",l); k=l; sub(/:.*/,"",k)
       if (k=="username") u=val(l); else if (k=="password") p=val(l); else if (k=="ca_file") ca=val(l); else if (k=="cert_file") ce=val(l); else if (k=="key_file") ke=val(l); else if (k=="insecure_skip_verify") ins=val(l); next }
-    END { cflush(); mflush() }' "$1"
+    END { cflush(); mflush() }'
 }
 AIRGAP=; for d in "$RKE2_DD"/agent/images "$K3S_DD"/agent/images; do ls "$d"/*.tar* >/dev/null 2>&1 && AIRGAP=yes; done
 if [ "__CONFIG__" = 1 ]; then
@@ -59,7 +59,7 @@ grep -E '^[^#]*[[:space:]]swap[[:space:]]' /etc/fstab 2>/dev/null
 sec KUBELETSWAP
 # rke2/k3s write failSwapOn: false into their kubelet defaults; kubeadm and
 # a kubelet-arg override keep the upstream default (true)
-grep -hsE '^[[:space:]]*(failSwapOn|swapBehavior):' "$RKE2_DD"/agent/etc/kubelet.conf.d/*.conf "$K3S_DD"/agent/etc/kubelet.conf.d/*.conf /var/lib/kubelet/config.yaml /etc/rancher/rke2/kubelet-config.yaml 2>/dev/null | tr -d ' '
+{ cat "$RKE2_DD"/agent/etc/kubelet.conf.d/*.conf "$K3S_DD"/agent/etc/kubelet.conf.d/*.conf /var/lib/kubelet/config.yaml /etc/rancher/rke2/kubelet-config.yaml; [ -f "$KUBELET_CFG" ] && asyaml "$KUBELET_CFG"; } 2>/dev/null | grep -E '^[[:space:]]*(failSwapOn|swapBehavior):' | tr -d ' "'
 sec MOUNTOPTS
 # real filesystems only, without the per-pod bind mounts: mountpoint|fstype|options
 awk '($1 ~ /^\// || $3 ~ /^(nfs|nfs4|cifs|zfs|fuse\.|fuse$)/) && $2 !~ /^\/(var\/lib\/kubelet\/(pods|plugins)|run\/k3s|sys\/|proc\/|dev\/)/ {print $2"|"$3"|"$4}' /proc/mounts 2>/dev/null

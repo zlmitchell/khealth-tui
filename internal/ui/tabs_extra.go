@@ -1901,11 +1901,8 @@ func (a *App) logsContent() content {
 			}
 			return okText(u.Active == "active", txt, txt)
 		}
-		for _, u := range ni.Units {
-			if u.Name == "rke2-server" || u.Name == "rke2-agent" || u.Name == "k3s" || u.Name == "k3s-agent" || u.Name == "kubelet" {
-				unit = unitText(u)
-				break
-			}
+		if u := ni.Unit(ni.SupervisorUnit()); u != nil {
+			unit = unitText(*u)
 		}
 		// Rancher-managed nodes: the agent that rewrites the config
 		rancher := ""

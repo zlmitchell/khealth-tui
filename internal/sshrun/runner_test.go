@@ -455,6 +455,95 @@ func TestKnownHostsSingleKeyType(t *testing.T) {
 	}
 }
 
+// The TUI dials nodes by InternalIP while the operator's ssh recorded the
+// name: a key known_hosts holds under any other name is accepted for a new
+// address, and the key types on file are offered so the server presents it.
+func TestKnownHostsByOtherName(t *testing.T) {
+	srv := sshtest.New(t, hostHandler{uid: "0"}.handle)
+	srv.AddRSAHostKey(t)
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	cfg := testCfg(srv)
+	cfg.StrictHostKey, cfg.KnownHosts = true, kh
+
+	// the server's ed25519 key under a name that is not the address dialed
+	_ = os.WriteFile(kh, []byte(knownhosts.Line([]string{"cp-1.corp"}, srv.HostKey)+"\n"), 0o600)
+	r := newRunner(t, cfg)
+	if got := r.hostKeyAlgorithms(srv.Addr); len(got) != 1 || got[0] != ssh.KeyAlgoED25519 {
+		t.Errorf("algorithms for an unrecorded address: %v (want the file's types)", got)
+	}
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err != nil {
+		t.Errorf("key known under another name: %v", res.Err)
+	}
+
+	// a revoked key is not accepted, whatever name it is under
+	_ = os.WriteFile(kh, []byte("@revoked "+knownhosts.Line([]string{"cp-1.corp"}, srv.HostKey)+"\n"), 0o600)
+	r = newRunner(t, cfg)
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err == nil {
+		t.Error("revoked key accepted")
+	}
+
+	// another machine's key on file does not vouch for this one
+	other := sshtest.New(t, nil)
+	_ = os.WriteFile(kh, []byte(knownhosts.Line([]string{"cp-2.corp"}, other.HostKey)+"\n"), 0o600)
+	r = newRunner(t, cfg)
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err == nil || !strings.Contains(res.Err.Error(), "not in known_hosts") {
+		t.Errorf("unrelated key on file: %v", res.Err)
+	}
+
+	// a VIP: the address is recorded with server A's key and answers with
+	// server B's, which is on file under B's own name - not a changed key
+	_ = os.WriteFile(kh, []byte(knownhosts.Line([]string{srv.Addr}, other.HostKey)+"\n"+knownhosts.Line([]string{"cp-2.corp"}, srv.HostKey)+"\n"), 0o600)
+	r = newRunner(t, cfg)
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err != nil {
+		t.Errorf("VIP moved to a known server: %v", res.Err)
+	}
+	// a key nobody has seen is still a mismatch, and the message says what a VIP needs
+	_ = os.WriteFile(kh, []byte(knownhosts.Line([]string{srv.Addr}, other.HostKey)+"\n"), 0o600)
+	r = newRunner(t, cfg)
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err == nil || !strings.Contains(res.Err.Error(), "changed since known_hosts") || !strings.Contains(res.Err.Error(), "VIP") {
+		t.Errorf("unknown key at a recorded address: %v", res.Err)
+	}
+}
+
+// --accept-new-host-keys records an unknown address's key on first contact
+// (the file then works for plain strict runs and for ssh) but never
+// accepts a changed one.
+func TestAcceptNewHostKeys(t *testing.T) {
+	srv := sshtest.New(t, hostHandler{uid: "0"}.handle)
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	_ = os.WriteFile(kh, []byte("# empty"), 0o600) // no final newline: the appended line must still be its own line
+	cfg := testCfg(srv)
+	cfg.StrictHostKey, cfg.KnownHosts, cfg.AcceptNewHostKeys = true, kh, true
+	r := newRunner(t, cfg)
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err != nil {
+		t.Fatalf("first contact: %v", res.Err)
+	}
+	b, _ := os.ReadFile(kh)
+	if !strings.Contains(string(b), "\n"+srv.KnownHostsLine()+"\n") {
+		t.Errorf("known_hosts after first contact:\n%s", b)
+	}
+	// the same run dials it again after a reconnect without touching the file
+	r.Close()
+	if res := r.Run(context.Background(), srv.Addr, "s\n"); res.Err != nil {
+		t.Errorf("second dial: %v", res.Err)
+	}
+	if b2, _ := os.ReadFile(kh); string(b2) != string(b) {
+		t.Errorf("recorded twice:\n%s", b2)
+	}
+	// plain strict checking now knows the host
+	cfg.AcceptNewHostKeys = false
+	if res := newRunner(t, cfg).Run(context.Background(), srv.Addr, "s\n"); res.Err != nil {
+		t.Errorf("strict after recording: %v", res.Err)
+	}
+	// a different key for a recorded address is refused, accept-new or not
+	other := sshtest.New(t, nil)
+	_ = os.WriteFile(kh, []byte(knownhosts.Line([]string{srv.Addr}, other.HostKey)+"\n"), 0o600)
+	cfg.AcceptNewHostKeys = true
+	if res := newRunner(t, cfg).Run(context.Background(), srv.Addr, "s\n"); res.Err == nil || !strings.Contains(res.Err.Error(), "changed since known_hosts") {
+		t.Errorf("changed key with accept-new: %v", res.Err)
+	}
+}
+
 func TestPasswordAuth(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // no default keys
 	srv := sshtest.New(t, hostHandler{uid: "0"}.handle)

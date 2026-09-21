@@ -31,6 +31,21 @@ func TestYAMLList(t *testing.T) {
 	if got := YAMLList("tls-san: [", "tls-san"); got != nil {
 		t.Errorf("bad yaml: %v", got)
 	}
+	// rke2 splits a scalar slice value on commas; config.yaml.d "key+" appends
+	if got := YAMLList("tls-san: \"a.example.com, 10.0.0.100\"\ntls-san+:\n  - b.example.com\n", "tls-san"); strings.Join(got, ",") != "a.example.com,10.0.0.100,b.example.com" {
+		t.Errorf("comma scalar + append: %v", got)
+	}
+	// a duplicated key breaks yaml.v3 but not rke2 (last wins): read line by line
+	dup := "tls-san:\n  - old.example.com\nprofile: cis\ntls-san:\n- \"vip.example.com\" # the VIP\n- 10.0.0.100\ntls-san+: [x.example.com, 'y.example.com']\nkube-apiserver-arg:\n  - audit-log-maxage=30\n"
+	if got := YAMLList(dup, "tls-san"); strings.Join(got, ",") != "vip.example.com,10.0.0.100,x.example.com,y.example.com" {
+		t.Errorf("duplicate key fallback: %v", got)
+	}
+	if got := YAMLList(dup, "profile"); strings.Join(got, ",") != "cis" {
+		t.Errorf("scalar via fallback: %v", got)
+	}
+	if got := YAMLList("\ttls-san:\n\t  - a\nservice-cidr: 10.43.0.0/16\n", "service-cidr"); strings.Join(got, ",") != "10.43.0.0/16" {
+		t.Errorf("tab-indented file: %v", got)
+	}
 }
 
 func TestCertSANs(t *testing.T) {

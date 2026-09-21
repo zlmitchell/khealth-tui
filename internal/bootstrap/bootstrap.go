@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -364,21 +365,32 @@ func Verify(ctx context.Context, kubeconfig []byte) (string, error) {
 }
 
 // ClusterName picks the name for the context: an explicit name, else the
-// first label of the endpoint's DNS name, else the node hostname without a
-// trailing node index (cp-1 -> cp).
+// endpoint's DNS name, else the node hostname without its trailing node
+// index, with the dots turned into dashes (api.prod.example.com ->
+// api-prod-example-com, cp-1.corp -> cp-corp). The whole name is kept: the
+// first label alone (api, k8s, cp) is the same for every cluster of an
+// organisation and their khealth-<name>.yaml files would overwrite each other.
 func ClusterName(explicit string, ep Endpoint, src *Source) string {
 	if explicit != "" {
 		return explicit
 	}
 	if net.ParseIP(ep.Host) == nil && ep.Host != "" {
-		return strings.ToLower(strings.SplitN(ep.Host, ".", 2)[0])
+		return dashed(ep.Host)
 	}
-	h := strings.ToLower(strings.SplitN(src.Hostname, ".", 2)[0])
-	h = regexp.MustCompile(`[-_]?\d+$`).ReplaceAllString(h, "")
-	if h == "" {
-		h = "cluster"
+	h := strings.ToLower(strings.TrimSuffix(src.Hostname, "."))
+	first, rest, _ := strings.Cut(h, ".")
+	first = regexp.MustCompile(`[-_]?\d+$`).ReplaceAllString(first, "")
+	if first == "" {
+		return "cluster"
 	}
-	return h
+	if rest != "" {
+		return dashed(first + "." + rest)
+	}
+	return first
+}
+
+func dashed(name string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSuffix(name, ".")), ".", "-")
 }
 
 // Options drive Run.
@@ -465,8 +477,12 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 			kubeDir = filepath.Join(home, ".kube")
 		}
 	}
-	if !o.Fresh && kubeDir != "" {
-		known = existingKubeconfigs(kubeDir)
+	var all []existing // every khealth-*.yaml, reused or not: a name must not land on another cluster's file
+	if kubeDir != "" {
+		all = existingKubeconfigs(kubeDir)
+	}
+	if !o.Fresh {
+		known = all
 	}
 	stale := map[string]bool{}
 	for _, e := range known {
@@ -502,7 +518,8 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 	}
 	logf("  %s: %s (cert %s: %d DNS, %d IP SANs)", src.Host, src.Path, filepath.Base(src.CertPath), len(src.CertDNS), len(src.CertIPs))
 	replace := ""
-	if ca := kubeconfigCA(src.Kubeconfig); ca != "" {
+	ca := kubeconfigCA(src.Kubeconfig)
+	if ca != "" {
 		for _, e := range known {
 			if e.CA != ca || stale[e.Path] {
 				continue
@@ -579,6 +596,24 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 			return nil, err
 		}
 		path = filepath.Join(home, ".kube", "khealth-"+res.Name+".yaml")
+		// another cluster already owns that file (same --bootstrap-name, or
+		// a name derived the same way): number this one instead of
+		// overwriting it
+		owner := map[string]string{}
+		for _, e := range all {
+			owner[e.Path] = e.CA
+		}
+		base := path
+		for i := 2; ; i++ {
+			eca, taken := owner[path]
+			if !taken || (ca != "" && eca == ca) {
+				break
+			}
+			path = strings.TrimSuffix(base, ".yaml") + "-" + strconv.Itoa(i) + ".yaml"
+		}
+		if path != base {
+			res.Notes = append(res.Notes, base+" belongs to another cluster: wrote "+path+" instead (--bootstrap-name picks a different name)")
+		}
 	}
 	if err := writeFile(path, out); err != nil {
 		return nil, err

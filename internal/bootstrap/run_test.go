@@ -143,14 +143,14 @@ func TestRunEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, strings.Join(logs, "\n"))
 	}
-	if res.Version != "v1.30.4+rke2r1" || res.Name != "cp" || res.Server != "https://127.0.0.1" || res.Endpoint.Host != "127.0.0.1" || res.Endpoint.Score != 10 {
+	if res.Version != "v1.30.4+rke2r1" || res.Name != "cp-example-com" || res.Server != "https://127.0.0.1" || res.Endpoint.Host != "127.0.0.1" || res.Endpoint.Score != 10 {
 		t.Errorf("result: %+v", res)
 	}
-	if res.Path != filepath.Join(home, ".kube", "khealth-cp.yaml") {
+	if res.Path != filepath.Join(home, ".kube", "khealth-cp-example-com.yaml") {
 		t.Errorf("path %q", res.Path)
 	}
 	kc, err := clientcmd.LoadFromFile(res.Path)
-	if err != nil || kc.CurrentContext != "cp" || kc.Clusters["cp"] == nil || kc.Clusters["cp"].Server != "https://127.0.0.1:"+port {
+	if err != nil || kc.CurrentContext != "cp-example-com" || kc.Clusters["cp-example-com"] == nil || kc.Clusters["cp-example-com"].Server != "https://127.0.0.1:"+port {
 		t.Errorf("written kubeconfig: %v %+v", err, kc)
 	}
 	joined := strings.Join(res.Notes, "\n")
@@ -336,11 +336,15 @@ func TestRankAndNames(t *testing.T) {
 	if ClusterName("", Endpoint{Host: "10.0.0.1"}, &Source{Hostname: ""}) != "cluster" {
 		t.Error("empty hostname falls back to cluster")
 	}
-	if ClusterName("", Endpoint{Host: "10.0.0.1"}, &Source{Hostname: "Master_3.corp"}) != "master" {
-		t.Errorf("hostname index stripped: %q", ClusterName("", Endpoint{Host: "10.0.0.1"}, &Source{Hostname: "Master_3.corp"}))
+	if ClusterName("", Endpoint{Host: "10.0.0.1"}, &Source{Hostname: "Master_3.corp"}) != "master-corp" {
+		t.Errorf("hostname index stripped, domain kept: %q", ClusterName("", Endpoint{Host: "10.0.0.1"}, &Source{Hostname: "Master_3.corp"}))
 	}
-	if ClusterName("", Endpoint{Host: "K8S-Prod.example.com"}, nil) != "k8s-prod" {
-		t.Error("dns name lowercased")
+	// the whole DNS name: api.prod.corp and api.dev.corp are two clusters
+	if ClusterName("", Endpoint{Host: "K8S-Prod.example.com."}, nil) != "k8s-prod-example-com" {
+		t.Error("dns name lowercased and kept whole")
+	}
+	if ClusterName("", Endpoint{Host: "api.dev.corp"}, nil) == ClusterName("", Endpoint{Host: "api.prod.corp"}, nil) {
+		t.Error("clusters under one domain share a name")
 	}
 	if ClusterName("", Endpoint{}, &Source{Hostname: "node7"}) != "node" {
 		t.Error("empty endpoint uses the hostname")

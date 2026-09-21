@@ -76,6 +76,7 @@ type Info struct {
 	Hardening        map[string]string // selinux, fips, apparmor, svc_*, lockdown, secureboot, reboot_required, ...
 	ConfigFiles      []ConfigFile      // rke2/k3s config.yaml(.d) (secrets masked)
 	ExtraFiles       []ConfigFile      // audit policy, PSS config, /etc/rancher listings
+	PSA              []*PSAConfig      // PodSecurity admission configs among ExtraFiles (psa.go)
 	Manifests        []ManifestFile    // rke2/k3s server/manifests (auto-deploy dir)
 	StaticPods       []ManifestFile    // pod-manifests / /etc/kubernetes/manifests
 	DataDir          string            // rke2/k3s data-dir
@@ -499,6 +500,11 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	parsePreflight(info, secs)
 	info.ConfigFiles = ParseDumps(secs["RKE2CFG"])
 	info.ExtraFiles = ParseDumps(secs["RKE2EXTRA"])
+	for _, cf := range info.ExtraFiles {
+		if p := ParsePSA(cf.Path, cf.Content); p != nil {
+			info.PSA = append(info.PSA, p)
+		}
+	}
 	info.Manifests = parseManifests(secs["MANIFESTS"])
 	info.StaticPods = parseManifests(secs["STATICPODS"])
 	for _, cf := range ParseDumps(secs["APISERVERCERT"]) {
@@ -805,6 +811,31 @@ func (i *Info) Service(name string) *Service {
 		}
 	}
 	return nil
+}
+
+// SupervisorUnit names the unit that carries the kubelet on this node:
+// kubelet itself (kubeadm) or the rke2/k3s supervisor. rke2 and k3s install
+// both unit files on every node and exactly one runs, so the active one
+// wins; with none active the node's role decides (server on a control
+// plane, agent elsewhere) rather than the first inactive unit file found.
+// "" when none of them is present.
+func (i *Info) SupervisorUnit() string {
+	names := []string{"kubelet", "rke2-server", "rke2-agent", "k3s", "k3s-agent"}
+	for _, n := range names {
+		if s := i.Service(n); s != nil && s.Active == "active" {
+			return n
+		}
+	}
+	want := []string{"rke2-agent", "k3s-agent", "kubelet"}
+	if i.ControlPlane {
+		want = []string{"rke2-server", "k3s", "kubelet"}
+	}
+	for _, n := range append(want, names...) {
+		if i.Service(n) != nil {
+			return n
+		}
+	}
+	return ""
 }
 
 // Unit returns unit info by name.
@@ -1496,7 +1527,7 @@ func (i *Info) MergeConfig(prev *Info) {
 	if i.NTPSynced == nil { // timedatectl only runs on config cycles when chrony/timesyncd are not there
 		i.NTPSynced, i.NTPEnabled = prev.NTPSynced, prev.NTPEnabled
 	}
-	i.ConfigFiles, i.ExtraFiles, i.Manifests, i.StaticPods, i.Settings = prev.ConfigFiles, prev.ExtraFiles, prev.Manifests, prev.StaticPods, prev.Settings
+	i.ConfigFiles, i.ExtraFiles, i.PSA, i.Manifests, i.StaticPods, i.Settings = prev.ConfigFiles, prev.ExtraFiles, prev.PSA, prev.Manifests, prev.StaticPods, prev.Settings
 	i.CNI, i.Registries, i.RegistryMirrors, i.ContainerdHosts, i.ContainerdConfig = prev.CNI, prev.Registries, prev.RegistryMirrors, prev.ContainerdHosts, prev.ContainerdConfig
 	i.NetProbes, i.NetProbed = prev.NetProbes, prev.NetProbed
 	i.Preflight.mergeConfig(&prev.Preflight)

@@ -32,7 +32,15 @@ type Runner struct {
 	// knownKey is a throwaway key used to ask known_hosts which key types
 	// it holds for a host (see hostKeyAlgorithms); nil without strict checking
 	knownKey ssh.PublicKey
-	notes    []string
+	known    ssh.HostKeyCallback // the raw known_hosts lookup (strict only)
+	// knownKeys are the host keys known_hosts holds under any name, and
+	// knownTypes their key types in file order: a node reached by an address
+	// the file does not list (the TUI dials InternalIPs; the operator's ssh
+	// recorded the name) is still the machine whose key is on file
+	knownKeys  map[string]bool
+	knownTypes []string
+	knownMu    sync.Mutex // knownKeys/knownTypes are written by recordNewHostKey from parallel dials
+	notes      []string
 
 	mu      sync.Mutex
 	clients map[string]*ssh.Client
@@ -91,6 +99,8 @@ func New(cfg config.SSH) (*Runner, error) {
 		if err != nil {
 			return nil, fmt.Errorf("known_hosts %s: %w (set ssh.strict_host_key: false or --insecure-host-key to skip)", path, err)
 		}
+		r.known = cb
+		r.knownKeys, r.knownTypes = readKnownKeys(path)
 		r.hostKey = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			err := cb(hostname, remote, key)
 			var ke *knownhosts.KeyError
@@ -100,10 +110,28 @@ func New(cfg config.SSH) (*Runner, error) {
 					h = hp
 				}
 				if len(ke.Want) == 0 {
-					return fmt.Errorf("host key for %s not in known_hosts (ssh to it once, or --insecure-host-key)", h)
+					if r.hasKnownKey(key) {
+						// the address is new, the key is not: the same host
+						// under another name (ssh records the name it was
+						// given, not the IP the node object carries)
+						return nil
+					}
+					if cfg.AcceptNewHostKeys {
+						// first contact: record it, as ssh does with
+						// StrictHostKeyChecking=accept-new; from now on a
+						// different key for this address is a mismatch
+						return r.recordNewHostKey(path, hostname, key)
+					}
+					return fmt.Errorf("host key for %s not in known_hosts (ssh to it once, ssh-keyscan it, --accept-new-host-keys, or --insecure-host-key)", h)
+				}
+				if r.hasKnownKey(key) {
+					// recorded with one node's key, answering with another
+					// node's known key: the name is a VIP that moved to a
+					// different server (each has its own host key)
+					return nil
 				}
 				// wrapped, not replaced: hostKeyAlgorithms reads ke.Want through it
-				return fmt.Errorf("host key for %s changed since known_hosts recorded it: ssh-keygen -R %s, then ssh to it once (or --insecure-host-key): %w", h, h, err)
+				return fmt.Errorf("host key for %s changed since known_hosts recorded it: ssh-keygen -R %s, then ssh to it once (or --insecure-host-key); a VIP that moves between servers needs every server's key in known_hosts (--accept-new-host-keys records them): %w", h, h, err)
 			}
 			return err
 		}
@@ -119,20 +147,31 @@ func New(cfg config.SSH) (*Runner, error) {
 // its own preferred type (ecdsa/rsa) and a host recorded only with, say, an
 // ed25519 key fails as "key mismatch" even though that key is right - the
 // usual case for a host first reached with ssh, which stores one key type.
-// Nil (any algorithm) for unknown hosts and without strict checking.
+// An address the file does not list gets the types it holds for any host,
+// so a node recorded under its name presents the key that is on file when
+// dialed by IP. Nil (any algorithm) with nothing on file and without
+// strict checking.
 func (r *Runner) hostKeyAlgorithms(addr string) []string {
 	if r.knownKey == nil {
 		return nil
 	}
-	err := r.hostKey(addr, &net.TCPAddr{}, r.knownKey)
+	err := r.known(addr, &net.TCPAddr{}, r.knownKey)
 	var ke *knownhosts.KeyError
-	if !errors.As(err, &ke) || len(ke.Want) == 0 {
+	if !errors.As(err, &ke) {
 		return nil
 	}
+	// the types recorded for this address first, then every type the file
+	// holds: a VIP recorded with one server's key may answer with another's
+	var types []string
+	for _, k := range ke.Want {
+		types = append(types, k.Key.Type())
+	}
+	r.knownMu.Lock()
+	types = append(types, r.knownTypes...)
+	r.knownMu.Unlock()
 	var algos []string
 	seen := map[string]bool{}
-	for _, k := range ke.Want {
-		t := k.Key.Type()
+	for _, t := range types {
 		if seen[t] {
 			continue
 		}
@@ -144,6 +183,75 @@ func (r *Runner) hostKeyAlgorithms(addr string) []string {
 		algos = append(algos, t)
 	}
 	return algos
+}
+
+func (r *Runner) hasKnownKey(key ssh.PublicKey) bool {
+	r.knownMu.Lock()
+	defer r.knownMu.Unlock()
+	return r.knownKeys[string(key.Marshal())]
+}
+
+// recordNewHostKey appends the key an unknown address presented to the
+// known_hosts file (one line, the form ssh writes) and remembers it for
+// the dials that follow in this run.
+func (r *Runner) recordNewHostKey(path, hostname string, key ssh.PublicKey) error {
+	r.knownMu.Lock()
+	defer r.knownMu.Unlock()
+	k := string(key.Marshal())
+	if !r.knownKeys[k] {
+		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key) + "\n"
+		if b, err := os.ReadFile(path); err == nil && len(b) > 0 && b[len(b)-1] != '\n' {
+			line = "\n" + line // a file ssh left without a final newline
+		}
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+		if err != nil {
+			return fmt.Errorf("record host key for %s: %w", hostname, err)
+		}
+		_, err = f.WriteString(line)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return fmt.Errorf("record host key for %s: %w", hostname, err)
+		}
+		r.knownTypes = append(r.knownTypes, key.Type())
+	}
+	r.knownKeys[k] = true
+	return nil
+}
+
+// readKnownKeys collects every host key in a known_hosts file (hashed
+// entries included: the key is in the clear, only the name is hashed) and
+// their key types in file order. @revoked keys are left out, @cert-authority
+// entries are not host keys.
+func readKnownKeys(path string) (map[string]bool, []string) {
+	keys := map[string]bool{}
+	revoked := map[string]bool{}
+	var types []string
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return keys, nil
+	}
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		marker, _, key, _, _, err := ssh.ParseKnownHosts(line)
+		if err != nil || key == nil {
+			continue
+		}
+		k := string(key.Marshal())
+		switch marker {
+		case "revoked":
+			revoked[k] = true
+		case "":
+			if !keys[k] {
+				types = append(types, key.Type())
+			}
+			keys[k] = true
+		}
+	}
+	for k := range revoked {
+		delete(keys, k)
+	}
+	return keys, types
 }
 
 // Notes describes the auth methods that were set up.

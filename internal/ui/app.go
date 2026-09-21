@@ -1954,8 +1954,9 @@ func (a *App) nsOptions() []string {
 	return opts
 }
 
-// nsRow describes a namespace for the picker: PSA level and privileged pods.
-func (a *App) nsRow(name string) []string {
+// nsRow describes a namespace for the picker: PSA level (label, else the
+// admission config cfg's default) and privileged pods.
+func (a *App) nsRow(name string, cfg *nodeinfo.PSAConfig) []string {
 	if name == "(all namespaces)" || a.snap == nil {
 		return []string{name, "", "", "", ""}
 	}
@@ -1966,15 +1967,28 @@ func (a *App) nsRow(name string) []string {
 		}
 	}
 	enforce := labels["pod-security.kubernetes.io/enforce"]
+	exempt := cfg != nil && cfg.Exempt(name)
 	psa := ""
-	switch enforce {
-	case "privileged":
+	switch {
+	case exempt:
+		// exemptions.namespaces skips admission entirely, labels or not
+		psa = styleWarn.Render("privileged (exempt in " + shortPath(cfg.Path) + ")")
+	case enforce == "privileged":
 		psa = styleWarn.Render("privileged")
-	case "baseline":
+	case enforce == "baseline":
 		psa = styleInfo.Render("baseline")
-	case "restricted":
+	case enforce == "restricted":
 		psa = styleOK.Render("restricted")
-	case "":
+	case enforce == "" && cfg != nil && cfg.External == "":
+		lvl := cfg.EnforceLevel()
+		st := styleWarn
+		if lvl == "baseline" {
+			st = styleInfo
+		} else if lvl == "restricted" {
+			st = styleOK
+		}
+		psa = st.Render(lvl) + styleDim.Render(" (cluster default)")
+	case enforce == "":
 		psa = styleDim.Render("none (cluster default)")
 	default:
 		psa = enforce
@@ -2015,7 +2029,11 @@ func (a *App) nsRow(name string) []string {
 	}
 	note := ""
 	switch {
-	case enforce == "" && (priv > 0 || hostNS > 0) && !k8s.IsSystemNamespace(name):
+	case exempt && !k8s.IsSystemNamespace(name):
+		note = styleWarn.Render("user namespace exempt from PSA")
+	case exempt:
+		note = styleDim.Render("system, exempt")
+	case enforce == "" && (priv > 0 || hostNS > 0) && !k8s.IsSystemNamespace(name) && (cfg == nil || cfg.EnforceLevel() == "privileged"):
 		note = styleWarn.Render("privileged workloads without a PSA policy")
 	case enforce == "restricted" && (priv > 0 || hostNS > 0):
 		note = styleCrit.Render("privileged pods despite restricted (pre-existing or exempt)")
@@ -2023,6 +2041,19 @@ func (a *App) nsRow(name string) []string {
 		note = styleDim.Render("system")
 	}
 	return []string{name, psa, privTxt, fmt.Sprint(pods), note}
+}
+
+// psaConfig is the PodSecurity admission config the apiserver runs with,
+// once a server node's config tier has read the file (nil before).
+func (a *App) psaConfig() *nodeinfo.PSAConfig {
+	if a.snap == nil {
+		return nil
+	}
+	paths := map[string]string{}
+	for n, f := range k8s.ComponentArgs(a.snap.Pods, "kube-apiserver") {
+		paths[n] = f["admission-control-config-file"]
+	}
+	return nodeinfo.EffectivePSA(a.nodes, paths)
 }
 
 func (a *App) bodyHeight() int {
@@ -2506,7 +2537,7 @@ func (a *App) renderOverlay() string {
 		lines = helpLines(a.width - 4)
 	case ovNamespace:
 		title = "Select namespace"
-		lines = append(lines, a.nsInput.View(), styleDim.Render("PSA = pod-security.kubernetes.io/enforce label (warn/audit in brackets); PRIV = running pods with privileged containers / host namespaces"), "")
+		lines = append(lines, a.nsInput.View(), styleDim.Render("PSA = pod-security.kubernetes.io/enforce label (warn/audit in brackets), else the admission config's default; exempt = listed in its exemptions.namespaces; PRIV = running pods with privileged containers / host namespaces"), "")
 		opts := a.nsOptions()
 		visible := h - 7
 		start := 0
@@ -2516,8 +2547,9 @@ func (a *App) renderOverlay() string {
 		// size the columns from every namespace, not just the visible window,
 		// so the layout stays put while scrolling
 		rows := make([][]string, 0, len(opts))
+		cfg := a.psaConfig()
 		for _, o := range opts {
-			rows = append(rows, a.nsRow(o))
+			rows = append(rows, a.nsRow(o, cfg))
 		}
 		tw := a.width - 8
 		hdr, rl := renderTable(tw, []column{{title: "NAMESPACE", max: 40}, {title: "PSA ENFORCE"}, {title: "PRIV PODS"}, {title: "PODS", right: true}, {title: "NOTE"}}, rows)

@@ -15,18 +15,84 @@
 # parser. Never print secrets: pass file dumps through `mask`.
 sec() { printf '\n===%s\n' "$1"; }
 export LC_ALL=C
+# Rancher-provisioned nodes get config.yaml.d/50-rancher.yaml and
+# registries.yaml as one-line JSON. j2y turns JSON into block YAML (2-space
+# indent, scalars kept quoted) so every reader here - mask, the data-dir
+# and kubelet-arg lookups, the registries parser in preflight.sh, and the
+# Go side - sees the one format. asyaml applies it when a file starts with
+# "{" and passes YAML through untouched.
+j2y() {
+  awk '
+  function pad(n,  s) { s=""; while (n-- > 0) s=s "  "; return s }
+  function kq(k) { return (k ~ /^[A-Za-z0-9_.\/-]+$/) ? k : "\"" k "\"" }
+  function place(txt) {
+    if (typ[depth] == "[") print pad(depth-1) "- " txt
+    else if (key != "") { print pad(depth-1) kq(key) ": " txt; key="" }
+    else print txt
+  }
+  { s = s $0 "\n" }
+  END {
+    n=length(s); i=1; depth=0; key=""; pend=""
+    while (i <= n) {
+      c=substr(s,i,1)
+      if (c ~ /[[:space:],]/) { i++; continue }
+      if (c == "{" || c == "[") {
+        if (typ[depth] == "[") print pad(depth-1) "-"
+        else if (key != "") { print pad(depth-1) kq(key) ":"; key="" }
+        depth++; typ[depth]=c; i++; continue
+      }
+      if (c == "}" || c == "]") { depth--; i++; continue }
+      if (c == ":") { key=pend; pend=""; i++; continue }
+      if (c == "\"") {
+        j=i+1; str=""
+        while (j <= n) { cj=substr(s,j,1); if (cj == "\\") { str=str cj substr(s,j+1,1); j+=2; continue }; if (cj == "\"") break; str=str cj; j++ }
+        i=j+1
+        if (typ[depth] == "{" && key == "") { pend=str; continue }
+        place("\"" str "\""); continue
+      }
+      j=i; tok=""
+      while (j <= n) { cj=substr(s,j,1); if (cj ~ /[],}[:space:]]/) break; tok=tok cj; j++ }
+      i=j; place(tok)
+    }
+  }' "$1"
+}
+isjson() { head -c 64 "$1" 2>/dev/null | grep -q '^[[:space:]]*{'; }
+asyaml() { if isjson "$1"; then j2y "$1"; else cat "$1"; fi; }
+# jsonnote prints a comment line naming a file that is JSON on disk, so the
+# dump says what it converted (every reader here skips comments)
+jsonnote() { isjson "$1" && echo "# $1 is JSON on disk (Rancher-delivered), shown as YAML"; }
 RKE2_DD=/var/lib/rancher/rke2; K3S_DD=/var/lib/rancher/k3s
 for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml; do
   [ -f "$f" ] || continue
-  v=$(sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' "$f" | tail -1 | sed 's/[[:space:]]*$//')
+  v=$(asyaml "$f" | sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' | tail -1 | sed 's/[[:space:]]*$//')
   [ -n "$v" ] && RKE2_DD=$v
 done
 for f in /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do
   [ -f "$f" ] || continue
-  v=$(sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' "$f" | tail -1 | sed 's/[[:space:]]*$//')
+  v=$(asyaml "$f" | sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' | tail -1 | sed 's/[[:space:]]*$//')
   [ -n "$v" ] && K3S_DD=$v
 done
-mask() { sed -E 's/^([[:space:]]*(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)[[:space:]]*:).*/\1 <masked>/' "$1"; }
+# files config.yaml(.d) points at: cfgarg reads one flag out of a *-arg
+# list (kubelet-arg config=, kube-apiserver-arg admission-control-config-file=),
+# cfgtop a top-level key; the last mention wins, as in rke2. Absolute paths only.
+cfgall() {
+  for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do
+    [ -f "$f" ] && asyaml "$f"
+  done
+}
+cfgarg() {
+  cfgall | awk -v key="$1" -v flag="$2" '
+    /^[^[:space:]#-]/ { top=$0; sub(/[+]?:.*/,"",top) }
+    top==key { s=$0; while (match(s, "(^|[^A-Za-z0-9_-])" flag "=[[:space:]]*\"?/[^]\",[:space:]]+")) { v=substr(s,RSTART,RLENGTH); sub(/^[^\/]*/,"",v); print v; s=substr(s,RSTART+RLENGTH) } }' | tail -1
+}
+cfgtop() { cfgall | sed -nE "s/^$1:[[:space:]]*\"?(\/[^\"#[:space:]]+).*/\1/p" | tail -1; }
+KUBELET_CFG=$(cfgarg kubelet-arg config)
+PSA_CFG=$(cfgarg kube-apiserver-arg admission-control-config-file); [ -n "$PSA_CFG" ] || PSA_CFG=$(cfgtop pod-security-admission-config-file)
+AUDIT_POLICY=$(cfgarg kube-apiserver-arg audit-policy-file); [ -n "$AUDIT_POLICY" ] || AUDIT_POLICY=$(cfgtop audit-policy-file)
+# secrets in YAML lines (quoted keys included) and, should JSON ever reach
+# it unconverted, in "key":"value" pairs anywhere on the line
+mask() { sed -E 's/^([[:space:]]*"?(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)"?[[:space:]]*:).*/\1 <masked>/; s/"(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/"\1":"<masked>"/g' "$1"; }
+maskreg() { sed -E 's/^([[:space:]]*"?(password|username|token|auth|identitytoken)"?[[:space:]]*:).*/\1 <masked>/; s/"(password|username|token|auth|identitytoken)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/"\1":"<masked>"/g' "$1"; }
 sec DATADIR; echo "rke2=$RKE2_DD"; echo "k3s=$K3S_DD"
 # crictl and the CRI socket: rke2 ships its own binary, k3s wraps it, kubeadm
 # nodes have the distro package. Used by the heavy tier (images, containers)
@@ -179,18 +245,26 @@ echo "config_probed=yes"
 fi
 if [ "__CONFIG__" = 1 ]; then
 sec RKE2CFG
-# rke2/k3s config.yaml(.d), and on kubeadm/upstream nodes the kubelet's
-# KubeletConfiguration and the drop-ins that carry its flags
-for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml /var/lib/kubelet/config.yaml /var/lib/kubelet/kubeadm-flags.env /etc/default/kubelet /etc/sysconfig/kubelet /etc/systemd/system/kubelet.service.d/*.conf; do
+# rke2/k3s config.yaml(.d), the kubelet config file a kubelet-arg config=
+# names, and on kubeadm/upstream nodes the kubelet's KubeletConfiguration
+# and the drop-ins that carry its flags
+for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml "${KUBELET_CFG:-/dev/null/none}" /var/lib/kubelet/config.yaml /var/lib/kubelet/kubeadm-flags.env /etc/default/kubelet /etc/sysconfig/kubelet /etc/systemd/system/kubelet.service.d/*.conf; do
   [ -f "$f" ] || continue
   echo "--- $f"
-  grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | mask /dev/stdin
+  jsonnote "$f"
+  asyaml "$f" | grep -vE '^[[:space:]]*#' | mask /dev/stdin
 done
 sec RKE2EXTRA
-for f in /etc/rancher/rke2/audit-policy.yaml /etc/rancher/rke2/rke2-pss.yaml /etc/rancher/rke2/psa.yaml /etc/rancher/rke2/rke2-cis-sysctl.conf /etc/rancher/rke2/rke2-cis.yaml /etc/rancher/k3s/audit-policy.yaml /etc/rancher/k3s/psa.yaml; do
+# the admission (PSA) config and audit policy config.yaml points at, then
+# the files rke2/k3s create for profile: cis; each once
+DUMPED=" "
+for f in "${PSA_CFG:-/dev/null/none}" "${AUDIT_POLICY:-/dev/null/none}" /etc/rancher/rke2/audit-policy.yaml /etc/rancher/rke2/rke2-pss.yaml /etc/rancher/rke2/psa.yaml /etc/rancher/rke2/rke2-cis-sysctl.conf /etc/rancher/rke2/rke2-cis.yaml /etc/rancher/k3s/audit-policy.yaml /etc/rancher/k3s/psa.yaml; do
   [ -f "$f" ] || continue
+  case "$DUMPED" in *" $f "*) continue;; esac
+  DUMPED="$DUMPED$f "
   echo "--- $f"
-  head -c 16384 "$f" | mask /dev/stdin
+  jsonnote "$f"
+  asyaml "$f" | head -c 16384 | mask /dev/stdin
 done
 for d in /etc/rancher/rke2 /etc/rancher/k3s /etc/rancher/agent /etc/rancher/node; do
   [ -d "$d" ] || continue
@@ -198,15 +272,19 @@ for d in /etc/rancher/rke2 /etc/rancher/k3s /etc/rancher/agent /etc/rancher/node
   ls -la "$d" 2>/dev/null | tail -n +2
 done
 sec MANIFESTS
+# the auto-deploy dir and its subdirectories (rke2 walks them; Rancher
+# delivers its HelmChartConfig / addon manifests under manifests/rancher/);
+# a JSON manifest is converted so its kinds are counted like YAML ones
 for d in "$RKE2_DD/server/manifests" "$K3S_DD/server/manifests"; do
   [ -d "$d" ] || continue
-  for f in "$d"/*; do
+  for f in "$d"/* "$d"/*/*; do
     [ -f "$f" ] || continue
     sz=$(stat -c %s "$f" 2>/dev/null); mt=$(stat -c %Y "$f" 2>/dev/null)
-    kinds=$(grep -E '^kind:' "$f" 2>/dev/null | sed 's/kind:[[:space:]]*//' | sort | uniq -c | awk '{printf "%s x%s,", $2, $1}')
+    kinds=$(asyaml "$f" 2>/dev/null | grep -E '^kind:' | sed 's/kind:[[:space:]]*//' | tr -d '"' | sort | uniq -c | awk '{printf "%s x%s,", $2, $1}')
     echo "--- $f|$sz|$mt|$kinds"
     if [ "${sz:-0}" -le 65536 ] && ! grep -q 'chartContent:' "$f" 2>/dev/null; then
-      mask "$f"
+      jsonnote "$f"
+      asyaml "$f" | mask /dev/stdin
     else
       echo "(content omitted: bundled chart tarball / >64KB)"
     fi
@@ -225,7 +303,7 @@ fi
 sec RANCHER
 sa=$(echo "$UNITS_OUT" | awk -F'|' '$1=="rancher-system-agent"{print $2" "$3" "$4" "}')
 echo "system-agent=${sa:-not-found inactive dead }"
-[ -f /etc/rancher/agent/config.yaml ] && echo "agent-url=$(grep -E '^[[:space:]]*url:' /etc/rancher/agent/config.yaml 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*url:[[:space:]]*//')"
+[ -f /etc/rancher/agent/config.yaml ] && echo "agent-url=$(asyaml /etc/rancher/agent/config.yaml 2>/dev/null | grep -E '^[[:space:]]*url:' | head -1 | sed -E 's/^[[:space:]]*url:[[:space:]]*//' | tr -d '"')"
 [ -f /etc/rancher/rke2/config.yaml.d/50-rancher.yaml ] && echo "rancher-provisioned=yes"
 [ -f /etc/rancher/k3s/config.yaml.d/50-rancher.yaml ] && echo "rancher-provisioned=yes"
 [ -f /var/lib/rancher/agent/rancher2_connection_info.json ] && echo "connection-info=yes"
@@ -275,7 +353,7 @@ sec REGISTRIES
 for f in /etc/rancher/rke2/registries.yaml /etc/rancher/k3s/registries.yaml; do
   [ -f "$f" ] || continue
   echo "--- $f"
-  sed -E 's/^([[:space:]]*(password|username|token|auth|identitytoken)[[:space:]]*:).*/\1 <masked>/' "$f"
+  asyaml "$f" | maskreg /dev/stdin
 done
 sec CONTAINERDREG
 for d in /var/lib/rancher/rke2/agent/etc/containerd/certs.d /var/lib/rancher/k3s/agent/etc/containerd/certs.d /etc/containerd/certs.d; do

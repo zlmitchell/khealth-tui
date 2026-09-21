@@ -27,7 +27,8 @@ ssh:
   nodes: []                       # only SSH to these node names (empty = every node in the cluster)
     # - cp-1
   bastion: ""                     # jump host: user@host[:port]
-  strict_host_key: true           # verify against known_hosts (false = accept anything)
+  strict_host_key: true           # verify against known_hosts (false = accept anything); a key on file under any name is trusted for a new address or a VIP that moved
+  accept_new_host_keys: false     # true: record a never-seen node's key in known_hosts on first contact (StrictHostKeyChecking=accept-new); a changed key still fails
   known_hosts: ~/.ssh/known_hosts
   concurrency: 8
   nice: true                      # run the probe scripts under renice 19 + ionice best-effort-lowest on the nodes

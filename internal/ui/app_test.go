@@ -162,7 +162,7 @@ func TestRenderAllTabsAndDetails(t *testing.T) {
 	a.sub[tabWorkloads] = 0
 	a.overlay = ovNamespace
 	a.nsInput.SetValue("")
-	if r := a.nsRow("default"); !strings.Contains(ansi.Strip(r[1]), "none") {
+	if r := a.nsRow("default", nil); !strings.Contains(ansi.Strip(r[1]), "none") {
 		t.Errorf("default namespace should have no PSA label: %v", r)
 	}
 	a.nsInput.SetValue("team")

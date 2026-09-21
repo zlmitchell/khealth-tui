@@ -171,6 +171,16 @@ type evaluator struct {
 
 func (e *evaluator) add(r Result) { e.out = append(e.out, r) }
 
+// psaConfig is the PodSecurity admission config the apiserver runs with,
+// read from a server node's disk by the SSH config tier (nil without it).
+func (e *evaluator) psaConfig() *nodeinfo.PSAConfig {
+	paths := map[string]string{}
+	for n, f := range e.apiserver {
+		paths[n] = f["admission-control-config-file"]
+	}
+	return nodeinfo.EffectivePSA(e.in.Nodes, paths)
+}
+
 // perNode aggregates a check across the nodes present in flags maps.
 func (e *evaluator) perNode(id, title, cat, group, fix string, nodes []string, check func(node string) (Status, string)) {
 	if len(nodes) == 0 {

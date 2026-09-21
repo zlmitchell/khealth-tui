@@ -9,7 +9,29 @@ import (
 	"github.com/zlmitchell/khealth-tui/internal/distro"
 	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 	"github.com/zlmitchell/khealth-tui/internal/strutil"
+	corev1 "k8s.io/api/core/v1"
 )
+
+// sharedSANs is a node's tls-san list as a sorted set without the entries
+// that name the node itself (its hostname, node name and addresses): the
+// part every server should agree on.
+func sharedSANs(ni *nodeinfo.Info, node *corev1.Node) []string {
+	self := map[string]bool{strings.ToLower(ni.Hostname): true}
+	if node != nil {
+		self[strings.ToLower(node.Name)] = true
+		for _, a := range node.Status.Addresses {
+			self[strings.ToLower(a.Address)] = true
+		}
+	}
+	var out []string
+	for _, s := range strutil.Uniq(ni.TLSSAN) {
+		if !self[strings.ToLower(s)] {
+			out = append(out, strings.ToLower(s))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // settings that should normally agree across nodes of the same role
 // driftKeysUpstream are the KubeletConfiguration fields (kubeadm / upstream
@@ -65,8 +87,11 @@ func (a *App) rke2Content() content {
 				vs[k] = map[string]bool{}
 			}
 			v := ni.Settings[k]
-			if k == "tls-san" { // block lists are empty in Settings; use the parsed list
-				v = strings.Join(ni.TLSSAN, ",")
+			if k == "tls-san" {
+				// block lists are empty in Settings; compare the parsed list
+				// as a set, without the node's own name and addresses (each
+				// server may list itself) - order and self-entries are not drift
+				v = strings.Join(sharedSANs(ni, a.snap.Node(n)), ",")
 			}
 			vs[k][v] = true
 		}
@@ -89,6 +114,22 @@ func (a *App) rke2Content() content {
 	// API endpoint: what the kubeconfig uses vs what the serving certificate
 	// allows vs what tls-san asks for
 	hdr = append(hdr, a.endpointLines()...)
+
+	// the admission config the apiserver runs with: what unlabeled
+	// namespaces get, and which namespaces skip PSA entirely
+	if psa := a.psaConfig(); psa != nil {
+		lvl := func(s string) string {
+			if s == "" {
+				return "privileged"
+			}
+			return strings.ToLower(s)
+		}
+		line := fmt.Sprintf("%s: default enforce=%s audit=%s warn=%s; %d exempt namespace(s): %s", psa.Path, lvl(psa.Enforce), lvl(psa.Audit), lvl(psa.Warn), len(psa.ExemptNamespaces), strutil.TruncList(psa.ExemptNamespaces, 8))
+		if psa.External != "" {
+			line = psa.Path + ": PodSecurity settings in " + psa.External + " (not read)"
+		}
+		hdr = append(hdr, "", kv("Pod Security Admission", line)+styleDim.Render("  Security tab: V-254800-ns / V-254800-exempt; n: per-namespace level"))
+	}
 
 	// cluster-side bundled charts
 	overrides := 0
@@ -135,7 +176,17 @@ func (a *App) rke2Content() content {
 				comps = append(comps, styleWarn.Render(short+" none"))
 			}
 		}
-		isoRows = append(isoRows, []string{iso.Node, strings.Join(iso.Roles, ","), taint, user, req, strings.Join(comps, " ")})
+		cpReq := strings.Join(comps, " ")
+		// rke2 gives its static pods built-in requests; only a
+		// control-plane-resource-requests key in config.yaml(.d) changes them
+		if ni := a.nodes[iso.Node]; rancher && ni != nil && ni.Err == nil && len(ni.ConfigFiles) > 0 && len(comps) > 0 {
+			if _, set := ni.Settings["control-plane-resource-requests"]; set {
+				cpReq += styleDim.Render(" (config.yaml)")
+			} else {
+				cpReq += styleDim.Render(" (" + voc.Name + " defaults)")
+			}
+		}
+		isoRows = append(isoRows, []string{iso.Node, strings.Join(iso.Roles, ","), taint, user, req, cpReq})
 	}
 	if len(isoRows) > 0 {
 		h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "ROLES"}, {title: "TAINTS", max: 40}, {title: "USER PODS", max: 50}, {title: "REQUESTED OF ALLOCATABLE"}, {title: "CP STATIC POD REQUESTS"}}, isoRows)

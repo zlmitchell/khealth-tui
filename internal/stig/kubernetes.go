@@ -486,34 +486,75 @@ func (e *evaluator) clusterRules() {
 	}
 	e.add(r)
 
-	// PSA labels
+	// PSA labels, judged against the admission config file when a server
+	// node's config tier read it (rke2-pss.yaml for profile: cis, or the
+	// file config.yaml names)
 	psaCluster := false
 	for _, f := range e.apiserver {
 		if f["admission-control-config-file"] != "" || f["pod-security-admission-config-file"] != "" {
 			psaCluster = true
 		}
 	}
-	var noPSA []string
+	psa := e.psaConfig()
+	var noPSA, exemptUnlabeled []string
 	for _, ns := range s.Namespaces {
 		if k8s.IsSystemNamespace(ns.Name) {
 			continue
 		}
 		if ns.Labels["pod-security.kubernetes.io/enforce"] == "" {
+			if psa != nil && psa.Exempt(ns.Name) {
+				exemptUnlabeled = append(exemptUnlabeled, ns.Name)
+				continue
+			}
 			noPSA = append(noPSA, ns.Name)
 		}
 	}
 	r = Result{ID: "V-254800-ns", Title: "Namespaces enforce a Pod Security Standard", Cat: "I", Group: g, Status: Pass, Fix: "label namespaces: pod-security.kubernetes.io/enforce=restricted (or baseline), or use a cluster-wide admission config"}
 	switch {
-	case len(noPSA) == 0:
+	case len(noPSA) == 0 && len(exemptUnlabeled) == 0:
 		r.Detail = "all user namespaces labeled"
+	case psa != nil && psa.External != "":
+		r.Status = Manual
+		r.Detail = fmt.Sprintf("%s keeps the PodSecurity settings in %s (not read); %d namespace(s) rely on it: %s", psa.Path, psa.External, len(noPSA), strutil.TruncList(noPSA, 6))
+	case psa != nil && (psa.EnforceLevel() == "restricted" || psa.EnforceLevel() == "baseline"):
+		r.Detail = fmt.Sprintf("cluster default enforce=%s (%s); %d namespace(s) rely on it: %s", psa.EnforceLevel(), psa.Path, len(noPSA), strutil.TruncList(noPSA, 6))
+		if len(noPSA) == 0 {
+			r.Detail = fmt.Sprintf("cluster default enforce=%s (%s)", psa.EnforceLevel(), psa.Path)
+		}
+	case psa != nil:
+		r.Status = Fail
+		r.Detail = fmt.Sprintf("cluster default enforce=%s (%s): %d namespace(s) without enforce label run privileged: %s", psa.EnforceLevel(), psa.Path, len(noPSA), strutil.TruncList(noPSA, 6))
 	case psaCluster:
 		r.Status = Manual
-		r.Detail = fmt.Sprintf("cluster-wide PSA config present; %d namespace(s) rely on the default: %s", len(noPSA), strutil.TruncList(noPSA, 6))
+		r.Detail = fmt.Sprintf("cluster-wide PSA config present (file not read: needs the SSH config tier on a server node); %d namespace(s) rely on the default: %s", len(noPSA), strutil.TruncList(noPSA, 6))
 	default:
 		r.Status = Fail
 		r.Detail = fmt.Sprintf("%d namespace(s) without enforce label: %s", len(noPSA), strutil.TruncList(noPSA, 6))
 	}
 	e.add(r)
+	if psa != nil {
+		// exemptions bypass every level, labels included: a user namespace
+		// on that list is privileged whatever it is labeled
+		var user []string
+		for _, n := range psa.ExemptNamespaces {
+			if !k8s.IsSystemNamespace(n) {
+				user = append(user, n)
+			}
+		}
+		r = Result{ID: "V-254800-exempt", Title: "Pod Security Admission exemptions limited to system namespaces", Cat: "I", Group: g, Status: Pass, Fix: "remove user namespaces from exemptions.namespaces in " + psa.Path + " and label them instead; exemptions.usernames/runtimeClasses bypass PSA for every namespace"}
+		r.Detail = fmt.Sprintf("%d namespace(s) exempt (%s)", len(psa.ExemptNamespaces), psa.Path)
+		if len(user) > 0 {
+			r.Status = Fail
+			r.Detail = fmt.Sprintf("%d user namespace(s) exempt from PSA in %s: %s", len(user), psa.Path, strutil.TruncList(user, 6))
+		}
+		if len(psa.ExemptUsers) > 0 || len(psa.ExemptRuntimeClasses) > 0 {
+			if r.Status == Pass {
+				r.Status = Manual
+			}
+			r.Detail += fmt.Sprintf("; exempt usernames: %s, runtimeClasses: %s", strutil.TruncList(psa.ExemptUsers, 4), strutil.TruncList(psa.ExemptRuntimeClasses, 4))
+		}
+		e.add(r)
+	}
 
 	// dashboard
 	r = Result{ID: "V-242395", Title: "Kubernetes Dashboard not installed", Cat: "II", Group: g, Status: Pass, Detail: "not found", Fix: "uninstall kubernetes-dashboard"}

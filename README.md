@@ -66,6 +66,7 @@ khealth                                   # current kubeconfig context, SSH as $
 khealth --context prod --ssh-user ubuntu --ssh-key ~/.ssh/prod.pem
 khealth --no-ssh                          # API-only view
 khealth --bastion jump@bastion.example.com --insecure-host-key
+khealth root@api.prod.corp --accept-new-host-keys   # VIP in front of the servers: record each server's key on first contact, refuse changed ones
 khealth --ssh-user admin --ask-pass       # prompt for a password used when keys fail (and for sudo)
 khealth root@10.0.0.11                    # no kubeconfig yet: fetch the admin kubeconfig over SSH from a server node
 khealth --export ./reports --export-scan  # no TUI: one cycle + the security scan, JSON + XLSX, exit

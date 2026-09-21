@@ -90,10 +90,10 @@ func TestParseAndRank(t *testing.T) {
 			t.Errorf("in-cluster SAN offered: %+v", e)
 		}
 	}
-	if ClusterName("", eps[0], src) != "k8s-prod" {
+	if ClusterName("", eps[0], src) != "k8s-prod-example-com" {
 		t.Errorf("name from DNS: %q", ClusterName("", eps[0], src))
 	}
-	if n := ClusterName("", Endpoint{Host: "10.0.0.100"}, src); n != "cp" {
+	if n := ClusterName("", Endpoint{Host: "10.0.0.100"}, src); n != "cp-example-com" {
 		t.Errorf("name from hostname: %q", n)
 	}
 	if ClusterName("prod", eps[0], src) != "prod" {

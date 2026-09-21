@@ -319,3 +319,50 @@ func TestEncryptionAtRest(t *testing.T) {
 		t.Errorf("ssh evidence: %s %s", r.Status, r.Detail)
 	}
 }
+
+// The admission config file read from a server node decides what
+// unlabeled namespaces get and which namespaces skip PSA altogether.
+func TestPSAConfigRules(t *testing.T) {
+	apiserver := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "kube-apiserver-cp-1", Namespace: "kube-system", Labels: map[string]string{"component": "kube-apiserver"}},
+		Spec: corev1.PodSpec{NodeName: "cp-1", Containers: []corev1.Container{{Name: "kube-apiserver", Args: []string{"kube-apiserver", "--admission-control-config-file=/etc/rancher/rke2/rke2-pss.yaml"}}}}}
+	snap := &k8s.Snapshot{Distribution: "rke2", Pods: []corev1.Pod{apiserver},
+		Namespaces: []corev1.Namespace{{ObjectMeta: metav1.ObjectMeta{Name: "team-a"}}, {ObjectMeta: metav1.ObjectMeta{Name: "team-b"}}, {ObjectMeta: metav1.ObjectMeta{Name: "kube-system"}}}}
+	psa := &nodeinfo.PSAConfig{Path: "/etc/rancher/rke2/rke2-pss.yaml", Enforce: "restricted", ExemptNamespaces: []string{"kube-system", "cis-operator-system"}}
+	nodes := map[string]*nodeinfo.Info{"cp-1": {Node: "cp-1", Dist: "rke2", ControlPlane: true, PSA: []*nodeinfo.PSAConfig{psa}}}
+
+	// restricted default: unlabeled namespaces are covered
+	rs := Evaluate(Input{Snap: snap, Nodes: nodes})
+	if r := find(rs, "V-254800-ns"); r == nil || r.Status != Pass || !strings.Contains(r.Detail, "enforce=restricted") || !strings.Contains(r.Detail, "team-a") {
+		t.Errorf("restricted default: %+v", r)
+	}
+	if r := find(rs, "V-254800-exempt"); r == nil || r.Status != Pass || !strings.Contains(r.Detail, "2 namespace(s) exempt") {
+		t.Errorf("system-only exemptions: %+v", r)
+	}
+
+	// a user namespace on the exemption list is privileged whatever it is labeled
+	psa.ExemptNamespaces = append(psa.ExemptNamespaces, "team-b")
+	rs = Evaluate(Input{Snap: snap, Nodes: nodes})
+	if r := find(rs, "V-254800-exempt"); r == nil || r.Status != Fail || !strings.Contains(r.Detail, "team-b") {
+		t.Errorf("user namespace exempt: %+v", r)
+	}
+	if r := find(rs, "V-254800-ns"); r == nil || r.Status != Pass || strings.Contains(r.Detail, "team-b") {
+		t.Errorf("exempt namespace not counted as relying on the default: %+v", r)
+	}
+
+	// privileged default (no defaults: block) leaves unlabeled namespaces open
+	psa.Enforce = ""
+	rs = Evaluate(Input{Snap: snap, Nodes: nodes})
+	if r := find(rs, "V-254800-ns"); r == nil || r.Status != Fail || !strings.Contains(r.Detail, "enforce=privileged") {
+		t.Errorf("privileged default: %+v", r)
+	}
+
+	// flag set but the file not read yet: manual, as before
+	nodes["cp-1"].PSA = nil
+	rs = Evaluate(Input{Snap: snap, Nodes: nodes})
+	if r := find(rs, "V-254800-ns"); r == nil || r.Status != Manual {
+		t.Errorf("file not read: %+v", r)
+	}
+	if find(rs, "V-254800-exempt") != nil {
+		t.Error("exemption rule without the file")
+	}
+}
