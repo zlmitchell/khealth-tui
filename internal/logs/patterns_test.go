@@ -57,7 +57,7 @@ func TestClassify(t *testing.T) {
 
 func TestPatternsCompile(t *testing.T) {
 	seen := map[string]bool{}
-	for _, p := range Patterns() {
+	for _, p := range patterns {
 		if p.Re == nil || p.Name == "" || p.Explain == "" {
 			t.Errorf("incomplete pattern %+v", p)
 		}

@@ -82,9 +82,6 @@ func TestPodRestartsAndRequests(t *testing.T) {
 	if QuantityMilli(l, corev1.ResourceCPU) != 2000 || QuantityValue(l, corev1.ResourceMemory) != 3*1024*1024*1024 || QuantityMilli(l, "pods") != 0 || QuantityValue(l, "pods") != 0 {
 		t.Error("quantity helpers")
 	}
-	if ParseQuantityValue("1Ki") != 1024 || ParseQuantityValue("garbage") != 0 {
-		t.Error("ParseQuantityValue")
-	}
 }
 
 func TestNodeConditions(t *testing.T) {

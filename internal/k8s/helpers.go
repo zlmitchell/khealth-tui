@@ -7,7 +7,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // NodeRoles returns the node-role.kubernetes.io/* labels of a node.
@@ -199,15 +198,6 @@ func QuantityValue(l corev1.ResourceList, name corev1.ResourceName) int64 {
 		return q.Value()
 	}
 	return 0
-}
-
-// ParseQuantityValue parses a quantity string leniently.
-func ParseQuantityValue(s string) int64 {
-	q, err := resource.ParseQuantity(s)
-	if err != nil {
-		return 0
-	}
-	return q.Value()
 }
 
 // ComponentArgs extracts the command-line flags of a control-plane component

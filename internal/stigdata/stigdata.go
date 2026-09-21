@@ -149,23 +149,6 @@ func Load(product string) (*Table, error) {
 	return &t, nil
 }
 
-// ProductFor maps /etc/os-release facts to an embedded product name, or "".
-// RHEL rebuilds (Rocky, Alma, CentOS Stream, Oracle) use the RHEL table of
-// the same major release.
-func ProductFor(id, idLike, versionID string) string {
-	ids := strings.ToLower(id + " " + idLike)
-	switch {
-	case id == "ubuntu":
-		return "ubuntu" + strings.ReplaceAll(versionID, ".", "")
-	case strings.Contains(ids, "suse") || strings.Contains(ids, "sles"):
-		return ""
-	case strings.Contains(ids, "rhel") || strings.Contains(ids, "fedora") || strings.Contains(ids, "centos"):
-		major, _, _ := strings.Cut(versionID, ".")
-		return "rhel" + major
-	}
-	return ""
-}
-
 // CheckID names a check within a rule; it is what the probe's VIOL lines
 // carry so results can be matched back.
 func CheckID(vid string, i int) string { return fmt.Sprintf("%s:%d", vid, i) }

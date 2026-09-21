@@ -18,4 +18,4 @@ Open:
 * CNI: `NetworkUnavailable` history beyond the last transition (event timeline), probes from inside a pod namespace (NetworkPolicy effects) - the node-side probes cover the overlay, DNS and service paths
 * image signature/SBOM presence
 * Helm: drift between HelmChartConfig and rendered values, charts pinned to deprecated APIs
-* Prometheus metrics for alerting (the JSON/XLSX export exists: `e`, `tools/findings -json -xlsx`)
+* Prometheus metrics for alerting (the JSON/XLSX export exists: `e`, `khealth --export`)

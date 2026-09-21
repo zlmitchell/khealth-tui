@@ -159,9 +159,6 @@ var patterns = []Pattern{
 	{Name: "generic-error", Class: ClassError, Re: regexp.MustCompile(`level=error|\bE[0-9]{4} |error=`), Explain: "Error-level log line not matched by a specific rule."},
 }
 
-// Patterns returns the knowledge base (read-only).
-func Patterns() []Pattern { return patterns }
-
 // startupUnmatched replaces generic-error / generic-warn on lines logged
 // inside a startup window that never recur outside one.
 var startupUnmatched = Pattern{Name: "startup-unmatched", Class: ClassStartup, Explain: "An error-level line with no knowledge-base rule, logged while this node was starting (within 5 minutes of a start marker, or before the 'up and running' marker that followed it) and not seen again after: components racing each other - the kubelet before the apiserver answers, static pods before their mirror pods, controllers before the CNI is up. Nothing to fix unless the same message returns after startup; then read it for what could not be reached (an address, a lease, a container) and check that component."}

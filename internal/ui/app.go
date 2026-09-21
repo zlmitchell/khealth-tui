@@ -725,22 +725,6 @@ func (a *App) adoptSTIG(name string) {
 	a.stigDirty = true
 }
 
-// sshTargetNames is sshTargets filtered by ssh.nodes, names only.
-func (a *App) sshTargetNames(snap *k8s.Snapshot) []string {
-	only := map[string]bool{}
-	for _, n := range a.cfg.SSH.Nodes {
-		only[n] = true
-	}
-	nodes, _ := a.sshTargets(snap)
-	var out []string
-	for i := range nodes {
-		if len(only) == 0 || only[nodes[i].Name] {
-			out = append(out, nodes[i].Name)
-		}
-	}
-	return out
-}
-
 // apiFailoverCmd tries the apiserver of other control-plane nodes when
 // the current one cannot be reached: the peers the etcd probes found on
 // disk (healthy etcd members first), the last node list, ssh.hosts. Each

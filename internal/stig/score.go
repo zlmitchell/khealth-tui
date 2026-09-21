@@ -58,12 +58,9 @@ func (s *Score) add(st Status, cat string) {
 	}
 }
 
-// benchmarkOf names the reference document behind a result.
 // BenchmarkName is the reference document a result belongs to, as the
 // scorecards group them ("custom" for unmapped IDs).
-func BenchmarkName(r Result) string { return benchmarkOf(r) }
-
-func benchmarkOf(r Result) string {
+func BenchmarkName(r Result) string {
 	if r.Ref != "" {
 		return r.Ref
 	}
@@ -90,7 +87,7 @@ func Scores(rs []Result, perNode bool) []Score {
 		return acc[k]
 	}
 	for _, r := range rs {
-		b := benchmarkOf(r)
+		b := BenchmarkName(r)
 		get(b, "").add(r.Status, r.Cat)
 		if perNode && len(r.PerNode) > 0 {
 			for n, st := range r.PerNode {
