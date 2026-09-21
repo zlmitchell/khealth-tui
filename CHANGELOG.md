@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/zlmitchell/khealth-tui/compare/v1.0.0...v1.0.1) (2026-09-21)
+
+
+### Bug Fixes
+
+* rke2 bootstrap names, host keys by key, Rancher JSON files, PSA config ([673bab8](https://github.com/zlmitchell/khealth-tui/commit/673bab8d7c87757f9f1118f3ced5cbfa43643fe3))
+
 # 1.0.0 (2026-09-21)
 
 
