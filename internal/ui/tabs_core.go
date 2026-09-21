@@ -10,6 +10,7 @@ import (
 	"k8s-health-tui/internal/checks"
 	"k8s-health-tui/internal/config"
 	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/strutil"
 )
 
 // ---------- Overview ----------
@@ -123,7 +124,7 @@ func (a *App) overviewContent() content {
 	trend := sparkStyled(a.values("findings.crit"), 12, 0, 1, 1)
 	note := "   (a toggles info, enter shows hint; first seen = this khealth session)"
 	if len(a.resolved) > 0 {
-		note = fmt.Sprintf("   (a toggles info, enter shows hint; %d resolved kept %s)", len(a.resolved), humanDur(resolvedKeep))
+		note = fmt.Sprintf("   (a toggles info, enter shows hint; %d resolved kept %s)", len(a.resolved), strutil.HumanDur(resolvedKeep))
 	}
 	hdr = append(hdr, styleTitle.Render("Findings")+"  "+stacked(30, fsegs)+"  "+legend(fsegs)+"  "+styleDim.Render("crit trend ")+trend+styleDim.Render(note))
 
@@ -200,7 +201,7 @@ func usageSource(a *App) string {
 func worstDisk(a *App) string {
 	worst := -1
 	where := ""
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
 			continue
@@ -289,7 +290,7 @@ func (a *App) nodesContent() content {
 					break
 				}
 			}
-			uptime = humanDur(ni.Uptime)
+			uptime = strutil.HumanDur(ni.Uptime)
 			ssh = styleOK.Render("ok")
 			if !ni.JournalAt.IsZero() || !ni.ImagesAt.IsZero() {
 				ssh = styleOK.Render("ok+")
@@ -361,7 +362,7 @@ func (a *App) eventsContent() content {
 			typ = styleWarn.Render("Warning")
 			reason = styleWarn.Render(e.Reason)
 		}
-		rows = append(rows, []string{age(k8s.EventTime(e)), typ, e.Namespace, obj, reason, fmt.Sprint(k8s.EventCount(e)), firstLine(e.Message)})
+		rows = append(rows, []string{age(k8s.EventTime(e)), typ, e.Namespace, obj, reason, fmt.Sprint(k8s.EventCount(e)), strutil.FirstLine(e.Message)})
 		ids = append(ids, fmt.Sprint(i))
 	}
 	h, lines := renderTable(a.width, []column{{title: "LAST", right: true}, {title: "TYPE"}, {title: "NAMESPACE", max: 24}, {title: "OBJECT", max: 44}, {title: "REASON", max: 26}, {title: "N", right: true}, {title: "MESSAGE"}}, rows)
@@ -494,7 +495,7 @@ func (a *App) storageContent() content {
 	if len(usage) == 0 {
 		usedNote = "no usage data yet: kubelet reports only CSI/block volumes; hostPath/local-path dirs are measured with du while this tab is open (R forces it)"
 		if s.PVCUsageErr != "" {
-			usedNote += "; stats/summary error: " + firstLine(s.PVCUsageErr)
+			usedNote += "; stats/summary error: " + strutil.FirstLine(s.PVCUsageErr)
 		}
 	}
 	add("", styleTitle.Render("PersistentVolumeClaims")+styleDim.Render("  (namespace filter applies; enter = claim detail; "+usedNote+")"))
@@ -656,7 +657,7 @@ func (a *App) storageContent() content {
 			}
 			cls = append(cls, t)
 		}
-		add("  " + kv("classes", orStr(strings.Join(cls, ", "), styleDim.Render("none"))))
+		add("  " + kv("classes", strutil.FirstNonEmpty(strings.Join(cls, ", "), styleDim.Render("none"))))
 		rows, rowIDs = nil, nil
 		for _, vs := range si.Snapshots {
 			if !a.inNamespace(vs.Namespace) {
@@ -673,11 +674,11 @@ func (a *App) storageContent() content {
 			}
 			detail := ""
 			if vs.Error != "" {
-				detail = styleDim.Render(trunc(firstLine(vs.Error), 70))
+				detail = styleDim.Render(trunc(strutil.FirstLine(vs.Error), 70))
 			} else if !vs.SnapshotTime.IsZero() {
 				detail = styleDim.Render("taken " + age(vs.SnapshotTime) + " ago")
 			}
-			rows = append(rows, []string{vs.Namespace, vs.Name, orStr(vs.SourcePVC, vs.SourceContent), st, vs.Class, vs.RestoreSize, age(vs.Created), detail})
+			rows = append(rows, []string{vs.Namespace, vs.Name, strutil.FirstNonEmpty(vs.SourcePVC, vs.SourceContent), st, vs.Class, vs.RestoreSize, age(vs.Created), detail})
 			rowIDs = append(rowIDs, "pvc:"+vs.Namespace+"/"+vs.SourcePVC)
 		}
 		if len(rows) == 0 {
@@ -697,7 +698,7 @@ func (a *App) storageContent() content {
 	}
 	add("", styleTitle.Render("Node filesystems")+styleDim.Render(fsNote))
 	rows, rowIDs = nil, nil
-	for _, name := range sortedKeys(a.nodes) {
+	for _, name := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[name]
 		if ni.Err != nil {
 			rows = append(rows, []string{name, styleCrit.Render("ssh error"), "", "", "", "", "", ""})
@@ -750,7 +751,7 @@ func (a *App) detailFor(t tab, id string) (string, []string) {
 			if _, err := fmt.Sscan(rest, &idx); err == nil && idx >= 0 && idx < len(a.resolved) {
 				r := a.resolved[idx]
 				lines := []string{sevText(r.Severity) + " " + r.Area + " " + styleBold.Render(r.Object), "",
-					styleOK.Render("resolved") + " " + age(r.Resolved) + " ago" + styleDim.Render("  (no longer reported by the checks; first seen "+age(r.First)+" ago, kept for "+humanDur(resolvedKeep)+")"), ""}
+					styleOK.Render("resolved") + " " + age(r.Resolved) + " ago" + styleDim.Render("  (no longer reported by the checks; first seen "+age(r.First)+" ago, kept for "+strutil.HumanDur(resolvedKeep)+")"), ""}
 				lines = append(lines, wrap(r.Message, a.width-6)...)
 				if r.Hint != "" {
 					lines = append(lines, "", styleDim.Render("hint was: ")+r.Hint)
@@ -910,7 +911,7 @@ func (a *App) podDetail(id string) (string, []string) {
 			case cs.State.Running != nil:
 				state = styleOK.Render("running since " + age(cs.State.Running.StartedAt.Time) + " ago")
 			case cs.State.Waiting != nil:
-				state = styleWarn.Render("waiting: " + cs.State.Waiting.Reason + " " + firstLine(cs.State.Waiting.Message))
+				state = styleWarn.Render("waiting: " + cs.State.Waiting.Reason + " " + strutil.FirstLine(cs.State.Waiting.Message))
 			case cs.State.Terminated != nil:
 				state = fmt.Sprintf("terminated: %s exit=%d", cs.State.Terminated.Reason, cs.State.Terminated.ExitCode)
 				if cs.State.Terminated.ExitCode != 0 {
@@ -954,7 +955,7 @@ func (a *App) podDetail(id string) (string, []string) {
 	for i := range s.Events {
 		e := &s.Events[i]
 		if e.InvolvedObject.UID == p.UID || (e.InvolvedObject.Kind == "Pod" && e.InvolvedObject.Name == p.Name && e.Namespace == p.Namespace) {
-			evs = append(evs, fmt.Sprintf("%s ago  %s x%d  %s", age(k8s.EventTime(e)), styleWarn.Render(e.Reason), k8s.EventCount(e), firstLine(e.Message)))
+			evs = append(evs, fmt.Sprintf("%s ago  %s x%d  %s", age(k8s.EventTime(e)), styleWarn.Render(e.Reason), k8s.EventCount(e), strutil.FirstLine(e.Message)))
 		}
 	}
 	if len(evs) > 0 {

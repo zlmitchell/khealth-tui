@@ -7,6 +7,7 @@ import (
 	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/strutil"
 )
 
 // evalCloud raises the cloud provider (CPI / cloud-controller-manager) and
@@ -74,9 +75,9 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 			add(SevWarn, "storage", obj, fmt.Sprintf("%s not healthy: %d/%d ready%s - mounts fail on the nodes without it", d.NodePlugin.Label, d.NodePlugin.Ready, d.NodePlugin.Desired, problemSuffix(d.NodePlugin.Problem)), "kubectl -n "+d.NodePlugin.Namespace+" describe ds/"+d.NodePlugin.Name)
 		}
 		if len(d.Missing) > 0 && d.NodePlugin != nil && int(d.NodePlugin.Desired) > d.Registered {
-			add(SevWarn, "storage", obj, fmt.Sprintf("driver not registered on %s: the node plugin is scheduled there but the kubelet has no CSINode entry, pods with %s volumes cannot start on them", truncList(d.Missing, 4), d.Driver), "kubectl -n "+d.NodePlugin.Namespace+" logs ds/"+d.NodePlugin.Name+" -c node-driver-registrar on that node; check /var/lib/kubelet/plugins_registry and fapolicyd")
+			add(SevWarn, "storage", obj, fmt.Sprintf("driver not registered on %s: the node plugin is scheduled there but the kubelet has no CSINode entry, pods with %s volumes cannot start on them", strutil.TruncList(d.Missing, 4), d.Driver), "kubectl -n "+d.NodePlugin.Namespace+" logs ds/"+d.NodePlugin.Name+" -c node-driver-registrar on that node; check /var/lib/kubelet/plugins_registry and fapolicyd")
 		} else if len(d.Missing) > 0 && d.NodePlugin != nil && len(d.StorageCls) > 0 {
-			add(SevInfo, "storage", obj, fmt.Sprintf("driver not on %s (node plugin not scheduled there: tolerations/nodeSelector)", truncList(d.Missing, 4)), "")
+			add(SevInfo, "storage", obj, fmt.Sprintf("driver not on %s (node plugin not scheduled there: tolerations/nodeSelector)", strutil.TruncList(d.Missing, 4)), "")
 		}
 		if len(d.Failures) > 0 {
 			f := d.Failures[0]
@@ -84,7 +85,7 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 			for _, x := range d.Failures {
 				total += max(x.Count, 1)
 			}
-			add(SevWarn, "storage", obj, fmt.Sprintf("%d volume failures in the last hour, latest %s on %s: %s", total, f.Reason, f.Object, truncStr(f.Message, 160)), "kubectl get events -A --field-selector reason="+f.Reason+"; controller logs of "+d.Driver)
+			add(SevWarn, "storage", obj, fmt.Sprintf("%d volume failures in the last hour, latest %s on %s: %s", total, f.Reason, f.Object, strutil.TruncStr(f.Message, 160)), "kubectl get events -A --field-selector reason="+f.Reason+"; controller logs of "+d.Driver)
 		}
 		if d.Provider == "trident" {
 			evalTridentExtra(in, d, add)
@@ -93,7 +94,7 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 			}
 			for _, b := range d.Trident {
 				if !b.Online || (b.State != "" && b.State != "online") {
-					add(SevCrit, "storage", obj, fmt.Sprintf("Trident backend %s (%s) is %s%s: provisioning and attach on it fail", b.BackendName, b.Driver, orDefault(b.State, "offline"), problemSuffix(b.StateReason)), "tridentctl -n trident get backend "+b.BackendName+"; check SVM credentials, management LIF reachability and the ONTAP aggregate")
+					add(SevCrit, "storage", obj, fmt.Sprintf("Trident backend %s (%s) is %s%s: provisioning and attach on it fail", b.BackendName, b.Driver, strutil.FirstNonEmpty(b.State, "offline"), problemSuffix(b.StateReason)), "tridentctl -n trident get backend "+b.BackendName+"; check SVM credentials, management LIF reachability and the ONTAP aggregate")
 				}
 			}
 		}
@@ -147,7 +148,7 @@ func evalCloudNode(name string, ni *nodeinfo.Info, in Input, ci k8s.CloudInfo, a
 	nv := distro.For(ni.Dist)
 	if external && len(ni.KubeletFlags) > 0 {
 		if v := ni.KubeletFlags["cloud-provider"]; v != "external" {
-			add(SevCrit, "cloud", name, fmt.Sprintf("kubelet runs with --cloud-provider=%s while the %s cloud controller is installed: the node registers without the uninitialized taint and providerID, so the CPI ignores it and the CSI cannot map it", orDefault(v, "<unset>"), ci.Provider), nv.CloudProvider(ci.Provider)+" (re-register the node if it already has an rke2:// providerID)")
+			add(SevCrit, "cloud", name, fmt.Sprintf("kubelet runs with --cloud-provider=%s while the %s cloud controller is installed: the node registers without the uninitialized taint and providerID, so the CPI ignores it and the CSI cannot map it", strutil.FirstNonEmpty(v, "<unset>"), ci.Provider), nv.CloudProvider(ci.Provider)+" (re-register the node if it already has an rke2:// providerID)")
 		}
 	}
 	evalStorageNode(name, ni, in, add)
@@ -187,7 +188,7 @@ func evalCloudNode(name string, ni *nodeinfo.Info, in Input, ci k8s.CloudInfo, a
 			add(SevWarn, "storage", name, "Trident SAN backend in use but iscsid is not running on this node: iSCSI volumes cannot attach here", "install iscsi-initiator-utils / open-iscsi; systemctl enable --now iscsid")
 		}
 		if san && p.Units["multipathd.service"].Active && p.CSI.FindMultipaths != "no" {
-			add(SevWarn, "storage", name, "multipath.conf find_multipaths is "+orDefault(p.CSI.FindMultipaths, "unset")+": Trident requires find_multipaths no so multipath claims the iSCSI LUNs", "defaults { user_friendly_names yes; find_multipaths no } in /etc/multipath.conf; systemctl restart multipathd")
+			add(SevWarn, "storage", name, "multipath.conf find_multipaths is "+strutil.FirstNonEmpty(p.CSI.FindMultipaths, "unset")+": Trident requires find_multipaths no so multipath claims the iSCSI LUNs", "defaults { user_friendly_names yes; find_multipaths no } in /etc/multipath.conf; systemctl restart multipathd")
 		}
 		if san && !p.Units["multipathd.service"].Active {
 			add(SevInfo, "storage", name, "multipathd is not running: Trident SAN volumes attach single-path", "systemctl enable --now multipathd (with find_multipaths no)")
@@ -202,21 +203,7 @@ func problemSuffix(p string) string {
 	if p == "" {
 		return ""
 	}
-	return " (" + truncStr(p, 120) + ")"
-}
-
-func truncStr(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
-}
-
-func orDefault(v, def string) string {
-	if v == "" {
-		return def
-	}
-	return v
+	return " (" + strutil.TruncStr(p, 120) + ")"
 }
 
 func providerScheme(p string) string {

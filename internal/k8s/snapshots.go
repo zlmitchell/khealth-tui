@@ -3,9 +3,9 @@ package k8s
 import (
 	"context"
 	"sort"
-	"strconv"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -94,7 +94,7 @@ func (c *Client) snapshotInfo(ctx context.Context) *SnapshotInfo {
 				case string:
 					vs.RestoreSize = x
 				default:
-					vs.RestoreSize = humanBytesShort(toInt64(x))
+					vs.RestoreSize = resource.NewQuantity(toInt64(x), resource.BinarySI).String()
 				}
 			}
 			vs.Error, _, _ = unstructured.NestedString(o, "status", "error", "message")
@@ -164,14 +164,4 @@ func (si *SnapshotInfo) DefaultClass(driver string) *SnapshotClass {
 		}
 	}
 	return nil
-}
-
-func humanBytesShort(b int64) string {
-	switch {
-	case b >= 1<<30:
-		return strconv.FormatFloat(float64(b)/(1<<30), 'f', -1, 64) + "Gi"
-	case b >= 1<<20:
-		return strconv.FormatFloat(float64(b)/(1<<20), 'f', -1, 64) + "Mi"
-	}
-	return strconv.FormatInt(b, 10)
 }

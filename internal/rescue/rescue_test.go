@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -262,7 +263,7 @@ func (c *fakeCluster) handle(n *fakeNode) sshtest.Handler {
 			// rke2 promotes learners itself; kubeadm only when the poll asks (__PROMOTE__)
 			promote := strings.Contains(stdin, "if [ \"1\" = 1 ]; then\n  for id in")
 			for _, o := range c.nodes {
-				if !o.started || o.role != "other" || (contains(c.members, o.name) && c.learner != o.name) {
+				if !o.started || o.role != "other" || (slices.Contains(c.members, o.name) && c.learner != o.name) {
 					continue
 				}
 				c.polls[o.name]++
@@ -275,7 +276,7 @@ func (c *fakeCluster) handle(n *fakeNode) sshtest.Handler {
 			}
 			say("svc_state=active")
 			say("health={\"health\":\"true\"}")
-			if c.stalePeers && !c.plainReset && n.role == "target" && !contains(c.members, "ghost-a") {
+			if c.stalePeers && !c.plainReset && n.role == "target" && !slices.Contains(c.members, "ghost-a") {
 				c.members = append(c.members, "ghost-a", "ghost-b")
 			}
 			if strings.Contains(stdin, "if [ \"1\" = 1 ]; then\n  say \"readyz=") {
@@ -328,15 +329,6 @@ func remove(l []string, s string) []string {
 		}
 	}
 	return out
-}
-
-func contains(l []string, s string) bool {
-	for _, x := range l {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 // cluster starts three fake servers and returns the plan pointing at them.
@@ -773,8 +765,5 @@ func TestRenderSanitises(t *testing.T) {
 	}
 	if !strings.Contains(s, "KIND='rke2'") || !strings.Contains(s, "DATADIR='/data/rke2/server/db/etcd'") || !strings.Contains(s, "DD='/data/rke2'") {
 		t.Errorf("render vars: %s", s[:400])
-	}
-	if peerHost("https://[fd00::1]:2380", "") != "fd00::1" || peerHost("https://10.0.0.1:2380", "") != "10.0.0.1" || peerHost("", "x") != "x" {
-		t.Error("peerHost")
 	}
 }

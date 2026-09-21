@@ -324,7 +324,7 @@ type Tarball struct {
 // started locally (used for clock skew).
 func Parse(node, host, out string, sentAt time.Time) *Info {
 	info := &Info{Node: node, Host: host, Collected: time.Now(), KubeletFlags: map[string]string{}, Sysctl: map[string]string{}, Settings: map[string]string{}, Hardening: map[string]string{}}
-	secs := splitSections(out)
+	secs := SplitSections(out)
 	info.OutBytes = len(out)
 	info.Cost = perf.ParseSection(secs["PERF"])
 
@@ -497,11 +497,11 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 		info.STIGProbed, info.STIGCollected = true, info.Collected
 	}
 	parsePreflight(info, secs)
-	info.ConfigFiles = parseDumps(secs["RKE2CFG"])
-	info.ExtraFiles = parseDumps(secs["RKE2EXTRA"])
+	info.ConfigFiles = ParseDumps(secs["RKE2CFG"])
+	info.ExtraFiles = ParseDumps(secs["RKE2EXTRA"])
 	info.Manifests = parseManifests(secs["MANIFESTS"])
 	info.StaticPods = parseManifests(secs["STATICPODS"])
-	for _, cf := range parseDumps(secs["APISERVERCERT"]) {
+	for _, cf := range ParseDumps(secs["APISERVERCERT"]) {
 		if dns, ips, err := CertSANs(cf.Content); err == nil {
 			info.APIServerCert = cf.Path
 			info.APIServerSANs = append(append(info.APIServerSANs, dns...), ips...)
@@ -544,13 +544,13 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 			info.Rancher.Plans, _ = strconv.Atoi(strings.TrimSpace(v))
 		}
 	}
-	for _, cf := range parseDumps(secs["CNI"]) {
+	for _, cf := range ParseDumps(secs["CNI"]) {
 		info.CNI = append(info.CNI, parseCNI(cf))
 	}
 	parseNetwork(info, secs)
-	info.Registries = parseDumps(secs["REGISTRIES"])
+	info.Registries = ParseDumps(secs["REGISTRIES"])
 	info.RegistryMirrors = parseRegistryMirrors(info.Registries)
-	for _, cf := range parseDumps(secs["CONTAINERDREG"]) {
+	for _, cf := range ParseDumps(secs["CONTAINERDREG"]) {
 		if strings.HasSuffix(cf.Path, "/hosts.toml") {
 			parts := strings.Split(cf.Path, "/")
 			if len(parts) >= 2 {
@@ -581,12 +581,13 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	if _, ok := secs["JOURNAL"]; ok {
 		info.Heavy, info.JournalAt = true, info.Collected
 		info.Journal = nonEmpty(secs["JOURNAL"])
-		info.LogFiles = parseDumps(secs["LOGFILES"])
+		info.LogFiles = ParseDumps(secs["LOGFILES"])
 	}
 	return info
 }
 
-func splitSections(out string) map[string]string {
+// SplitSections splits probe output on its "===NAME" section headers.
+func SplitSections(out string) map[string]string {
 	secs := map[string]string{}
 	cur := ""
 	var buf strings.Builder
@@ -598,7 +599,7 @@ func splitSections(out string) map[string]string {
 	}
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimRight(line, "\r")
-		if strings.HasPrefix(line, "===") && len(line) > 3 && !strings.ContainsAny(line[3:], " \t") {
+		if strings.HasPrefix(line, "===") && len(line) > 3 && !strings.ContainsAny(line[3:], " \t{") {
 			flush()
 			cur = line[3:]
 			continue
@@ -931,7 +932,7 @@ func parseOSStig(info *Info, secs map[string]string) {
 		}
 	}
 	if has("STIGFILES") {
-		info.STIGFiles = parseDumps(secs["STIGFILES"])
+		info.STIGFiles = ParseDumps(secs["STIGFILES"])
 	}
 
 	// facts for the named evaluators (os_stig_facts.sh, os_stig_sweep.sh)
@@ -1009,7 +1010,7 @@ func parseOSStig(info *Info, secs map[string]string) {
 // once every stage has been merged: the caller then marks them collected
 // (AdoptSTIG).
 func ParseSTIGStage(info *Info, out string) perf.RemoteCost {
-	secs := splitSections(out)
+	secs := SplitSections(out)
 	parseOSStig(info, secs)
 	return perf.ParseSection(secs["PERF"])
 }
@@ -1036,7 +1037,8 @@ func (i *Info) STIGFilesGlob(dir string) []ConfigFile {
 	return out
 }
 
-func parseDumps(s string) []ConfigFile {
+// ParseDumps reads "--- path" headed file dumps.
+func ParseDumps(s string) []ConfigFile {
 	var out []ConfigFile
 	var cur *ConfigFile
 	for _, l := range strings.Split(s, "\n") {
@@ -1062,7 +1064,7 @@ func parseDumps(s string) []ConfigFile {
 // parseManifests reads "--- path|size|mtime|kinds" headed dumps.
 func parseManifests(s string) []ManifestFile {
 	var out []ManifestFile
-	for _, cf := range parseDumps(s) {
+	for _, cf := range ParseDumps(s) {
 		f := strings.SplitN(cf.Path, "|", 4)
 		m := ManifestFile{Path: f[0], Content: cf.Content}
 		if len(f) > 1 {

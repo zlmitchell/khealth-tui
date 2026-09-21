@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/strutil"
 )
 
 // upgradeSection renders the upgrade-readiness block of the Addons tab:
@@ -47,9 +48,9 @@ func (a *App) upgradeSection(s *k8s.Snapshot, add func(lines ...string), addRow 
 			switch {
 			case len(p.Conditions) > 0:
 				c := p.Conditions[0]
-				state = styleWarn.Render(c.Type + " " + strings.ToLower(c.Status) + prefixIf(": ", firstLine(c.Message)))
+				state = styleWarn.Render(c.Type + " " + strings.ToLower(c.Status) + strutil.PrefixIf(": ", strutil.FirstLine(c.Message)))
 			case failed > 0:
-				state = styleCrit.Render(fmt.Sprintf("%d job(s) failed", failed) + prefixIf(": ", pull))
+				state = styleCrit.Render(fmt.Sprintf("%d job(s) failed", failed) + strutil.PrefixIf(": ", pull))
 			case len(p.Applying) > 0 || active > 0:
 				state = styleWarn.Render("applying on " + strings.Join(p.Applying, ", "))
 			case len(pending) > 0:
@@ -103,7 +104,7 @@ func (a *App) upgradeSection(s *k8s.Snapshot, add func(lines ...string), addRow 
 					}
 				}
 				if pc.Version != "" && m.Version != "" && !sameKubeVersion(m.Version, pc.Version) {
-					behind = append(behind, firstNonEmpty(m.Node, m.Name))
+					behind = append(behind, strutil.FirstNonEmpty(m.Node, m.Name))
 				}
 			}
 			machines := fmt.Sprintf("%d running", running)
@@ -126,11 +127,11 @@ func (a *App) upgradeSection(s *k8s.Snapshot, add func(lines ...string), addRow 
 			}
 			note := ""
 			if len(behind) > 0 {
-				note = fmt.Sprintf("%d machine(s) not on %s: %s", len(behind), pc.Version, truncJoin(behind, 3))
+				note = fmt.Sprintf("%d machine(s) not on %s: %s", len(behind), pc.Version, strutil.TruncList(behind, 3))
 			}
 			for _, c := range append(append([]k8s.CondSummary{}, pc.CPConditions...), pc.Conditions...) {
 				if c.Message != "" {
-					note = c.Type + ": " + firstLine(c.Message)
+					note = c.Type + ": " + strutil.FirstLine(c.Message)
 					break
 				}
 			}
@@ -149,23 +150,7 @@ func pendingText(nodes []string) string {
 	if len(nodes) == 0 {
 		return styleOK.Render("0")
 	}
-	return styleWarn.Render(fmt.Sprintf("%d: %s", len(nodes), truncJoin(nodes, 3)))
-}
-
-func prefixIf(prefix, s string) string {
-	if s == "" {
-		return ""
-	}
-	return prefix + s
-}
-
-func firstNonEmpty(v ...string) string {
-	for _, s := range v {
-		if s != "" {
-			return s
-		}
-	}
-	return ""
+	return styleWarn.Render(fmt.Sprintf("%d: %s", len(nodes), strutil.TruncList(nodes, 3)))
 }
 
 // sameKubeVersion compares major.minor.patch and, when both carry one, the
@@ -195,11 +180,11 @@ func (a *App) planDetail(s *k8s.Snapshot, key string) []string {
 		}
 		done, pending := s.PlanNodes(p)
 		lines := []string{styleTitle.Render("Plan " + key), ""}
-		lines = append(lines, kv("target", p.Target())+"  "+kv("version", firstNonEmpty(p.Version, "-"))+"  "+kv("channel", firstNonEmpty(p.Channel, "-"))+"  "+kv("hash", firstNonEmpty(p.Hash, "-")))
-		lines = append(lines, kv("image", firstNonEmpty(p.Image, "-"))+"  "+kv("concurrency", fmt.Sprint(p.Concurrency))+"  "+kv("cordon", fmt.Sprint(p.Cordon))+"  "+kv("drain", fmt.Sprint(p.Drain))+"  "+kv("created", age(p.Created)+" ago"))
+		lines = append(lines, kv("target", p.Target())+"  "+kv("version", strutil.FirstNonEmpty(p.Version, "-"))+"  "+kv("channel", strutil.FirstNonEmpty(p.Channel, "-"))+"  "+kv("hash", strutil.FirstNonEmpty(p.Hash, "-")))
+		lines = append(lines, kv("image", strutil.FirstNonEmpty(p.Image, "-"))+"  "+kv("concurrency", fmt.Sprint(p.Concurrency))+"  "+kv("cordon", fmt.Sprint(p.Cordon))+"  "+kv("drain", fmt.Sprint(p.Drain))+"  "+kv("created", age(p.Created)+" ago"))
 		if p.Selector != nil {
 			var sel []string
-			for _, k := range sortedKeys(p.Selector.MatchLabels) {
+			for _, k := range strutil.SortedKeys(p.Selector.MatchLabels) {
 				sel = append(sel, k+"="+p.Selector.MatchLabels[k])
 			}
 			for _, e := range p.Selector.MatchExpressions {
@@ -208,9 +193,9 @@ func (a *App) planDetail(s *k8s.Snapshot, key string) []string {
 			lines = append(lines, wrap("  "+kv("node selector", strings.Join(sel, ", ")), a.width-2)...)
 		}
 		for _, c := range p.Conditions {
-			lines = append(lines, wrap("  "+styleWarn.Render(c.Type+" "+c.Status)+" "+c.Reason+prefixIf(": ", c.Message), a.width-2)...)
+			lines = append(lines, wrap("  "+styleWarn.Render(c.Type+" "+c.Status)+" "+c.Reason+strutil.PrefixIf(": ", c.Message), a.width-2)...)
 		}
-		lines = append(lines, "", kv("done", fmt.Sprintf("%d %s", len(done), truncJoin(done, 8))), kv("pending", fmt.Sprintf("%d %s", len(pending), truncJoin(pending, 8))), kv("applying", strings.Join(p.Applying, ", ")))
+		lines = append(lines, "", kv("done", fmt.Sprintf("%d %s", len(done), strutil.TruncList(done, 8))), kv("pending", fmt.Sprintf("%d %s", len(pending), strutil.TruncList(pending, 8))), kv("applying", strings.Join(p.Applying, ", ")))
 		if len(p.Jobs) > 0 {
 			lines = append(lines, "", styleTitle.Render("Jobs"))
 			var rows [][]string
@@ -231,7 +216,7 @@ func (a *App) planDetail(s *k8s.Snapshot, key string) []string {
 						when += " (" + j.Completed.Sub(j.Started).Round(time.Second).String() + ")"
 					}
 				}
-				rows = append(rows, []string{j.Name, j.Node, j.Version, st, when, strings.TrimSpace(j.PodState + prefixIf(": ", firstLine(j.PodMessage)))})
+				rows = append(rows, []string{j.Name, j.Node, j.Version, st, when, strings.TrimSpace(j.PodState + strutil.PrefixIf(": ", strutil.FirstLine(j.PodMessage)))})
 			}
 			h, tl := renderTable(a.width, []column{{title: "JOB", max: 50}, {title: "NODE"}, {title: "VERSION"}, {title: "STATE"}, {title: "STARTED"}, {title: "POD", max: 60}}, rows)
 			lines = append(lines, h)
@@ -253,14 +238,14 @@ func (a *App) provClusterDetail(s *k8s.Snapshot, key string) []string {
 			continue
 		}
 		lines := []string{styleTitle.Render("Provisioned cluster " + pc.Name), ""}
-		lines = append(lines, kv("management name", firstNonEmpty(pc.MgmtName, "-"))+"  "+kv("spec version", firstNonEmpty(pc.Version, "-"))+"  "+kv("control plane version", firstNonEmpty(pc.CPVersion, "-"))+"  "+kv("ready", okText(pc.Ready, "yes", "no"))+"  "+kv("control plane ready", okText(pc.CPReady, "yes", "no")))
+		lines = append(lines, kv("management name", strutil.FirstNonEmpty(pc.MgmtName, "-"))+"  "+kv("spec version", strutil.FirstNonEmpty(pc.Version, "-"))+"  "+kv("control plane version", strutil.FirstNonEmpty(pc.CPVersion, "-"))+"  "+kv("ready", okText(pc.Ready, "yes", "no"))+"  "+kv("control plane ready", okText(pc.CPReady, "yes", "no")))
 		if len(pc.Conditions)+len(pc.CPConditions) > 0 {
 			lines = append(lines, "", styleTitle.Render("Conditions not True"))
 			for _, c := range pc.Conditions {
-				lines = append(lines, wrap("  cluster "+styleWarn.Render(c.Type+" "+c.Status)+" "+c.Reason+prefixIf(": ", c.Message), a.width-2)...)
+				lines = append(lines, wrap("  cluster "+styleWarn.Render(c.Type+" "+c.Status)+" "+c.Reason+strutil.PrefixIf(": ", c.Message), a.width-2)...)
 			}
 			for _, c := range pc.CPConditions {
-				lines = append(lines, wrap("  control plane "+styleWarn.Render(c.Type+" "+c.Status)+" "+c.Reason+prefixIf(": ", c.Message), a.width-2)...)
+				lines = append(lines, wrap("  control plane "+styleWarn.Render(c.Type+" "+c.Status)+" "+c.Reason+strutil.PrefixIf(": ", c.Message), a.width-2)...)
 			}
 		}
 		if len(pc.Machines) > 0 {
@@ -290,9 +275,9 @@ func (a *App) provClusterDetail(s *k8s.Snapshot, key string) []string {
 				}
 				note := ""
 				if c := m.Conditions; len(c) > 0 {
-					note = c[0].Type + " " + c[0].Status + prefixIf(": ", firstLine(firstNonEmpty(c[0].Message, c[0].Reason)))
+					note = c[0].Type + " " + c[0].Status + strutil.PrefixIf(": ", strutil.FirstLine(strutil.FirstNonEmpty(c[0].Message, c[0].Reason)))
 				}
-				rows = append(rows, []string{m.Name, firstNonEmpty(m.Node, "-"), strings.Join(m.Roles, ","), firstNonEmpty(m.Version, "-"), phase, plan, note})
+				rows = append(rows, []string{m.Name, strutil.FirstNonEmpty(m.Node, "-"), strings.Join(m.Roles, ","), strutil.FirstNonEmpty(m.Version, "-"), phase, plan, note})
 			}
 			h, tl := renderTable(a.width, []column{{title: "MACHINE", max: 40}, {title: "NODE"}, {title: "ROLES"}, {title: "VERSION"}, {title: "PHASE"}, {title: "AGENT PLAN", max: 60}, {title: "CONDITION", max: 60}}, rows)
 			lines = append(lines, h)

@@ -11,6 +11,7 @@ import (
 
 	"k8s-health-tui/internal/helmcheck"
 	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/strutil"
 )
 
 // action is a mutating CLI command that needs explicit confirmation.
@@ -125,7 +126,7 @@ func (a *App) startHelmUpgrade() {
 func helmStateHint(rel *k8s.HelmRelease) string {
 	switch st := strings.ToLower(rel.Status); {
 	case st == "failed":
-		return "Release is failed: revision " + fmt.Sprint(rel.Revision) + " did not go through (" + firstLine(rel.Description) + ")."
+		return "Release is failed: revision " + fmt.Sprint(rel.Revision) + " did not go through (" + strutil.FirstLine(rel.Description) + ")."
 	case strings.HasPrefix(st, "pending-"):
 		return "Release is " + st + ": a helm " + strings.TrimPrefix(st, "pending-") + " never finished (killed, timed out, lost its connection). Make sure no helm/CI job is still working on it; a rollback is how a stuck release is unlocked."
 	case st == "uninstalling":
@@ -256,12 +257,12 @@ func (a *App) handleActionDone(m actionDoneMsg) tea.Cmd {
 	}
 	lines = append(lines, "")
 	if m.err != nil {
-		lines = append(lines, styleCrit.Render("FAILED: "+m.err.Error())+styleDim.Render(fmt.Sprintf(" (%s; refreshing)", humanDur(m.dur))))
+		lines = append(lines, styleCrit.Render("FAILED: "+m.err.Error())+styleDim.Render(fmt.Sprintf(" (%s; refreshing)", strutil.HumanDur(m.dur))))
 		if m.act.onFail != "" {
 			lines = append(lines, wrap(m.act.onFail, a.width-6)...)
 		}
 	} else {
-		lines = append(lines, styleOK.Render("succeeded")+styleDim.Render(fmt.Sprintf(" in %s; refreshing", humanDur(m.dur))))
+		lines = append(lines, styleOK.Render("succeeded")+styleDim.Render(fmt.Sprintf(" in %s; refreshing", strutil.HumanDur(m.dur))))
 	}
 	a.setDetail(m.act.title, lines)
 	// refresh after a failure too: a failed helm upgrade still leaves a new
@@ -353,7 +354,7 @@ func (a *App) renderActionOverlay() (string, []string) {
 			default:
 				st = styleDim.Render(st)
 			}
-			rows = append(rows, []string{fmt.Sprint(h.Revision), st, h.Chart + " " + h.Version, h.AppVersion, age(h.Updated) + " ago", firstLine(h.Description), cur})
+			rows = append(rows, []string{fmt.Sprint(h.Revision), st, h.Chart + " " + h.Version, h.AppVersion, age(h.Updated) + " ago", strutil.FirstLine(h.Description), cur})
 		}
 		h, tl := renderTable(a.width-8, []column{{title: "REV", right: true}, {title: "STATUS"}, {title: "CHART"}, {title: "APP"}, {title: "UPDATED", right: true}, {title: "DESCRIPTION", max: 50}, {title: ""}}, rows)
 		lines = append(lines, "  "+h)

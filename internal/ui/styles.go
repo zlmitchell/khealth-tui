@@ -10,6 +10,7 @@ import (
 
 	"k8s-health-tui/internal/checks"
 	"k8s-health-tui/internal/stig"
+	"k8s-health-tui/internal/strutil"
 )
 
 var (
@@ -124,28 +125,11 @@ func humanBytes(b float64) string {
 
 func humanKB(kb int64) string { return humanBytes(float64(kb) * 1024) }
 
-func humanDur(d time.Duration) string {
-	if d < 0 {
-		d = -d
-	}
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
-	case d < 30*24*time.Hour:
-		return fmt.Sprintf("%dd%dh", int(d.Hours()/24), int(d.Hours())%24)
-	}
-	return fmt.Sprintf("%dd", int(d.Hours()/24))
-}
-
 func age(t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
-	return humanDur(time.Since(t))
+	return strutil.HumanDur(time.Since(t))
 }
 
 func trunc(s string, w int) string {

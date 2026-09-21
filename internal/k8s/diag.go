@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s-health-tui/internal/strutil"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -73,16 +75,16 @@ func (c *Client) Diag(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "\n[%s]  %s  claims mounted by running pods here: %d\n", n.Name, NodeAddress(n, "InternalIP"), len(mounted[n.Name]))
 		t := time.Now()
 		if _, err := c.kubeletConfigz(ctx, n.Name); err != nil {
-			fmt.Fprintf(w, "  configz:       ERROR %v\n", firstLineOf(err.Error()))
+			fmt.Fprintf(w, "  configz:       ERROR %v\n", strutil.FirstLine(err.Error()))
 		} else {
 			fmt.Fprintf(w, "  configz:       ok (%s)\n", time.Since(t).Round(time.Millisecond))
 		}
 		t = time.Now()
 		raw, err := c.CS.CoreV1().RESTClient().Get().Resource("nodes").Name(n.Name).SubResource("proxy").Suffix("stats/summary").Do(ctx).Raw()
 		if err != nil {
-			fmt.Fprintf(w, "  stats/summary: ERROR %v\n", firstLineOf(err.Error()))
+			fmt.Fprintf(w, "  stats/summary: ERROR %v\n", strutil.FirstLine(err.Error()))
 			if len(raw) > 0 {
-				fmt.Fprintf(w, "                 body: %s\n", firstLineOf(string(raw)))
+				fmt.Fprintf(w, "                 body: %s\n", strutil.FirstLine(string(raw)))
 			}
 			continue
 		}
@@ -102,7 +104,7 @@ func (c *Client) Diag(ctx context.Context, w io.Writer) {
 		sort.Strings(keys)
 		for _, k := range keys {
 			u := usage[k]
-			fmt.Fprintf(w, "    %-50s used %s of %s (%.0f%%) pod %s\n", k, human(float64(u.Used)), human(float64(u.Capacity)), u.UsedPct(), u.Pod)
+			fmt.Fprintf(w, "    %-50s used %s of %s (%.0f%%) pod %s\n", k, strutil.HumanBytes(float64(u.Used)), strutil.HumanBytes(float64(u.Capacity)), u.UsedPct(), u.Pod)
 		}
 		if len(usage) == 0 && len(mounted[n.Name]) > 0 {
 			fmt.Fprintf(w, "    NOTE: pods here mount %s but the kubelet reported no pvcRef volumes\n", strings.Join(mounted[n.Name], ", "))
@@ -113,14 +115,14 @@ func (c *Client) Diag(ctx context.Context, w io.Writer) {
 				if i := strings.Index(snippet, `"volume"`); i >= 0 && len(snippet) > i+300 {
 					snippet = snippet[i : i+300]
 				}
-				fmt.Fprintf(w, "    raw volume sample: %s\n", firstLineOf(snippet))
+				fmt.Fprintf(w, "    raw volume sample: %s\n", strutil.FirstLine(snippet))
 			}
 		}
 	}
 
 	fmt.Fprintln(w, "\n== metrics.k8s.io ==")
 	if m, err := c.nodeMetrics(ctx); err != nil {
-		fmt.Fprintf(w, "  ERROR %v\n", firstLineOf(err.Error()))
+		fmt.Fprintf(w, "  ERROR %v\n", strutil.FirstLine(err.Error()))
 	} else {
 		fmt.Fprintf(w, "  ok, %d nodes\n", len(m))
 	}
@@ -133,9 +135,9 @@ func (c *Client) Diag(ctx context.Context, w io.Writer) {
 			found = true
 			out, errOut, err := c.ExecInPod(ctx, p.Namespace, p.Name, "etcd", []string{"etcdctl", "version"})
 			if err != nil {
-				fmt.Fprintf(w, "  %s: ERROR %v %s\n", p.Name, firstLineOf(err.Error()), firstLineOf(errOut))
+				fmt.Fprintf(w, "  %s: ERROR %v %s\n", p.Name, strutil.FirstLine(err.Error()), strutil.FirstLine(errOut))
 			} else {
-				fmt.Fprintf(w, "  %s: ok (%s)\n", p.Name, firstLineOf(out))
+				fmt.Fprintf(w, "  %s: ok (%s)\n", p.Name, strutil.FirstLine(out))
 			}
 			if diagEtcd != nil {
 				diagEtcd(ctx, c, p.Spec.NodeName, p.Name, w)
@@ -171,7 +173,7 @@ func (c *Client) Diag(ctx context.Context, w io.Writer) {
 		{"readyz", func() error { _, err := c.healthz(ctx, "/readyz"); return err }},
 	} {
 		if err := r.f(); err != nil {
-			fmt.Fprintf(w, "  %-28s ERROR %v\n", r.name, firstLineOf(err.Error()))
+			fmt.Fprintf(w, "  %-28s ERROR %v\n", r.name, strutil.FirstLine(err.Error()))
 		} else {
 			fmt.Fprintf(w, "  %-28s ok\n", r.name)
 		}
@@ -204,25 +206,4 @@ func pvSource(pv *corev1.PersistentVolume) (string, string) {
 		return "cephfs", ""
 	}
 	return "other", ""
-}
-
-func firstLineOf(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	if len(s) > 300 {
-		s = s[:300] + "..."
-	}
-	return s
-}
-
-func human(b float64) string {
-	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
-	i := 0
-	for b >= 1024 && i < len(units)-1 {
-		b /= 1024
-		i++
-	}
-	return fmt.Sprintf("%.1f%s", b, units[i])
 }

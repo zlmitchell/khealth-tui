@@ -32,6 +32,7 @@ import (
 
 	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/sshrun"
+	"k8s-health-tui/internal/strutil"
 )
 
 //go:embed scripts/*.sh
@@ -366,9 +367,9 @@ func (p *Plan) preflightNode(ctx context.Context, n Node, role string) Facts {
 		if f.Err == "" {
 			f.Err = "preflight did not complete"
 			if res.Err != nil {
-				f.Err = firstLine(res.Err.Error())
+				f.Err = strutil.FirstLine(res.Err.Error())
 				if s := strings.TrimSpace(res.Stderr); s != "" {
-					f.Err += ": " + firstLine(s)
+					f.Err += ": " + strutil.FirstLine(s)
 				}
 			}
 		}
@@ -483,10 +484,10 @@ func (p *Plan) assess() []string {
 		if len(t.Tools) == 0 {
 			w = append(w, "no etcdutl/etcdctl/ctr/podman on "+p.Target.Name+": nothing can run 'snapshot restore' there (install etcdutl)")
 		}
-		if ep := peerHost(t.APIEndpoint, ""); ep != "" && ep != p.Target.IP && ep != "127.0.0.1" && ep != "localhost" {
+		if ep := strutil.URLHost(t.APIEndpoint); ep != "" && ep != p.Target.IP && ep != "127.0.0.1" && ep != "localhost" {
 			who := "an address outside the control plane (a VIP or load balancer: it must route to " + p.Target.Name + " once its apiserver is back, or the target cannot reach the API until the endpoint node has rejoined)"
 			for _, o := range p.Others {
-				if o.IP == ep || peerHost(o.Facts.PeerURL, "") == ep {
+				if o.IP == ep || strutil.URLHost(o.Facts.PeerURL) == ep {
 					who = o.Name + ", a follower that stays stopped until it rejoins"
 				}
 			}
@@ -675,7 +676,7 @@ func (p *Plan) rejoinSteps(t, o Node, want, total int) {
 			return err
 		})
 		p.add(fmt.Sprintf("Wait until %s has synced and is promoted (%d/%d)", o.Name, want, total), t, func(ctx context.Context, s *Step) error {
-			return p.waitStatus(ctx, s, t, want, false, true, peerHost(o.Facts.PeerURL, o.IP))
+			return p.waitStatus(ctx, s, t, want, false, true, strutil.FirstNonEmpty(strutil.URLHost(o.Facts.PeerURL), o.IP))
 		})
 		p.add("Start kube-apiserver, restart controllers and kubelet", o, func(ctx context.Context, s *Step) error {
 			if _, err := p.exec(ctx, s, o, "unpark_api", nil, 3*time.Minute, "unpark=ok"); err != nil {
@@ -1004,9 +1005,9 @@ func (p *Plan) exec(ctx context.Context, s *Step, n Node, script string, vars ma
 		return out, nil
 	}
 	if res.Err != nil {
-		msg := firstLine(res.Err.Error())
+		msg := strutil.FirstLine(res.Err.Error())
 		if e := strings.TrimSpace(res.Stderr); e != "" {
-			msg += ": " + firstLine(e)
+			msg += ": " + strutil.FirstLine(e)
 		}
 		return out, fmt.Errorf("ssh %s: %s", n.Host, msg)
 	}
@@ -1030,7 +1031,7 @@ func (p *Plan) poll(ctx context.Context, s *Step, n Node, script string, vars ma
 		if res.Err != nil && strings.TrimSpace(out) == "" {
 			failures++
 			p.mu.Lock()
-			s.Live = []string{n.Name + ": ssh: " + firstLine(res.Err.Error())}
+			s.Live = []string{n.Name + ": ssh: " + strutil.FirstLine(res.Err.Error())}
 			p.mu.Unlock()
 			if failures >= 5 {
 				return fmt.Errorf("ssh %s keeps failing: %v", n.Host, res.Err)
@@ -1123,7 +1124,7 @@ func (st Status) Ready(want int, api bool, ip string) (bool, string) {
 	switch {
 	case st.Members == 0:
 		if st.Health != "" && !strings.Contains(st.Health, `"true"`) {
-			return false, "etcd not up yet (health: " + firstLine(st.Health) + ")"
+			return false, "etcd not up yet (health: " + strutil.FirstLine(st.Health) + ")"
 		}
 		return false, "no member list yet"
 	case st.Members < want:
@@ -1156,7 +1157,7 @@ func (st Status) Ready(want int, api bool, ip string) (bool, string) {
 		switch st.Readyz {
 		case "200", "401", "403":
 		default:
-			return false, "apiserver not answering /readyz yet (" + orDash(st.Readyz) + ")"
+			return false, "apiserver not answering /readyz yet (" + strutil.FirstNonEmpty(st.Readyz, "-") + ")"
 		}
 	}
 	return true, ""
@@ -1255,36 +1256,4 @@ func lastError(out string) string {
 		}
 	}
 	return lastInteresting(out)
-}
-
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return s
-}
-
-// peerHost is the host part of a peer URL, or the fallback.
-func peerHost(u, fallback string) string {
-	if i := strings.Index(u, "//"); i >= 0 {
-		u = u[i+2:]
-		if strings.HasPrefix(u, "[") {
-			if j := strings.Index(u, "]"); j > 0 {
-				return u[1:j]
-			}
-		}
-		if j := strings.LastIndex(u, ":"); j > 0 {
-			return u[:j]
-		}
-		return u
-	}
-	return fallback
-}
-
-func orDash(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
 }

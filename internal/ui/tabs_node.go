@@ -11,6 +11,7 @@ import (
 	"k8s-health-tui/internal/checks"
 	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/strutil"
 )
 
 // nodeDetail renders one node as a dashboard followed by non-overlapping
@@ -113,9 +114,9 @@ func (a *App) nodeDetail(name string) (string, []string) {
 		}
 		facts = append(facts,
 			[]string{"hostname / dist", ni.Hostname + "  " + ni.Dist + "  " + styleDim.Render("data-dir "+ni.DataDir)},
-			[]string{"uptime", humanDur(ni.Uptime)},
+			[]string{"uptime", strutil.HumanDur(ni.Uptime)},
 			[]string{"clock", "ntp " + ntp + "  offset " + fmt.Sprint(ni.ClockOffset) + " vs this machine"},
-			[]string{"ssh", fmt.Sprintf("%s, collected %s ago in %s", ni.Host, age(ni.Collected), humanDur(ni.Duration))},
+			[]string{"ssh", fmt.Sprintf("%s, collected %s ago in %s", ni.Host, age(ni.Collected), strutil.HumanDur(ni.Duration))},
 		)
 	} else if ni != nil {
 		facts = append(facts, []string{"ssh", styleCrit.Render(ni.Err.Error())})
@@ -257,7 +258,7 @@ func (a *App) nodeDetail(name string) (string, []string) {
 	var plat [][]string
 	if len(ni.Settings) > 0 {
 		var kvs []string
-		for _, k := range sortedKeys(ni.Settings) {
+		for _, k := range strutil.SortedKeys(ni.Settings) {
 			kvs = append(kvs, k+"="+ni.Settings[k])
 		}
 		plat = append(plat, []string{distro.For(ni.Dist).ConfigName, strings.Join(kvs, "  ")})
@@ -389,7 +390,7 @@ func (a *App) nodeDetail(name string) (string, []string) {
 		add("", styleTitle.Render("Kernel sysctls"))
 		want := map[string]string{"vm.overcommit_memory": "1", "vm.panic_on_oom": "0", "kernel.panic": "10", "kernel.panic_on_oops": "1", "kernel.keys.root_maxbytes": "25000000", "kernel.keys.root_maxkeys": "1000000", "net.ipv4.ip_forward": "1", "net.bridge.bridge-nf-call-iptables": "1"}
 		var rows [][]string
-		for _, k := range sortedKeys(ni.Sysctl) {
+		for _, k := range strutil.SortedKeys(ni.Sysctl) {
 			v := ni.Sysctl[k]
 			exp := want[k]
 			state := ""
@@ -410,7 +411,7 @@ func (a *App) nodeDetail(name string) (string, []string) {
 	if len(ni.KubeletFlags) > 0 {
 		add("", styleTitle.Render("kubelet process args"))
 		var rows [][]string
-		for _, k := range sortedKeys(ni.KubeletFlags) {
+		for _, k := range strutil.SortedKeys(ni.KubeletFlags) {
 			rows = append(rows, []string{"--" + k, trunc(ni.KubeletFlags[k], w-40)})
 		}
 		table([]column{{title: "FLAG"}, {title: "VALUE"}}, rows)

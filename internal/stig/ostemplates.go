@@ -16,6 +16,7 @@ import (
 
 	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/stigdata"
+	"k8s-health-tui/internal/strutil"
 )
 
 type templateEval func(info *nodeinfo.Info, c stigdata.Check, id string) (Status, string)
@@ -185,10 +186,10 @@ func evalUnitEnabled(info *nodeinfo.Info, unit string) (Status, string) {
 	}
 	var probs []string
 	if !unitEnabled(fs) {
-		probs = append(probs, "unit file "+orDash(fs))
+		probs = append(probs, "unit file "+strutil.FirstNonEmpty(fs, "-"))
 	}
 	if st.Active != "active" {
-		probs = append(probs, orDash(st.Active))
+		probs = append(probs, strutil.FirstNonEmpty(st.Active, "-"))
 	}
 	if len(probs) > 0 {
 		return Fail, unit + ": " + strings.Join(probs, ", ")
@@ -213,13 +214,6 @@ func evalUnitDisabled(info *nodeinfo.Info, unit string) (Status, string) {
 		return Fail, unit + ": " + strings.Join(probs, ", ")
 	}
 	return Pass, ""
-}
-
-func orDash(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
 }
 
 func evalServiceEnabled(info *nodeinfo.Info, c stigdata.Check, _ string) (Status, string) {
@@ -312,7 +306,7 @@ func evalMountOptionRemote(info *nodeinfo.Info, c stigdata.Check, _ string) (Sta
 		}
 	}
 	if len(probs) > 0 {
-		return Fail, "remote mounts without " + opt + ": " + truncList(probs, 5)
+		return Fail, "remote mounts without " + opt + ": " + strutil.TruncList(probs, 5)
 	}
 	return Pass, ""
 }
@@ -368,7 +362,7 @@ func fileCheck(info *nodeinfo.Info, c stigdata.Check, id string, pred func(p nod
 	}
 	scanned := c.Bool("RECURSIVE") || c.Str("FILE_REGEX") != ""
 	if viol := info.STIGViol[id]; scanned && len(viol) > 0 {
-		return Fail, truncList(viol, 5)
+		return Fail, strutil.TruncList(viol, 5)
 	}
 	var probs []string
 	for _, fp := range c.List("FILEPATH") {
@@ -951,7 +945,7 @@ func evalFaillock(info *nodeinfo.Info, c stigdata.Check, _ string) (Status, stri
 		hi = want
 	}
 	if lo != "" && !compareOp("greater than or equal", got, lo) || hi != "" && !compareOp("less than or equal", got, hi) {
-		return Fail, fmt.Sprintf("%s = %s (want %s..%s)", name, got, orDash(lo), orDash(hi))
+		return Fail, fmt.Sprintf("%s = %s (want %s..%s)", name, got, strutil.FirstNonEmpty(lo, "-"), strutil.FirstNonEmpty(hi, "-"))
 	}
 	return Pass, ""
 }

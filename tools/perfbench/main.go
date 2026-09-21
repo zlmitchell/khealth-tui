@@ -38,6 +38,7 @@ import (
 	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/perf"
 	"k8s-health-tui/internal/sshrun"
+	"k8s-health-tui/internal/strutil"
 )
 
 type probeResult struct {
@@ -276,7 +277,7 @@ func main() {
 				info := nodeinfo.Parse(t.name, t.host, res.Stdout, res.Started)
 				pr := probeResult{Node: t.name, Kind: kind, Cycle: cyc, Wall: res.Finished.Sub(res.Started), Cost: info.Cost, Out: len(res.Stdout), Script: res.ScriptSize}
 				if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
-					pr.Err = firstLine(res.Err.Error() + " " + res.Stderr)
+					pr.Err = strutil.FirstLine(res.Err.Error() + " " + res.Stderr)
 				}
 				mu.Lock()
 				rep.Probes = append(rep.Probes, pr)
@@ -293,7 +294,7 @@ func main() {
 					p := etcd.Parse(t.name, res.Stdout)
 					pr := probeResult{Node: t.name, Kind: "etcd", Cycle: cyc, Wall: res.Finished.Sub(res.Started), Cost: p.Cost, Out: len(res.Stdout), Script: res.ScriptSize}
 					if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
-						pr.Err = firstLine(res.Err.Error() + " " + res.Stderr)
+						pr.Err = strutil.FirstLine(res.Err.Error() + " " + res.Stderr)
 					}
 					mu.Lock()
 					rep.Probes = append(rep.Probes, pr)
@@ -337,7 +338,7 @@ func fetchOnce(ctx context.Context, c *k8s.Client, label string, cycle int) (api
 
 func printAPI(r apiResult) {
 	fmt.Printf("  %-12s cycle %d: %6s  %3d requests  %9s in  %7s out  local cpu %.2fs  (%d pods, %d nodes, %d errors)\n",
-		r.Label, r.Cycle, r.Wall.Round(10*time.Millisecond), r.Traffic.Requests, fmtBytes(r.Traffic.BytesIn), fmtBytes(r.Traffic.BytesOut), r.LocalCPU, r.Pods, r.Nodes, len(r.Errors))
+		r.Label, r.Cycle, r.Wall.Round(10*time.Millisecond), r.Traffic.Requests, strutil.HumanBytes(float64(r.Traffic.BytesIn)), strutil.HumanBytes(float64(r.Traffic.BytesOut)), r.LocalCPU, r.Pods, r.Nodes, len(r.Errors))
 	for _, e := range r.Errors {
 		fmt.Printf("               error: %s\n", e)
 	}
@@ -393,7 +394,7 @@ func printProbes(rep *report, refresh time.Duration) {
 		if a.errs > 0 {
 			note = strconv.Itoa(a.errs)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%.2fs\t%s\t%s\t%s\n", node, kind, a.n, (a.wall / time.Duration(a.n)).Round(10*time.Millisecond), cpuS, a.maxCPU, pct, fmtBytes(int64(a.out/n)), note)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%.2fs\t%s\t%s\t%s\n", node, kind, a.n, (a.wall / time.Duration(a.n)).Round(10*time.Millisecond), cpuS, a.maxCPU, pct, strutil.HumanBytes(float64(a.out/n)), note)
 	}
 	tw.Flush()
 	fmt.Println("\n% of one core = remote CPU seconds per probe / refresh interval: the steady-state share of a single core the probe takes on that node.")
@@ -508,7 +509,7 @@ func finish(rep *report, start perf.Local, jsonOut string) {
 	rep.LocalCPUS = end.CPUSeconds - start.CPUSeconds
 	rep.LocalHeap = end.HeapBytes
 	rep.Finished = time.Now()
-	fmt.Printf("\nthis host: %.2fs CPU total, heap %s, %s elapsed\n", rep.LocalCPUS, fmtBytes(int64(rep.LocalHeap)), rep.Finished.Sub(rep.Started).Round(time.Second))
+	fmt.Printf("\nthis host: %.2fs CPU total, heap %s, %s elapsed\n", rep.LocalCPUS, strutil.HumanBytes(float64(rep.LocalHeap)), rep.Finished.Sub(rep.Started).Round(time.Second))
 	if jsonOut != "" {
 		b, _ := json.MarshalIndent(rep, "", "  ")
 		if err := os.WriteFile(jsonOut, b, 0o600); err != nil {
@@ -517,22 +518,4 @@ func finish(rep *report, start perf.Local, jsonOut string) {
 			fmt.Println("report written to", jsonOut)
 		}
 	}
-}
-
-func fmtBytes(n int64) string {
-	switch {
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
-	}
-	return fmt.Sprintf("%d B", n)
-}
-
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
 }

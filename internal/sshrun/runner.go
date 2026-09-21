@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 
 	"k8s-health-tui/internal/config"
+	"k8s-health-tui/internal/strutil"
 )
 
 // Runner holds SSH connections to nodes and runs scripts on them.
@@ -431,7 +432,7 @@ func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
 			r.mu.Lock()
 			delete(r.become, addr)
 			r.mu.Unlock()
-			err = fmt.Errorf("%s: %s (escalation will be re-probed)", method, firstLine(res.Stderr))
+			err = fmt.Errorf("%s: %s (escalation will be re-probed)", method, strutil.FirstLine(res.Stderr))
 		}
 		res.Err = err
 	}

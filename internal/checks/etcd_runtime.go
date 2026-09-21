@@ -3,6 +3,8 @@ package checks
 import (
 	"strings"
 
+	"k8s-health-tui/internal/strutil"
+
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -216,7 +218,7 @@ func nodeIP(in Input, t *etcdTriage) string {
 	}
 	if t.member != nil {
 		for _, u := range t.member.PeerURLs {
-			if h := urlHost(u); h != "" {
+			if h := strutil.URLHost(u); h != "" {
 				return h
 			}
 		}

@@ -9,6 +9,7 @@ import (
 
 	"k8s-health-tui/internal/checks"
 	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/strutil"
 )
 
 // Storage tab detail: enter on a PVC or PV row gathers everything the
@@ -183,7 +184,7 @@ func (a *App) volumeDetail(pvc *corev1.PersistentVolumeClaim, pv *corev1.Persist
 		}
 		if src.CSI != nil && len(src.CSI.VolumeAttributes) > 0 {
 			var attrs []string
-			for _, k := range sortedKeys(src.CSI.VolumeAttributes) {
+			for _, k := range strutil.SortedKeys(src.CSI.VolumeAttributes) {
 				lk := strings.ToLower(k)
 				if strings.Contains(lk, "secret") || strings.Contains(lk, "password") || strings.Contains(lk, "token") || strings.HasPrefix(k, "storage.kubernetes.io/") {
 					continue
@@ -260,7 +261,7 @@ func (a *App) volumeDetail(pvc *corev1.PersistentVolumeClaim, pv *corev1.Persist
 			default:
 				st = styleCrit.Render(st)
 			}
-			podRows = append(podRows, []string{p.Name, st, orStr(p.Spec.NodeName, styleDim.Render("unscheduled")), strings.Join(mounts, ", "), age(p.CreationTimestamp.Time)})
+			podRows = append(podRows, []string{p.Name, st, strutil.FirstNonEmpty(p.Spec.NodeName, styleDim.Render("unscheduled")), strings.Join(mounts, ", "), age(p.CreationTimestamp.Time)})
 		}
 	}
 	if len(podRows) == 0 {
@@ -335,7 +336,7 @@ func (a *App) volumeDetail(pvc *corev1.PersistentVolumeClaim, pv *corev1.Persist
 				}
 				detail := ""
 				if vs.Error != "" {
-					detail = trunc(firstLine(vs.Error), 80)
+					detail = trunc(strutil.FirstLine(vs.Error), 80)
 				} else if vs.Content != "" {
 					detail = vs.Content
 				}
@@ -359,7 +360,7 @@ func (a *App) volumeDetail(pvc *corev1.PersistentVolumeClaim, pv *corev1.Persist
 		if t == corev1.EventTypeWarning {
 			t = styleWarn.Render(t)
 		}
-		evRows = append(evRows, []string{age(k8s.EventTime(e)), t, e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name, e.Reason, fmt.Sprint(k8s.EventCount(e)), trunc(firstLine(e.Message), 110)})
+		evRows = append(evRows, []string{age(k8s.EventTime(e)), t, e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name, e.Reason, fmt.Sprint(k8s.EventCount(e)), trunc(strutil.FirstLine(e.Message), 110)})
 		if len(evRows) == 12 {
 			break
 		}
@@ -436,7 +437,7 @@ func (a *App) longhornVolumeDetail(name string, ready map[string]bool) []string 
 		line += "  " + kv("engine", v.EngineState)
 	}
 	out = append(out, "", line)
-	facts := []string{kv("access", v.AccessMode), kv("frontend", orStr(v.Frontend, "-")), kv("data locality", orStr(v.DataLocality, "disabled")), kv("engine image", imageTagUI(v.CurrentImage))}
+	facts := []string{kv("access", v.AccessMode), kv("frontend", strutil.FirstNonEmpty(v.Frontend, "-")), kv("data locality", strutil.FirstNonEmpty(v.DataLocality, "disabled")), kv("engine image", imageTagUI(v.CurrentImage))}
 	if v.Image != v.CurrentImage && v.Image != "" {
 		facts = append(facts, styleInfo.Render("upgrade pending to "+imageTagUI(v.Image)))
 	}
@@ -447,11 +448,11 @@ func (a *App) longhornVolumeDetail(name string, ready map[string]bool) []string 
 		facts = append(facts, styleWarn.Render("DR standby volume"))
 	}
 	if v.AccessMode == "rwx" {
-		facts = append(facts, kv("share", okText(v.ShareState == "running", v.ShareState, strings.ToUpper(orStr(v.ShareState, "not running")))+" "+styleDim.Render(v.ShareEndpoint)))
+		facts = append(facts, kv("share", okText(v.ShareState == "running", v.ShareState, strings.ToUpper(strutil.FirstNonEmpty(v.ShareState, "not running")))+" "+styleDim.Render(v.ShareEndpoint)))
 	}
 	out = append(out, "  "+strings.Join(facts, "  "))
 	if !v.Scheduled {
-		out = append(out, "  "+styleCrit.Render("replica scheduling failed: "+orStr(v.SchedMessage, "see the volume conditions")))
+		out = append(out, "  "+styleCrit.Render("replica scheduling failed: "+strutil.FirstNonEmpty(v.SchedMessage, "see the volume conditions")))
 	}
 	if !v.LastDegraded.IsZero() && v.Robustness == "degraded" {
 		out = append(out, "  "+styleWarn.Render("degraded since "+age(v.LastDegraded)+" ago"))
@@ -461,7 +462,7 @@ func (a *App) longhornVolumeDetail(name string, ready map[string]bool) []string 
 		st := r.State
 		switch {
 		case r.FailedAt != "" || r.Mode == "ERR" || r.State == "error" || r.State == "unknown":
-			st = styleCrit.Render(strings.ToUpper(orStr(r.State, "failed")))
+			st = styleCrit.Render(strings.ToUpper(strutil.FirstNonEmpty(r.State, "failed")))
 		case r.Rebuild >= 0:
 			st = styleInfo.Render(fmt.Sprintf("rebuilding %d%%", r.Rebuild))
 		case r.Mode == "WO":
@@ -471,7 +472,7 @@ func (a *App) longhornVolumeDetail(name string, ready map[string]bool) []string 
 		case r.State == "running":
 			st = styleWarn.Render("running (joining)")
 		}
-		node := orStr(r.Node, styleCrit.Render("unscheduled"))
+		node := strutil.FirstNonEmpty(r.Node, styleCrit.Render("unscheduled"))
 		if rd, known := ready[r.Node]; known && !rd {
 			node = styleCrit.Render(r.Node + " NotReady")
 		}
@@ -554,7 +555,7 @@ func (a *App) tridentVolumeDetail(pv *corev1.PersistentVolume, pvc *corev1.Persi
 		}
 	}
 	if backend != nil {
-		st := okText(backend.Online && (backend.State == "" || backend.State == "online"), "online", strings.ToUpper(orStr(backend.State, "offline")))
+		st := okText(backend.Online && (backend.State == "" || backend.State == "online"), "online", strings.ToUpper(strutil.FirstNonEmpty(backend.State, "offline")))
 		line += "  " + kv("backend", backend.BackendName+" ("+backend.Driver+") "+st)
 		if backend.StateReason != "" && !backend.Online {
 			line += " " + styleDim.Render(trunc(backend.StateReason, 60))
@@ -622,14 +623,14 @@ func cephVolumeDetail(pv *corev1.PersistentVolume, ci *k8s.CephInfo) []string {
 		case "HEALTH_WARN":
 			h = styleWarn.Render(h)
 		default:
-			h = styleCrit.Render(orStr(h, "unknown"))
+			h = styleCrit.Render(strutil.FirstNonEmpty(h, "unknown"))
 		}
 		line += "  " + kv("cluster "+cc.Name, h)
 	}
 	out := []string{"", line}
 	for _, p := range ci.Pools {
 		if p.Name == attrs["pool"] && !strings.EqualFold(p.Phase, "Ready") {
-			out = append(out, "  "+styleCrit.Render("pool "+p.Name+" is "+orStr(p.Phase, "not ready")))
+			out = append(out, "  "+styleCrit.Render("pool "+p.Name+" is "+strutil.FirstNonEmpty(p.Phase, "not ready")))
 		}
 	}
 	return out
@@ -645,7 +646,7 @@ func imageTagUI(img string) string {
 // lastCauseUI mirrors checks.lastCause: the last "desc = " segment of a
 // gRPC-wrapped Longhorn error.
 func lastCauseUI(msg string) string {
-	msg = firstLine(msg)
+	msg = strutil.FirstLine(msg)
 	if i := strings.LastIndex(msg, "desc = "); i >= 0 {
 		msg = msg[i+len("desc = "):]
 	}

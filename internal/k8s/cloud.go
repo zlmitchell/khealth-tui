@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s-health-tui/internal/strutil"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -272,7 +274,7 @@ func (s *Snapshot) Cloud() CloudInfo {
 			if i := strings.Index(msg, "Error creating: "); i >= 0 {
 				msg = msg[i+len("Error creating: "):]
 			}
-			failedCreate[key] = firstLineOf(msg)
+			failedCreate[key] = strutil.FirstLine(msg)
 		}
 	}
 	fill := func(c *Component, pods []*corev1.Pod) {
@@ -287,14 +289,14 @@ func (s *Snapshot) Cloud() CloudInfo {
 				if w := cs.State.Waiting; w != nil && w.Reason != "" && w.Reason != "ContainerCreating" && c.Problem == "" {
 					c.Problem = p.Name + ": " + w.Reason
 					if lt := cs.LastTerminationState.Terminated; lt != nil && lt.Message != "" {
-						c.Problem += " (" + firstLineOf(lt.Message) + ")"
+						c.Problem += " (" + strutil.FirstLine(lt.Message) + ")"
 					}
 				}
 			}
 			if p.Status.Phase == corev1.PodPending && c.Problem == "" {
 				for _, cond := range p.Status.Conditions {
 					if cond.Type == corev1.PodScheduled && cond.Status != corev1.ConditionTrue {
-						c.Problem = p.Name + ": " + firstLineOf(cond.Message)
+						c.Problem = p.Name + ": " + strutil.FirstLine(cond.Message)
 					}
 				}
 			}
@@ -385,9 +387,9 @@ func (s *Snapshot) Cloud() CloudInfo {
 			}
 		}
 		l := n.Labels
-		cn.Zone = firstNonEmpty(l["topology.kubernetes.io/zone"], l["failure-domain.beta.kubernetes.io/zone"])
-		cn.Region = firstNonEmpty(l["topology.kubernetes.io/region"], l["failure-domain.beta.kubernetes.io/region"])
-		cn.InstanceType = firstNonEmpty(l["node.kubernetes.io/instance-type"], l["beta.kubernetes.io/instance-type"])
+		cn.Zone = strutil.FirstNonEmpty(l["topology.kubernetes.io/zone"], l["failure-domain.beta.kubernetes.io/zone"])
+		cn.Region = strutil.FirstNonEmpty(l["topology.kubernetes.io/region"], l["failure-domain.beta.kubernetes.io/region"])
+		cn.InstanceType = strutil.FirstNonEmpty(l["node.kubernetes.io/instance-type"], l["beta.kubernetes.io/instance-type"])
 		for _, ad := range n.Status.Addresses {
 			if ad.Type == corev1.NodeExternalIP {
 				cn.ExternalIP = true
@@ -473,7 +475,7 @@ func (s *Snapshot) Cloud() CloudInfo {
 		if driver == "" {
 			continue
 		}
-		failures[driver] = append(failures[driver], VolumeFailure{Reason: e.Reason, Object: e.InvolvedObject.Namespace + "/" + e.InvolvedObject.Name, Message: firstLineOf(e.Message), Last: last, Count: e.Count})
+		failures[driver] = append(failures[driver], VolumeFailure{Reason: e.Reason, Object: e.InvolvedObject.Namespace + "/" + e.InvolvedObject.Name, Message: strutil.FirstLine(e.Message), Last: last, Count: e.Count})
 	}
 	for i := range s.CSIDrivers {
 		name := s.CSIDrivers[i].Name
@@ -555,15 +557,6 @@ func mainImage(cs []corev1.Container) string {
 }
 
 var sidecar = regexp.MustCompile(`^(csi-)?(provisioner|attacher|resizer|snapshotter|node-driver-registrar|liveness-?probe|external-.*|driver-registrar)$|^livenessprobe$`)
-
-func firstNonEmpty(v ...string) string {
-	for _, s := range v {
-		if s != "" {
-			return s
-		}
-	}
-	return ""
-}
 
 // tridentBackends lists trident.netapp.io TridentBackend CRs (nil when the
 // CRD is absent or the token cannot list it).

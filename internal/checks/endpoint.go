@@ -10,6 +10,7 @@ import (
 	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/strutil"
 )
 
 // EndpointReport compares the API endpoint the kubeconfig uses with what the
@@ -63,7 +64,7 @@ func Endpoint(apiServer string, nodes []corev1.Node, infos map[string]*nodeinfo.
 			}
 		}
 	}
-	for _, name := range sortedKeys(infos) {
+	for _, name := range strutil.SortedKeys(infos) {
 		ni := infos[name]
 		if ni == nil || ni.Err != nil || !ni.ControlPlane {
 			continue

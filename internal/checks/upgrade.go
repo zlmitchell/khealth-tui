@@ -9,6 +9,7 @@ import (
 
 	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/strutil"
 )
 
 // evalUpgrade raises the upgrade-readiness findings: kubelet/API server
@@ -65,9 +66,9 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 		for _, c := range p.Conditions {
 			switch c.Type {
 			case "LatestResolved":
-				add(SevWarn, "upgrade", obj, fmt.Sprintf("plan cannot resolve its version from channel %s: %s", firstNonEmpty(p.Channel, p.Version), firstNonEmpty(firstLine(c.Message), c.Reason, "no answer from the channel yet ("+strings.ToLower(c.Status)+")")), "the controller resolves the channel from inside the cluster (proxy/airgap/DNS): kubectl -n "+p.Namespace+" logs deploy/system-upgrade-controller, or pin spec.version instead")
+				add(SevWarn, "upgrade", obj, fmt.Sprintf("plan cannot resolve its version from channel %s: %s", strutil.FirstNonEmpty(p.Channel, p.Version), strutil.FirstNonEmpty(strutil.FirstLine(c.Message), c.Reason, "no answer from the channel yet ("+strings.ToLower(c.Status)+")")), "the controller resolves the channel from inside the cluster (proxy/airgap/DNS): kubectl -n "+p.Namespace+" logs deploy/system-upgrade-controller, or pin spec.version instead")
 			case "Validated":
-				add(SevWarn, "upgrade", obj, "plan rejected by the controller: "+firstNonEmpty(c.Message, c.Reason), "kubectl -n "+p.Namespace+" describe plan "+p.Name)
+				add(SevWarn, "upgrade", obj, "plan rejected by the controller: "+strutil.FirstNonEmpty(c.Message, c.Reason), "kubectl -n "+p.Namespace+" describe plan "+p.Name)
 			}
 		}
 		if target == "" {
@@ -97,10 +98,10 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 			}
 		}
 		if len(skips) > 0 {
-			add(SevCrit, "upgrade", obj, fmt.Sprintf("plan targets %s but %s more than one minor behind: %s - skipping a minor version is not supported, the node will not come back healthy", target, pluralCount(len(skips), "node"), truncList(skips, 3)), "upgrade one minor at a time: set spec.version to the latest v"+strconv.Itoa(tmaj)+"."+strconv.Itoa(lowest+1)+" release first")
+			add(SevCrit, "upgrade", obj, fmt.Sprintf("plan targets %s but %s more than one minor behind: %s - skipping a minor version is not supported, the node will not come back healthy", target, pluralCount(len(skips), "node"), strutil.TruncList(skips, 3)), "upgrade one minor at a time: set spec.version to the latest v"+strconv.Itoa(tmaj)+"."+strconv.Itoa(lowest+1)+" release first")
 		}
 		if len(downgrades) > 0 {
-			add(SevWarn, "upgrade", obj, fmt.Sprintf("plan targets %s, older than what %s run: %s - this is a downgrade", target, pluralCount(len(downgrades), "node"), truncList(downgrades, 3)), "check spec.version / the channel")
+			add(SevWarn, "upgrade", obj, fmt.Sprintf("plan targets %s, older than what %s run: %s - this is a downgrade", target, pluralCount(len(downgrades), "node"), strutil.TruncList(downgrades, 3)), "check spec.version / the channel")
 		}
 		// jobs: the newest one per node tells why a node is stuck
 		latest := map[string]k8s.UpgradeJob{}
@@ -135,7 +136,7 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 			case j.Active > 0 && isPullError(j.PodState):
 				add(SevCrit, "upgrade", obj, fmt.Sprintf("upgrade job for %s cannot start: %s (%s)", node, j.PodState, shortMsg(j.PodMessage)), pullHint(p, node, j.PodMessage))
 			case j.Active > 0 && j.PodState != "" && j.PodState != "Running":
-				add(SevWarn, "upgrade", obj, fmt.Sprintf("upgrade job for %s is not running: %s (%s)", node, j.PodState, firstLine(j.PodMessage)), "kubectl -n "+p.Namespace+" describe job "+j.Name)
+				add(SevWarn, "upgrade", obj, fmt.Sprintf("upgrade job for %s is not running: %s (%s)", node, j.PodState, strutil.FirstLine(j.PodMessage)), "kubectl -n "+p.Namespace+" describe job "+j.Name)
 			case j.Active > 0 && !j.Started.IsZero() && in.Now.Sub(j.Started) > 30*time.Minute:
 				add(SevWarn, "upgrade", obj, fmt.Sprintf("upgrade of %s to %s has been running for %s: the drain or the %s restart is stuck", node, target, in.Now.Sub(j.Started).Round(time.Minute), cv.Name), "kubectl -n "+p.Namespace+" logs job/"+j.Name+"; pods that refuse to drain (PDBs, local storage) hold the job")
 			case j.Active > 0:
@@ -172,7 +173,7 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 			if r := s.Rancher; r != nil && r.SystemUpgradeOK != nil && !*r.SystemUpgradeOK {
 				hint = "system-upgrade-controller is not ready: nothing schedules the upgrade jobs"
 			}
-			add(SevWarn, "upgrade", obj, fmt.Sprintf("plan targets %s but no upgrade job exists for %s (%s since the last activity)", target, truncList(waiting, 3), in.Now.Sub(lastActivity).Round(time.Minute)), hint)
+			add(SevWarn, "upgrade", obj, fmt.Sprintf("plan targets %s but no upgrade job exists for %s (%s since the last activity)", target, strutil.TruncList(waiting, 3), in.Now.Sub(lastActivity).Round(time.Minute)), hint)
 		}
 	}
 	if r := s.Rancher; r != nil && r.SystemUpgradeOK != nil && !*r.SystemUpgradeOK && pendingAny {
@@ -210,9 +211,9 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 		}
 		var behind, pendingPlan []string
 		for _, m := range pc.Machines {
-			mobj := pc.Name + "/" + firstNonEmpty(m.Node, m.Name)
+			mobj := pc.Name + "/" + strutil.FirstNonEmpty(m.Node, m.Name)
 			if pc.Version != "" && m.Version != "" && !sameVersion(m.Version, pc.Version) {
-				behind = append(behind, firstNonEmpty(m.Node, m.Name)+" ("+m.Version+")")
+				behind = append(behind, strutil.FirstNonEmpty(m.Node, m.Name)+" ("+m.Version+")")
 			}
 			if m.Phase != "" && m.Phase != "Running" {
 				sev := SevWarn
@@ -239,7 +240,7 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 				}
 				add(SevCrit, "upgrade", mobj, msg, "journalctl -u rancher-system-agent on the node (the plan's instruction output is in the machine plan secret, applied-output); the plan stays failed until the node is fixed or Rancher generates a new plan (edit the cluster)")
 			case !mp.InSync:
-				pendingPlan = append(pendingPlan, firstNonEmpty(m.Node, m.Name))
+				pendingPlan = append(pendingPlan, strutil.FirstNonEmpty(m.Node, m.Name))
 				if mp.Failing {
 					limit := ""
 					if mp.Threshold > 0 {
@@ -265,10 +266,10 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 			if old > 0 {
 				sev = SevWarn
 			}
-			add(sev, "upgrade", obj, fmt.Sprintf("Rancher plan pending on %d machine(s): %s", len(pendingPlan), truncList(pendingPlan, 4)), "rancher-system-agent applies it when it polls; if it stays pending check the agent unit and its connection to "+"the Rancher server on those nodes")
+			add(sev, "upgrade", obj, fmt.Sprintf("Rancher plan pending on %d machine(s): %s", len(pendingPlan), strutil.TruncList(pendingPlan, 4)), "rancher-system-agent applies it when it polls; if it stays pending check the agent unit and its connection to "+"the Rancher server on those nodes")
 		}
 		if len(behind) > 0 {
-			add(SevInfo, "upgrade", obj, fmt.Sprintf("%d/%d machine(s) not yet on %s: %s", len(behind), len(pc.Machines), pc.Version, truncList(behind, 4)), "Rancher upgrades one machine at a time per role (rkeConfig.upgradeStrategy)")
+			add(SevInfo, "upgrade", obj, fmt.Sprintf("%d/%d machine(s) not yet on %s: %s", len(behind), len(pc.Machines), pc.Version, strutil.TruncList(behind, 4)), "Rancher upgrades one machine at a time per role (rkeConfig.upgradeStrategy)")
 		}
 	}
 	if u.SecretsDenied && len(u.Provisioned) > 0 {
@@ -326,7 +327,7 @@ func pullHint(p k8s.UpgradePlan, node, msg string) string {
 
 // shortMsg keeps the first line of a pod message, cut to 160 characters.
 func shortMsg(s string) string {
-	s = firstLine(s)
+	s = strutil.FirstLine(s)
 	if len(s) > 160 {
 		return s[:157] + "..."
 	}
@@ -343,7 +344,7 @@ func condText(c k8s.CondSummary) string {
 		s += " (" + c.Reason + ")"
 	}
 	if c.Message != "" {
-		s += ": " + firstLine(c.Message)
+		s += ": " + strutil.FirstLine(c.Message)
 	}
 	return s
 }
@@ -372,13 +373,6 @@ func worstCondition(conds []k8s.CondSummary) *k8s.CondSummary {
 		return &conds[0]
 	}
 	return nil
-}
-
-func prefixIf(prefix, s string) string {
-	if s == "" {
-		return ""
-	}
-	return prefix + s
 }
 
 func pluralCount(n int, noun string) string {

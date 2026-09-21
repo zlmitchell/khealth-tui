@@ -4,10 +4,8 @@ package ui
 import (
 	"context"
 	"fmt"
-	"maps"
 	"net"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 
@@ -30,6 +28,7 @@ import (
 	"k8s-health-tui/internal/perf"
 	"k8s-health-tui/internal/sshrun"
 	"k8s-health-tui/internal/stig"
+	"k8s-health-tui/internal/strutil"
 )
 
 type tab int
@@ -500,7 +499,7 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 				p.ScriptSize = res.ScriptSize
 				p.Stderr = strings.TrimSpace(res.Stderr)
 				if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
-					p.Err = fmt.Errorf("%s", firstLine(res.Err.Error()+" "+res.Stderr))
+					p.Err = fmt.Errorf("%s", strutil.FirstLine(res.Err.Error()+" "+res.Stderr))
 				}
 				return etcdMsg{gen: gen, probe: p}
 			})
@@ -528,7 +527,7 @@ func (a *App) nodeProbeCmd(name, host string, opts nodeinfo.Options, timeout tim
 		if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
 			msg := res.Err.Error()
 			if s := strings.TrimSpace(res.Stderr); s != "" {
-				msg += ": " + firstLine(s)
+				msg += ": " + strutil.FirstLine(s)
 			}
 			info.Err = fmt.Errorf("%s", msg)
 		}
@@ -665,7 +664,7 @@ func (a *App) stigStageCmd(name string, idx int) tea.Cmd {
 		if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
 			msg := res.Err.Error()
 			if s := strings.TrimSpace(res.Stderr); s != "" {
-				msg += ": " + firstLine(s)
+				msg += ": " + strutil.FirstLine(s)
 			}
 			m.err = fmt.Errorf("%s", msg)
 		}
@@ -770,7 +769,7 @@ func (a *App) apiFailoverCmd() tea.Cmd {
 	}
 	// etcd-healthy servers first: their apiserver is the most likely to answer
 	for _, pass := range []bool{true, false} {
-		for _, n := range sortedKeys(a.etcd) {
+		for _, n := range strutil.SortedKeys(a.etcd) {
 			p := a.etcd[n]
 			healthy := p.Err == nil && p.Health != nil && p.Health.Healthy
 			if healthy != pass {
@@ -787,7 +786,7 @@ func (a *App) apiFailoverCmd() tea.Cmd {
 			add(a.nodeIP(n))
 		}
 	}
-	for _, h := range sortedKeys(a.cfg.SSH.Hosts) {
+	for _, h := range strutil.SortedKeys(a.cfg.SSH.Hosts) {
 		hp := a.cfg.SSH.Hosts[h]
 		if x, _, err := net.SplitHostPort(hp); err == nil {
 			hp = x
@@ -816,7 +815,7 @@ func (a *App) apiFailoverCmd() tea.Cmd {
 			_, err = c.Ping(ctx)
 			cancel()
 			if err != nil {
-				lastErr = server + ": " + firstLine(err.Error())
+				lastErr = server + ": " + strutil.FirstLine(err.Error())
 				continue
 			}
 			return apiFailoverMsg{seq: seq, client: c, server: server, tried: tried}
@@ -837,7 +836,7 @@ func (a *App) sshTargets(snap *k8s.Snapshot) ([]corev1.Node, bool) {
 	if len(a.knownNodes) > 0 {
 		out = append(out, a.knownNodes...)
 	} else {
-		for _, name := range sortedKeys(a.cfg.SSH.Hosts) {
+		for _, name := range strutil.SortedKeys(a.cfg.SSH.Hosts) {
 			out = append(out, corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}})
 		}
 	}
@@ -857,7 +856,7 @@ func (a *App) withPeers(nodes []corev1.Node) []corev1.Node {
 			seen[ad.Address] = true
 		}
 	}
-	for _, n := range sortedKeys(a.etcd) {
+	for _, n := range strutil.SortedKeys(a.etcd) {
 		for _, pr := range a.etcd[n].Peers {
 			name := pr.NodeName()
 			if name == "" {
@@ -895,7 +894,7 @@ func (a *App) etcdExecCmd(snap *k8s.Snapshot) tea.Cmd {
 		prevEnc = a.etcdExec.Encryption
 	}
 	sampleEnc := prevEnc == nil || prevEnc.SamplePrefix == "" || a.heavyNext
-	names := sortedKeys(pods)
+	names := strutil.SortedKeys(pods)
 	podNames := map[string]string{}
 	for _, n := range names {
 		podNames[n] = pods[n].Name
@@ -992,7 +991,7 @@ func (a *App) s3CheckCmd(node string) tea.Cmd {
 		res := runner.Run(ctx, host, script)
 		out := res.Stdout
 		if res.Err != nil && strings.TrimSpace(out) == "" {
-			out = "ssh: " + firstLine(res.Err.Error())
+			out = "ssh: " + strutil.FirstLine(res.Err.Error())
 		}
 		return s3CheckMsg{gen: gen, check: etcd.ParseS3Check(node, url, out)}
 	}
@@ -1284,7 +1283,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case s3Msg:
 		a.s3 = m.info
 		cmds := []tea.Cmd{a.scheduleRecompute()}
-		for _, n := range sortedKeys(a.etcd) {
+		for _, n := range strutil.SortedKeys(a.etcd) {
 			cmds = append(cmds, a.s3CheckCmd(n))
 		}
 		return a, tea.Batch(cmds...)
@@ -2655,16 +2654,6 @@ func helpLines(width int) []string {
 	lines = append(lines, styleDim.Render("khealth "+config.Version+" - created by Zach Mitchell"))
 	return lines
 }
-
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return s
-}
-
-func sortedKeys[T any](m map[string]T) []string { return slices.Sorted(maps.Keys(m)) }
 
 // inNamespace reports whether an object namespace matches the active filter.
 func (a *App) inNamespace(ns string) bool {

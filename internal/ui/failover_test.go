@@ -5,7 +5,6 @@ import (
 
 	"encoding/pem"
 	"fmt"
-	tea "github.com/charmbracelet/bubbletea"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/k8s"

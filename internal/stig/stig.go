@@ -303,25 +303,6 @@ func modeAtMost(mode string, max int) bool {
 	return n&^int64(max) == 0
 }
 
-func truncList(l []string, n int) string {
-	if len(l) <= n {
-		return strings.Join(l, ", ")
-	}
-	return strings.Join(l[:n], ", ") + fmt.Sprintf(" (+%d more)", len(l)-n)
-}
-
-func uniq(l []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, s := range l {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 // Counts returns pass/fail/manual/na/unknown totals.
 
 func Counts(rs []Result) map[Status]int {

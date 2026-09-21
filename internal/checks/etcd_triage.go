@@ -2,10 +2,6 @@ package checks
 
 import (
 	"fmt"
-	"maps"
-	"net"
-	"net/url"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -16,6 +12,7 @@ import (
 	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/strutil"
 )
 
 // raftLagWarn is how many raft entries a healthy member may trail the leader
@@ -110,7 +107,7 @@ func triageEtcd(in Input, add func(Finding)) map[string]bool {
 	var recs []*etcdTriage
 	matched := map[string]bool{} // member IDs that map to a node
 	if apiDown {
-		for _, name := range sortedKeys(in.Etcd) {
+		for _, name := range strutil.SortedKeys(in.Etcd) {
 			p := in.Etcd[name]
 			if p == nil || p.Err != nil || p.Dist == "unknown" {
 				continue
@@ -125,7 +122,7 @@ func triageEtcd(in Input, add func(Finding)) map[string]bool {
 		if t.info != nil {
 			t.sshOK = t.info.Err == nil
 			if t.info.Err != nil {
-				t.sshErr = firstLine(t.info.Err.Error())
+				t.sshErr = strutil.FirstLine(t.info.Err.Error())
 			}
 		}
 		if lg := in.Logs[n.Name]; lg != nil {
@@ -137,18 +134,18 @@ func triageEtcd(in Input, add func(Finding)) map[string]bool {
 			t.status = statusByID[m.ID]
 			for _, u := range m.ClientURLs {
 				if h, ok := healthByEP[u]; ok {
-					t.known, t.healthy, t.reason = true, h.Healthy, firstLine(h.Error)
+					t.known, t.healthy, t.reason = true, h.Healthy, strutil.FirstLine(h.Error)
 					break
 				}
 			}
 		}
 		// SSH /health on the node itself is the fallback signal
 		if !t.known && t.probe != nil && t.probe.Err == nil && t.probe.Health != nil {
-			t.known, t.healthy, t.reason = true, t.probe.Health.Healthy, firstLine(t.probe.Health.Reason)
+			t.known, t.healthy, t.reason = true, t.probe.Health.Healthy, strutil.FirstLine(t.probe.Health.Reason)
 		}
 		// a status error (e.g. context deadline exceeded) also means unhealthy
 		if t.status != nil && len(t.status.Errors) > 0 && (!t.known || t.healthy) {
-			t.known, t.healthy, t.reason = true, false, firstLine(t.status.Errors[0])
+			t.known, t.healthy, t.reason = true, false, strutil.FirstLine(t.status.Errors[0])
 		}
 		recs = append(recs, t)
 	}
@@ -299,7 +296,7 @@ func (r nodeRank) String(now time.Time) string {
 		parts = append(parts, fmt.Sprintf("WAL from index %d", r.walIndex))
 	}
 	if !r.walWrite.IsZero() {
-		parts = append(parts, "last WAL write "+roundDur(now.Sub(r.walWrite))+" ago")
+		parts = append(parts, "last WAL write "+strutil.HumanDur(now.Sub(r.walWrite))+" ago")
 	}
 	if r.memberID != "" {
 		parts = append(parts, "id "+r.memberID)
@@ -393,7 +390,7 @@ func latestSnapshotPath(in Input, recs []*etcdTriage) string {
 		}
 	}
 	if node != "" {
-		return dir + "/" + best.Name + " (on " + node + ", " + roundDur(in.Now.Sub(best.ModTime)) + " old)"
+		return dir + "/" + best.Name + " (on " + node + ", " + strutil.HumanDur(in.Now.Sub(best.ModTime)) + " old)"
 	}
 	if in.Snap != nil {
 		var latest *k8s.EtcdSnapshotRecord
@@ -445,7 +442,7 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 	switch {
 	// ---- node offline: NotReady and unreachable over SSH ----
 	case !t.ready && (t.sshErr != "" || (!in.SSHEnabled && !t.known) || (!in.SSHEnabled && !t.healthy)):
-		f.Message = fmt.Sprintf("node offline: NotReady and unreachable (%s); %s", firstNonEmpty(t.sshErr, "ssh off"), memberTxt)
+		f.Message = fmt.Sprintf("node offline: NotReady and unreachable (%s); %s", strutil.FirstNonEmpty(t.sshErr, "ssh off"), memberTxt)
 		f.Hint = "check the host; the member rejoins on its own when the node is back"
 		f.Steps = []string{
 			q.String(),
@@ -513,8 +510,8 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 		if t.member == nil && q.haveMembers {
 			what = "running but not a cluster member"
 		}
-		f.Message = fmt.Sprintf("etcd on %s is %s: %s", t.node, what, firstNonEmpty(t.reason, cause, "no error text"))
-		f.Hint = firstNonEmpty(cause, "check peer connectivity on 2380 and the member's log")
+		f.Message = fmt.Sprintf("etcd on %s is %s: %s", t.node, what, strutil.FirstNonEmpty(t.reason, cause, "no error text"))
+		f.Hint = strutil.FirstNonEmpty(cause, "check peer connectivity on 2380 and the member's log")
 		f.Steps = []string{q.String()}
 		if cause != "" {
 			f.Steps = append(f.Steps, "Cause: "+cause)
@@ -682,7 +679,7 @@ func etcdMembershipSource(in Input) *etcd.Probe {
 	if x := in.EtcdExec; x != nil && x.Err == nil && len(x.Members) > 0 {
 		return x
 	}
-	for _, n := range sortedKeys(in.Etcd) {
+	for _, n := range strutil.SortedKeys(in.Etcd) {
 		if p := in.Etcd[n]; p != nil && p.Err == nil && len(p.Members) > 0 {
 			return p
 		}
@@ -751,23 +748,12 @@ func memberForNode(members []etcd.Member, n *corev1.Node) *etcd.Member {
 	for i := range members {
 		m := &members[i]
 		for _, u := range append(append([]string{}, m.PeerURLs...), m.ClientURLs...) {
-			if addrs[urlHost(u)] {
+			if addrs[strutil.URLHost(u)] {
 				return m
 			}
 		}
 	}
 	return nil
-}
-
-func urlHost(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	if h, _, err := net.SplitHostPort(u.Host); err == nil {
-		return h
-	}
-	return u.Host
 }
 
 // etcdPodOn finds the static etcd pod for a node (any phase).
@@ -845,7 +831,7 @@ func expiredEtcdCert(t *etcdTriage, now time.Time) string {
 	}
 	for _, c := range t.info.Certs {
 		if strings.Contains(c.Path, "etcd") && !c.NotAfter.IsZero() && c.NotAfter.Before(now) {
-			return c.Path + " (expired " + roundDur(now.Sub(c.NotAfter)) + " ago)"
+			return c.Path + " (expired " + strutil.HumanDur(now.Sub(c.NotAfter)) + " ago)"
 		}
 	}
 	return ""
@@ -861,7 +847,7 @@ func memberID(t *etcdTriage) string {
 func peerHost(t *etcdTriage) string {
 	if t.member != nil {
 		for _, u := range t.member.PeerURLs {
-			if h := urlHost(u); h != "" {
+			if h := strutil.URLHost(u); h != "" {
 				return h
 			}
 		}
@@ -880,20 +866,9 @@ func nodeHeartbeat(in Input, node string) string {
 		}
 		for _, c := range n.Status.Conditions {
 			if c.Type == corev1.NodeReady && !c.LastHeartbeatTime.IsZero() {
-				return roundDur(in.Now.Sub(c.LastHeartbeatTime.Time)) + " ago"
+				return strutil.HumanDur(in.Now.Sub(c.LastHeartbeatTime.Time)) + " ago"
 			}
 		}
 	}
 	return "unknown"
 }
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func sortedKeys[V any](m map[string]V) []string { return slices.Sorted(maps.Keys(m)) }

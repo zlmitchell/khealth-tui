@@ -256,12 +256,6 @@ func TestDiagHelpers(t *testing.T) {
 			t.Errorf("%+v: %q %q", c.src, k, p)
 		}
 	}
-	if firstLineOf("  first\nsecond") != "first" || firstLineOf(strings.Repeat("x", 400)) != strings.Repeat("x", 300)+"..." {
-		t.Error("firstLineOf")
-	}
-	if human(512) != "512.0B" || human(1536) != "1.5KiB" || human(3*1024*1024*1024) != "3.0GiB" || human(2e15) != "1819.0TiB" {
-		t.Errorf("human: %s %s %s %s", human(512), human(1536), human(3*1024*1024*1024), human(2e15))
-	}
 	if (VolumeUsage{}).UsedPct() != -1 || (VolumeUsage{Capacity: 200, Used: 50}).UsedPct() != 25 {
 		t.Error("UsedPct")
 	}
@@ -304,7 +298,7 @@ func TestDiag(t *testing.T) {
 		"server version: v1.30.4+rke2r1",
 		"nodes: 2   PVCs: 1 (0 bound)",
 		"pv-1", "hostPath", "web/data", "/data", "by source: map[hostPath:1]",
-		"[cp-1]", "configz:       ERROR", "stats/summary: ok", "used 250.0B of 1000.0B (25%) pod web/nginx-b",
+		"[cp-1]", "configz:       ERROR", "stats/summary: ok", "used 250B of 1000B (25%) pod web/nginx-b",
 		"[w-1]", "claims mounted by running pods here: 1", "NOTE: pods here mount web/data but the kubelet reported no pvcRef volumes", "raw volume sample:",
 		"== metrics.k8s.io ==", "ok, 2 nodes",
 		"etcd-cp-1: ERROR",

@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"k8s-health-tui/internal/config"
+	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/perf"
+	"k8s-health-tui/internal/strutil"
 )
 
 // Probe is the result of probing etcd on one node.
@@ -119,9 +121,7 @@ type RaftOnDisk struct {
 }
 
 // ConfigFile is a masked config excerpt.
-type ConfigFile struct {
-	Path, Content string
-}
+type ConfigFile = nodeinfo.ConfigFile
 
 // Health is the /health response.
 type Health struct {
@@ -278,7 +278,7 @@ var script string
 // Parse converts the script output into a Probe.
 func Parse(node, out string) *Probe {
 	p := &Probe{Node: node, Collected: time.Now(), RKE2Config: map[string]string{}, Raw: out}
-	secs := splitSections(out)
+	secs := nodeinfo.SplitSections(out)
 	p.OutBytes = len(out)
 	p.Cost = perf.ParseSection(secs["PERF"])
 	p.Dist = strings.TrimSpace(secs["DIST"])
@@ -315,7 +315,7 @@ func Parse(node, out string) *Probe {
 		}
 		p.RKE2Config[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
-	p.ConfigDump = parseDumps(secs["CONFIGDUMP"])
+	p.ConfigDump = nodeinfo.ParseDumps(secs["CONFIGDUMP"])
 	if h := strings.TrimSpace(secs["HEALTH"]); h != "" {
 		p.Health = parseHealth(h)
 	}
@@ -358,7 +358,7 @@ func Parse(node, out string) *Probe {
 		}
 	}
 	seen := map[string]bool{}
-	for _, d := range parseDumps(secs["SNAPSHOTS"]) {
+	for _, d := range nodeinfo.ParseDumps(secs["SNAPSHOTS"]) {
 		if seen[d.Path] {
 			continue
 		}
@@ -625,60 +625,12 @@ func (p *Probe) SnapshotCount() int {
 	return n
 }
 
-func splitSections(out string) map[string]string {
-	secs := map[string]string{}
-	cur := ""
-	var buf strings.Builder
-	flush := func() {
-		if cur != "" {
-			secs[cur] = buf.String()
-		}
-		buf.Reset()
-	}
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if strings.HasPrefix(line, "===") && len(line) > 3 && !strings.ContainsAny(line[3:], " \t{") {
-			flush()
-			cur = line[3:]
-			continue
-		}
-		buf.WriteString(line)
-		buf.WriteByte('\n')
-	}
-	flush()
-	return secs
-}
-
 func lines(s string) []string {
 	var out []string
 	for _, l := range strings.Split(s, "\n") {
 		if t := strings.TrimSpace(l); t != "" {
 			out = append(out, t)
 		}
-	}
-	return out
-}
-
-func parseDumps(s string) []ConfigFile {
-	var out []ConfigFile
-	var cur *ConfigFile
-	for _, l := range strings.Split(s, "\n") {
-		if strings.HasPrefix(l, "--- ") {
-			if cur != nil {
-				out = append(out, *cur)
-			}
-			cur = &ConfigFile{Path: strings.TrimPrefix(l, "--- ")}
-			continue
-		}
-		if cur != nil {
-			cur.Content += l + "\n"
-		}
-	}
-	if cur != nil {
-		out = append(out, *cur)
-	}
-	for i := range out {
-		out[i].Content = strings.TrimRight(out[i].Content, "\n")
 	}
 	return out
 }
@@ -802,7 +754,7 @@ func parseEtcdctl(p *Probe, raw string) {
 				sort.Slice(p.Members, func(i, j int) bool { return p.Members[i].Name < p.Members[j].Name })
 			}
 		} else if p.EtcdctlDiag == "" {
-			p.EtcdctlDiag = firstLine(s)
+			p.EtcdctlDiag = strutil.FirstLine(s)
 		}
 	}
 	if s := jsonArray(parts["STATUS"]); s != "" {
@@ -964,16 +916,6 @@ func strList(v any) []string {
 		}
 	}
 	return out
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	if len(s) > 200 {
-		s = s[:200]
-	}
-	return s
 }
 
 func hexID(s string) string {

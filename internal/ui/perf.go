@@ -11,6 +11,7 @@ import (
 	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/perf"
+	"k8s-health-tui/internal/strutil"
 )
 
 // footprint tracks what khealth itself costs the cluster and this machine
@@ -159,16 +160,6 @@ func (a *App) timedRecompute() {
 	}
 }
 
-func fmtBytes(n int64) string {
-	switch {
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
-	}
-	return fmt.Sprintf("%d B", n)
-}
-
 func fmtSecs(s float64) string {
 	if s < 0 {
 		return "-"
@@ -219,14 +210,14 @@ func (a *App) perfLines() []string {
 		}
 	}
 	out = append(out, fmt.Sprintf("API server   last cycle: %d requests, %s in, %s out, fetch %s   (avg over %d cycles: %.0f req, %s, %.1fs)",
-		last.API.Requests, fmtBytes(last.API.BytesIn), fmtBytes(last.API.BytesOut), time.Duration(last.API.FetchMS)*time.Millisecond,
-		len(recs), apiReq/n, fmtBytes(int64(apiIn/n)), apiMS/n/1000))
+		last.API.Requests, strutil.HumanBytes(float64(last.API.BytesIn)), strutil.HumanBytes(float64(last.API.BytesOut)), time.Duration(last.API.FetchMS)*time.Millisecond,
+		len(recs), apiReq/n, strutil.HumanBytes(float64(apiIn/n)), apiMS/n/1000))
 	out = append(out, fmt.Sprintf("             %d pods, %d nodes, %d events per snapshot; %d list errors", last.API.Pods, last.API.Nodes, last.API.Events, last.API.Errors))
 	if d := a.client.DeniedList(); len(d) > 0 {
 		out = append(out, fmt.Sprintf("             not requested (token refused or not installed, retried every %s or on R): %s", a.cfg.Perf.DeniedTTL, strings.Join(d, ", ")))
 	}
 	out = append(out, fmt.Sprintf("This host    CPU %s per cycle (%.1f%% of one core at %.0fs refresh), heap %s, rss-ish %s, %d goroutines, recompute %dx %dms",
-		fmtSecs(last.LocalCPUS), cpu/n/refresh*100, refresh, fmtBytes(int64(last.LocalHeap)), fmtBytes(int64(last.LocalSys)), last.Goroutines, last.Recomputes, last.RecomputeMS))
+		fmtSecs(last.LocalCPUS), cpu/n/refresh*100, refresh, strutil.HumanBytes(float64(last.LocalHeap)), strutil.HumanBytes(float64(last.LocalSys)), last.Goroutines, last.Recomputes, last.RecomputeMS))
 	out = append(out, "")
 	out = append(out, "Nodes, last cycle (remote CPU = user+sys seconds the probe and everything it ran consumed on the node)")
 	out = append(out, fmt.Sprintf("  %-24s %-12s %8s %10s %7s %9s  %s", "NODE", "PROBE", "WALL", "REMOTE CPU", "LOAD1", "OUTPUT", "NOTE"))
@@ -247,7 +238,7 @@ func (a *App) perfLines() []string {
 		if p.Load1 >= 0 {
 			load = fmt.Sprintf("%.2f", p.Load1)
 		}
-		out = append(out, fmt.Sprintf("  %-24s %-12s %8s %10s %7s %9s  %s", p.Node, p.Kind, (time.Duration(p.WallMS)*time.Millisecond).Round(10*time.Millisecond), cpuS, load, fmtBytes(int64(p.OutBytes)), note))
+		out = append(out, fmt.Sprintf("  %-24s %-12s %8s %10s %7s %9s  %s", p.Node, p.Kind, (time.Duration(p.WallMS)*time.Millisecond).Round(10*time.Millisecond), cpuS, load, strutil.HumanBytes(float64(p.OutBytes)), note))
 	}
 	out = append(out, "")
 	out = append(out, fmt.Sprintf("Per node over the last %d cycles: average remote CPU per cycle and what that is as a share of one core", len(recs)))
@@ -289,5 +280,5 @@ func (a *App) perfSummary() string {
 	for _, p := range r.Probes {
 		remote += p.RemoteCPU
 	}
-	return strings.TrimSpace(fmt.Sprintf("cycle %d: api %d req %s, nodes %s remote cpu, local %s", r.Cycle, r.API.Requests, fmtBytes(r.API.BytesIn), fmtSecs(remote), fmtSecs(r.LocalCPUS)))
+	return strings.TrimSpace(fmt.Sprintf("cycle %d: api %d req %s, nodes %s remote cpu, local %s", r.Cycle, r.API.Requests, strutil.HumanBytes(float64(r.API.BytesIn)), fmtSecs(remote), fmtSecs(r.LocalCPUS)))
 }

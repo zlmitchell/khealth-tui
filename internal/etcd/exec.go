@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"k8s-health-tui/internal/strutil"
 )
 
 // Execer runs a command inside a pod (satisfied by *k8s.Client).
@@ -55,7 +57,7 @@ func ExecProbeOpts(ctx context.Context, ex Execer, node, pod, dist string, sampl
 		argv := append(append([]string{}, base...), args...)
 		out, errOut, err := ex.ExecInPod(ctx, "kube-system", pod, "etcd", argv)
 		if err != nil && strings.TrimSpace(out) == "" {
-			return "", fmt.Errorf("%v: %s", err, firstLine(errOut))
+			return "", fmt.Errorf("%v: %s", err, strutil.FirstLine(errOut))
 		}
 		if strings.TrimSpace(errOut) != "" {
 			p.Stderr = strings.TrimSpace(errOut)
@@ -74,7 +76,7 @@ func ExecProbeOpts(ctx context.Context, ex Execer, node, pod, dist string, sampl
 	membersRaw := strings.TrimSpace(out)
 	p.EtcdctlOut = membersRaw
 	if len(p.Members) == 0 {
-		p.Err = fmt.Errorf("member list returned no members: %s", firstLine(out))
+		p.Err = fmt.Errorf("member list returned no members: %s", strutil.FirstLine(out))
 		p.EtcdctlDiag = p.Err.Error()
 		return p
 	}

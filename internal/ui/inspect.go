@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/strutil"
 )
 
 // inspectLevel is one page of the object inspector (a stack of these forms
@@ -108,7 +109,7 @@ func levelFromObject(u *unstructured.Unstructured, snap *k8s.Snapshot) inspectLe
 	}
 	if l := u.GetLabels(); len(l) > 0 {
 		var kvs []string
-		for _, k := range sortedKeys(l) {
+		for _, k := range strutil.SortedKeys(l) {
 			kvs = append(kvs, k+"="+l[k])
 		}
 		meta = append(meta, kv("labels", strings.Join(kvs, " ")))

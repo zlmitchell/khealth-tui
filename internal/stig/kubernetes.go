@@ -15,6 +15,7 @@ import (
 	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/strutil"
 )
 
 func (e *evaluator) apiserverRules() {
@@ -481,7 +482,7 @@ func (e *evaluator) clusterRules() {
 	r := Result{ID: "V-242383", Title: "User workloads not deployed in the default namespace", Cat: "I", Group: g, Status: Pass, Detail: "no pods in default", Fix: "move workloads to dedicated namespaces"}
 	if len(def) > 0 {
 		r.Status = Fail
-		r.Detail = fmt.Sprintf("%d pod(s) in default: %s", len(def), truncList(def, 5))
+		r.Detail = fmt.Sprintf("%d pod(s) in default: %s", len(def), strutil.TruncList(def, 5))
 	}
 	e.add(r)
 
@@ -507,10 +508,10 @@ func (e *evaluator) clusterRules() {
 		r.Detail = "all user namespaces labeled"
 	case psaCluster:
 		r.Status = Manual
-		r.Detail = fmt.Sprintf("cluster-wide PSA config present; %d namespace(s) rely on the default: %s", len(noPSA), truncList(noPSA, 6))
+		r.Detail = fmt.Sprintf("cluster-wide PSA config present; %d namespace(s) rely on the default: %s", len(noPSA), strutil.TruncList(noPSA, 6))
 	default:
 		r.Status = Fail
-		r.Detail = fmt.Sprintf("%d namespace(s) without enforce label: %s", len(noPSA), truncList(noPSA, 6))
+		r.Detail = fmt.Sprintf("%d namespace(s) without enforce label: %s", len(noPSA), strutil.TruncList(noPSA, 6))
 	}
 	e.add(r)
 
@@ -541,7 +542,7 @@ func (e *evaluator) clusterRules() {
 	r = Result{ID: "V-242415", Title: "Secrets are not exposed as environment variables", Cat: "I", Group: g, Status: Pass, Detail: "none", Fix: "mount secrets as files instead of env vars"}
 	if len(secretEnv) > 0 {
 		r.Status = Manual
-		r.Detail = fmt.Sprintf("%d pod(s) use secretKeyRef env: %s", len(secretEnv), truncList(uniq(secretEnv), 5))
+		r.Detail = fmt.Sprintf("%d pod(s) use secretKeyRef env: %s", len(secretEnv), strutil.TruncList(strutil.Uniq(secretEnv), 5))
 	}
 	e.add(r)
 

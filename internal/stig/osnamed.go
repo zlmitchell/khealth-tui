@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/strutil"
 )
 
 type namedEval func(info *nodeinfo.Info) (Status, string)
@@ -133,7 +134,7 @@ func atoi(s string) (int, bool) {
 
 func failIf(items []string, what string) (Status, string) {
 	if len(items) > 0 {
-		return Fail, fmt.Sprintf("%d %s: %s", len(items), what, truncList(items, 5))
+		return Fail, fmt.Sprintf("%d %s: %s", len(items), what, strutil.TruncList(items, 5))
 	}
 	return Pass, ""
 }
@@ -229,7 +230,7 @@ func init() {
 			if ok && strings.TrimLeft(v, "0") == "77" {
 				return Pass, ""
 			}
-			return Fail, "UMASK " + orDash(v) + " in /etc/login.defs (want 077)"
+			return Fail, "UMASK " + strutil.FirstNonEmpty(v, "-") + " in /etc/login.defs (want 077)"
 		},
 		"set_password_hashing_algorithm_logindefs": func(i *nodeinfo.Info) (Status, string) {
 			if v, ok := keyValue(i, "ENCRYPT_METHOD", "/etc/login.defs"); ok && strings.EqualFold(v, "SHA512") {
@@ -270,7 +271,7 @@ func init() {
 			v, ok := keyValue(i, "INACTIVE", "/etc/default/useradd")
 			n, isNum := atoi(v)
 			if !ok || !isNum || n < 0 || n > 35 {
-				return Fail, "INACTIVE=" + orDash(v) + " in /etc/default/useradd (want 0..35)"
+				return Fail, "INACTIVE=" + strutil.FirstNonEmpty(v, "-") + " in /etc/default/useradd (want 0..35)"
 			}
 			return Pass, ""
 		},
@@ -282,7 +283,7 @@ func init() {
 					continue
 				}
 				if n, isNum := atoi(m.MaxDays); !isNum || n <= 0 || n > 60 {
-					bad = append(bad, u.Name+" max "+orDash(m.MaxDays))
+					bad = append(bad, u.Name+" max "+strutil.FirstNonEmpty(m.MaxDays, "-"))
 				}
 			}
 			return failIf(bad, "accounts with max password age outside 1..60")
@@ -295,7 +296,7 @@ func init() {
 					continue
 				}
 				if n, isNum := atoi(m.MinDays); !isNum || n < 1 {
-					bad = append(bad, u.Name+" min "+orDash(m.MinDays))
+					bad = append(bad, u.Name+" min "+strutil.FirstNonEmpty(m.MinDays, "-"))
 				}
 			}
 			return failIf(bad, "accounts with min password age < 1")
@@ -477,7 +478,7 @@ func init() {
 					}
 				}
 			}
-			return failIf(uniq(bad), "user init files with PATH entries outside the home directory")
+			return failIf(strutil.Uniq(bad), "user init files with PATH entries outside the home directory")
 		},
 		"rootfiles_configured": func(i *nodeinfo.Info) (Status, string) {
 			// systemd-tmpfiles provisioning of /root dotfiles exists from RHEL 10;
@@ -502,7 +503,7 @@ func init() {
 			for _, u := range interactiveUsers(i) {
 				names = append(names, u.Name)
 			}
-			return Manual, "compare against the authorized user list: " + orDash(truncList(names, 8))
+			return Manual, "compare against the authorized user list: " + strutil.FirstNonEmpty(strutil.TruncList(names, 8), "-")
 		},
 		"account_temp_expire_date": func(i *nodeinfo.Info) (Status, string) {
 			var exp []string
@@ -514,10 +515,10 @@ func init() {
 			if len(exp) == 0 {
 				return Manual, "no interactive account has an expiry date; confirm no temporary accounts exist"
 			}
-			return Manual, "accounts with expiry: " + truncList(exp, 5) + " - confirm temporary ones expire within 72h"
+			return Manual, "accounts with expiry: " + strutil.TruncList(exp, 5) + " - confirm temporary ones expire within 72h"
 		},
 		"ensure_sudo_group_restricted": func(i *nodeinfo.Info) (Status, string) {
-			return Manual, "sudo group members: " + orDash(cmd(i, "sudo_group")) + " - confirm each needs security-function access"
+			return Manual, "sudo group members: " + strutil.FirstNonEmpty(cmd(i, "sudo_group"), "-") + " - confirm each needs security-function access"
 		},
 	})
 }
@@ -680,7 +681,7 @@ func init() {
 			v, ok := pwqualityValue(i, "retry")
 			n, isNum := atoi(v)
 			if !ok || !isNum || n < 1 || n > 3 {
-				return Fail, "pwquality retry = " + orDash(v) + " (want 1..3)"
+				return Fail, "pwquality retry = " + strutil.FirstNonEmpty(v, "-") + " (want 1..3)"
 			}
 			return Pass, ""
 		},
@@ -733,7 +734,7 @@ func init() {
 		"sudo_remove_nopasswd": func(i *nodeinfo.Info) (Status, string) {
 			hits, _ := grep(i, rx(`\bNOPASSWD\b`), sudoers...)
 			if len(hits) > 0 {
-				return Fail, "NOPASSWD in " + truncList(hits, 3) + " (must be documented as an MFA admin group)"
+				return Fail, "NOPASSWD in " + strutil.TruncList(hits, 3) + " (must be documented as an MFA admin group)"
 			}
 			return Pass, ""
 		},
@@ -898,7 +899,7 @@ func init() {
 			v, ok := keyValue(i, "StopIdleSessionSec", "/etc/systemd/logind.conf", "/etc/systemd/logind.conf.d/")
 			n, isNum := atoi(v)
 			if !ok || !isNum || n < 1 || n > 600 {
-				return Fail, "StopIdleSessionSec=" + orDash(v) + " (want 1..600)"
+				return Fail, "StopIdleSessionSec=" + strutil.FirstNonEmpty(v, "-") + " (want 1..600)"
 			}
 			return Pass, ""
 		},
@@ -907,20 +908,20 @@ func init() {
 			if ok && strings.EqualFold(v, "none") {
 				return Pass, ""
 			}
-			return Fail, "CtrlAltDelBurstAction=" + orDash(v) + " (want none)"
+			return Fail, "CtrlAltDelBurstAction=" + strutil.FirstNonEmpty(v, "-") + " (want none)"
 		},
 		"disable_ctrlaltdel_reboot": func(i *nodeinfo.Info) (Status, string) {
 			if st := i.UnitFiles["ctrl-alt-del.target"]; st == "masked" || st == "masked-runtime" {
 				return Pass, ""
 			}
-			return Fail, "ctrl-alt-del.target not masked (" + orDash(i.UnitFiles["ctrl-alt-del.target"]) + ")"
+			return Fail, "ctrl-alt-del.target not masked (" + strutil.FirstNonEmpty(i.UnitFiles["ctrl-alt-del.target"], "-") + ")"
 		},
 		"xwindows_runlevel_target": func(i *nodeinfo.Info) (Status, string) {
 			t := cmd(i, "default_target")
 			if t == "multi-user.target" {
 				return Pass, ""
 			}
-			return Fail, "default target " + orDash(t) + " (graphical needs ISSO documentation)"
+			return Fail, "default target " + strutil.FirstNonEmpty(t, "-") + " (graphical needs ISSO documentation)"
 		},
 		"xwindows_remove_packages": func(i *nodeinfo.Info) (Status, string) {
 			if pkgAny(i, "xorg-x11-server-common", "xorg-x11-server-Xorg", "xserver-xorg-core") {
@@ -1063,7 +1064,7 @@ func init() {
 			if ok && strings.EqualFold(v, "false") {
 				return Pass, ""
 			}
-			return Fail, "AutomaticLoginEnable=" + orDash(v) + " in gdm custom.conf (want false)"
+			return Fail, "AutomaticLoginEnable=" + strutil.FirstNonEmpty(v, "-") + " in gdm custom.conf (want false)"
 		},
 	})
 }
@@ -1171,7 +1172,7 @@ func dnfConf(key, want string) namedEval {
 		if ok && strings.EqualFold(v, want) {
 			return Pass, ""
 		}
-		return Fail, key + "=" + orDash(v) + " in /etc/dnf/dnf.conf (want " + want + ")"
+		return Fail, key + "=" + strutil.FirstNonEmpty(v, "-") + " in /etc/dnf/dnf.conf (want " + want + ")"
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/strutil"
 )
 
 // ---------- auditd.conf / audit rules ----------
@@ -261,7 +262,7 @@ func init() {
 		"rsyslog_nolisten": func(i *nodeinfo.Info) (Status, string) {
 			hits, _ := grep(i, rx(`(?i)InputTCPServerRun|UDPServerRun|RELPServerRun|imtcp|imudp|imrelp`), "/etc/rsyslog.conf", "/etc/rsyslog.d/")
 			if len(hits) > 0 {
-				return Fail, "rsyslog listens for remote logs (only a log aggregation server may): " + truncList(hits, 2)
+				return Fail, "rsyslog listens for remote logs (only a log aggregation server may): " + strutil.TruncList(hits, 2)
 			}
 			return Pass, ""
 		},
@@ -508,7 +509,7 @@ func init() {
 
 func cryptoPolicyState(i *nodeinfo.Info) (Status, string) {
 	if !strings.HasPrefix(cmd(i, "crypto_policy"), "FIPS") {
-		return Fail, "crypto policy " + orDash(cmd(i, "crypto_policy")) + " (want FIPS)"
+		return Fail, "crypto policy " + strutil.FirstNonEmpty(cmd(i, "crypto_policy"), "-") + " (want FIPS)"
 	}
 	c, ok := i.STIGFile("/etc/crypto-policies/state/CURRENT.pol")
 	if !ok {
@@ -573,7 +574,7 @@ func init() {
 			case strings.TrimSpace(zones) == "":
 				return Fail, "no active firewalld zones"
 			case !strings.EqualFold(target, "DROP"):
-				return Fail, "default zone " + cmd(i, "firewalld_default_zone") + " target " + orDash(target) + " (want DROP)"
+				return Fail, "default zone " + cmd(i, "firewalld_default_zone") + " target " + strutil.FirstNonEmpty(target, "-") + " (want DROP)"
 			}
 			return Pass, ""
 		},
@@ -583,7 +584,7 @@ func init() {
 			if i.UFWStatus == "" {
 				return Fail, "ufw not installed or inactive"
 			}
-			return Manual, "compare the ufw rules against the PPSM CLSA: " + truncList(strings.Split(i.UFWStatus, "\n"), 6)
+			return Manual, "compare the ufw rules against the PPSM CLSA: " + strutil.TruncList(strings.Split(i.UFWStatus, "\n"), 6)
 		},
 		"ufw_rate_limit": func(i *nodeinfo.Info) (Status, string) {
 			if i.UFWStatus == "" {
@@ -665,7 +666,7 @@ func firewallEvidence(i *nodeinfo.Info) (Status, string) {
 	if i.ServiceState("firewalld") != "active" {
 		return Fail, "firewalld not running"
 	}
-	return Manual, "compare against the PPSM CLSA - services: " + orDash(cmd(i, "firewalld_services")) + "; ports: " + orDash(cmd(i, "firewalld_ports"))
+	return Manual, "compare against the PPSM CLSA - services: " + strutil.FirstNonEmpty(cmd(i, "firewalld_services"), "-") + "; ports: " + strutil.FirstNonEmpty(cmd(i, "firewalld_ports"), "-")
 }
 
 // ---------- filesystem sweep ----------
@@ -720,7 +721,7 @@ func init() {
 		"selinux_state": func(i *nodeinfo.Info) (Status, string) {
 			h := i.Hardening
 			if !strings.EqualFold(h["selinux"], "Enforcing") {
-				return Fail, "SELinux " + orDash(h["selinux"])
+				return Fail, "SELinux " + strutil.FirstNonEmpty(h["selinux"], "-")
 			}
 			if cfg := h["selinux_config"]; cfg != "" && !strings.EqualFold(cfg, "enforcing") {
 				return Fail, "enforcing now but /etc/selinux/config SELINUX=" + cfg
@@ -789,7 +790,7 @@ func init() {
 			case strings.Contains(cron, "mail") || strings.Contains(cron, "sendmail"):
 				return Pass, ""
 			}
-			return Fail, "aide runs (" + orDash(firstField(cron+timer)) + ") but nothing mails the result"
+			return Fail, "aide runs (" + strutil.FirstNonEmpty(firstField(cron+timer), "-") + ") but nothing mails the result"
 		},
 		"aide_build_database": func(i *nodeinfo.Info) (Status, string) {
 			if !pkgAny(i, "aide", "aide-common") {
@@ -909,7 +910,7 @@ func init() {
 			if i.SSSDConf["offline_credentials_expiration"] == "1" {
 				return Pass, ""
 			}
-			return Fail, "offline_credentials_expiration = " + orDash(i.SSSDConf["offline_credentials_expiration"]) + " (want 1)"
+			return Fail, "offline_credentials_expiration = " + strutil.FirstNonEmpty(i.SSSDConf["offline_credentials_expiration"], "-") + " (want 1)"
 		},
 		"sssd_has_trust_anchor": func(i *nodeinfo.Info) (Status, string) {
 			subj := cmd(i, "sssd_ca_subject")
@@ -940,7 +941,7 @@ func init() {
 			if cmd(i, "root_passwd") == "L" {
 				return Pass, ""
 			}
-			return Fail, "root password status " + orDash(cmd(i, "root_passwd")) + " (want L = locked)"
+			return Fail, "root password status " + strutil.FirstNonEmpty(cmd(i, "root_passwd"), "-") + " (want L = locked)"
 		},
 		"ensure_rtc_utc_configuration": func(i *nodeinfo.Info) (Status, string) {
 			tz := cmd(i, "timezone")
@@ -948,7 +949,7 @@ func init() {
 			case "UTC", "ETC/UTC", "GMT", "ETC/GMT", "UNIVERSAL", "ZULU":
 				return Pass, ""
 			}
-			return Fail, "time zone " + orDash(tz) + " (want UTC or GMT)"
+			return Fail, "time zone " + strutil.FirstNonEmpty(tz, "-") + " (want UTC or GMT)"
 		},
 		"banner_etc_issue": func(i *nodeinfo.Info) (Status, string) {
 			c, ok := i.STIGFile("/etc/issue")
@@ -980,7 +981,7 @@ func init() {
 			}
 			v, ok := keyValue(i, "permissive", "/etc/fapolicyd/fapolicyd.conf")
 			if !ok || v != "0" {
-				return Fail, "fapolicyd permissive = " + orDash(v) + " (want 0)"
+				return Fail, "fapolicyd permissive = " + strutil.FirstNonEmpty(v, "-") + " (want 0)"
 			}
 			if !strings.Contains(cmd(i, "fapolicy_rules_tail"), "deny perm=any all : all") {
 				return Fail, "compiled rules do not end with 'deny perm=any all : all'"

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s-health-tui/internal/strutil"
+
 	"golang.org/x/crypto/ssh"
 )
 
@@ -86,7 +88,7 @@ func classifyBecomeFailure(tool, stderr string) (needsPassword bool, reason stri
 	case strings.Contains(s, "no tty") || strings.Contains(s, "have a tty") || strings.Contains(s, "terminal is required") || strings.Contains(s, "askpass"):
 		return false, "needs a terminal (requiretty?)"
 	}
-	if line := firstLine(stderr); line != "" {
+	if line := strutil.FirstLine(stderr); line != "" {
 		return false, line
 	}
 	return false, tool + " did not return uid 0"
@@ -185,12 +187,4 @@ func orNone(l []string) string {
 		return "none"
 	}
 	return strings.Join(l, ", ")
-}
-
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/strutil"
 )
 
 // CSI backend detail for the Addons tab: what Longhorn's and Trident's own
@@ -145,14 +146,14 @@ func longhornVolumeLine(v k8s.LonghornVolume) string {
 		case r.Mode == "WO":
 			rebuilding = append(rebuilding, r.Node)
 		case r.FailedAt != "" || r.Mode == "ERR" || r.State == "error" || r.State == "unknown":
-			failed = append(failed, orStr(r.Node, "unscheduled"))
+			failed = append(failed, strutil.FirstNonEmpty(r.Node, "unscheduled"))
 		case r.Node == "":
 			failed = append(failed, "unscheduled")
 		}
 	}
 	txt := fmt.Sprintf("%s  %s  %s %d/%d", name, state, rob, v.Healthy(), v.Replicas)
 	if len(failed) > 0 {
-		txt += styleDim.Render(" failed: " + strings.Join(uniqStrings(failed), ","))
+		txt += styleDim.Render(" failed: " + strings.Join(strutil.Uniq(failed), ","))
 	}
 	if len(rebuilding) > 0 {
 		txt += "  " + styleInfo.Render("rebuilding "+strings.Join(rebuilding, ","))
@@ -178,7 +179,7 @@ func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo, backends []k8s.
 		if strings.EqualFold(st, "installed") {
 			st = styleOK.Render(st)
 		} else {
-			st = styleCrit.Render(strings.ToUpper(orStr(st, "unknown")))
+			st = styleCrit.Render(strings.ToUpper(strutil.FirstNonEmpty(st, "unknown")))
 		}
 		line := "      " + kv("operator", st) + "  " + kv("version", o.Version)
 		if o.Message != "" && !strings.EqualFold(o.Status, "installed") {
@@ -195,7 +196,7 @@ func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo, backends []k8s.
 		case bc.Phase == "" && strings.EqualFold(bc.LastOperation, "failed"):
 			st = styleCrit.Render("CREATION FAILED")
 		default:
-			st = styleCrit.Render(strings.ToUpper(orStr(st, "unprocessed")))
+			st = styleCrit.Render(strings.ToUpper(strutil.FirstNonEmpty(st, "unprocessed")))
 		}
 		line := fmt.Sprintf("      backendconfig %s  %s  %s", styleBold.Render(bc.Namespace+"/"+bc.Name), bc.Driver, st)
 		if strings.EqualFold(bc.LastOperation, "failed") {
@@ -208,7 +209,7 @@ func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo, backends []k8s.
 	}
 	// storage classes -> backends / pools and the policies volumes inherit
 	for _, r := range ti.ResolveStorageClasses(s.StorageClasses, backends) {
-		sel := orStr(r.BackendType, "any backend")
+		sel := strutil.FirstNonEmpty(r.BackendType, "any backend")
 		if r.Selector != "" {
 			sel += "  selector " + r.Selector
 		}
@@ -226,7 +227,7 @@ func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo, backends []k8s.
 			for _, m := range r.Matches {
 				txt := fmt.Sprintf("%s (%d pools)", m.Backend.BackendName, len(m.Pools))
 				if !m.Backend.Online || (m.Backend.State != "" && m.Backend.State != "online") {
-					txt = styleCrit.Render(txt + " " + strings.ToUpper(orStr(m.Backend.State, "offline")))
+					txt = styleCrit.Render(txt + " " + strings.ToUpper(strutil.FirstNonEmpty(m.Backend.State, "offline")))
 				}
 				ms = append(ms, txt)
 			}
@@ -272,7 +273,7 @@ func (a *App) tridentLines(s *k8s.Snapshot, ti *k8s.TridentInfo, backends []k8s.
 		}
 		if len(svc) > 0 {
 			var parts []string
-			for _, k := range sortedKeys(svc) {
+			for _, k := range strutil.SortedKeys(svc) {
 				parts = append(parts, fmt.Sprintf("%s %d/%d", k, svc[k], len(ti.Nodes)))
 			}
 			line += "  " + kv("host services", strings.Join(parts, ", "))
@@ -297,15 +298,15 @@ func protectLines(tp *k8s.TridentProtect) []string {
 	var out []string
 	out = append(out, "      "+styleBold.Render("trident protect")+"  "+kv("vaults", fmt.Sprint(len(tp.Vaults)))+"  "+kv("applications", fmt.Sprint(len(tp.Applications)))+"  "+kv("snapshots", fmt.Sprint(len(tp.Snapshots)))+"  "+kv("backups", fmt.Sprint(len(tp.Backups)))+"  "+kv("schedules", fmt.Sprint(len(tp.Schedules))))
 	for _, v := range tp.Vaults {
-		st := okText(strings.EqualFold(v.State, "Available"), v.State, strings.ToUpper(orStr(v.State, "not ready")))
+		st := okText(strings.EqualFold(v.State, "Available"), v.State, strings.ToUpper(strutil.FirstNonEmpty(v.State, "not ready")))
 		line := fmt.Sprintf("        vault %s  %s %s/%s  %s", styleBold.Render(v.Name), v.Provider, v.Endpoint, v.Bucket, st)
 		if v.Error != "" && !strings.EqualFold(v.State, "Available") {
-			line += "  " + styleDim.Render(trunc(firstLine(v.Error), 70))
+			line += "  " + styleDim.Render(trunc(strutil.FirstLine(v.Error), 70))
 		}
 		out = append(out, line)
 	}
 	for _, a := range tp.Applications {
-		st := okText(strings.EqualFold(a.ProtectionHealth, "Healthy") || strings.EqualFold(a.ProtectionState, "Full"), a.ProtectionState, orStr(a.ProtectionState, "unknown")+" / "+orStr(a.ProtectionHealth, "?"))
+		st := okText(strings.EqualFold(a.ProtectionHealth, "Healthy") || strings.EqualFold(a.ProtectionState, "Full"), a.ProtectionState, strutil.FirstNonEmpty(a.ProtectionState, "unknown")+" / "+strutil.FirstNonEmpty(a.ProtectionHealth, "?"))
 		line := fmt.Sprintf("        app %s  %s  %s", styleBold.Render(a.Namespace+"/"+a.Name), kv("namespaces", strings.Join(a.Namespaces, ",")), st)
 		if len(a.Details) > 0 {
 			line += "  " + styleDim.Render(strings.Join(a.Details, "; "))
@@ -335,7 +336,7 @@ func protectLines(tp *k8s.TridentProtect) []string {
 		case b.Stale && b.Lease != nil:
 			exp := "expired"
 			if t := b.Lease.Expires(); t.After(time.Now()) {
-				exp = "expires in " + humanDur(time.Until(t))
+				exp = "expires in " + strutil.HumanDur(time.Until(t))
 			}
 			line += "  " + styleCrit.Render("STALE lease: holder "+b.Lease.Holder+" is gone, "+exp) + styleDim.Render("  kubectl -n "+b.Namespace+" delete lease "+b.Lock)
 		default:
@@ -385,7 +386,7 @@ func cephLines(ci *k8s.CephInfo) []string {
 	ready := 0
 	all := len(ci.Pools) + len(ci.Filesys) + len(ci.Stores)
 	for _, r := range ci.Unhealthy() {
-		out = append(out, fmt.Sprintf("        %s %s  %s", r.Kind, styleBold.Render(r.Name), styleCrit.Render(orStr(r.Phase, "no phase"))))
+		out = append(out, fmt.Sprintf("        %s %s  %s", r.Kind, styleBold.Render(r.Name), styleCrit.Render(strutil.FirstNonEmpty(r.Phase, "no phase"))))
 	}
 	if all > 0 {
 		ready = all - len(ci.Unhealthy())
@@ -415,11 +416,4 @@ func backendHealth(s *k8s.Snapshot, ns, name string) string {
 		}
 	}
 	return ""
-}
-
-func orStr(v, def string) string {
-	if v == "" {
-		return def
-	}
-	return v
 }

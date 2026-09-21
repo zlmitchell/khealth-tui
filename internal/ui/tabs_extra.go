@@ -17,6 +17,7 @@ import (
 	"k8s-health-tui/internal/logs"
 	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/stig"
+	"k8s-health-tui/internal/strutil"
 )
 
 var _ = math.NaN
@@ -56,7 +57,7 @@ func (a *App) etcdContent() content {
 		memberProbe = "kubectl-exec"
 		probes[memberProbe] = x
 	} else {
-		for _, n := range sortedKeys(a.etcd) {
+		for _, n := range strutil.SortedKeys(a.etcd) {
 			if len(a.etcd[n].Members) > 0 {
 				memberProbe = n
 				break
@@ -64,12 +65,12 @@ func (a *App) etcdContent() content {
 		}
 	}
 	if x := a.etcdExec; x != nil && x.Err != nil {
-		add(styleDim.Render("kubectl exec probe: ") + styleWarn.Render(firstLine(x.Err.Error())) + styleDim.Render("  (needs pods/exec on kube-system; SSH probes still apply)"))
+		add(styleDim.Render("kubectl exec probe: ") + styleWarn.Render(strutil.FirstLine(x.Err.Error())) + styleDim.Render("  (needs pods/exec on kube-system; SSH probes still apply)"))
 	}
 	// statuses can come from one etcdctl --cluster call or one gateway call per node
 	statusByID := map[string]*etcdpkg.EndpointStatus{}
 	healthByEP := map[string]etcdpkg.EndpointHealth{}
-	for _, n := range sortedKeys(probes) {
+	for _, n := range strutil.SortedKeys(probes) {
 		for i := range probes[n].Statuses {
 			st := &probes[n].Statuses[i]
 			if st.MemberID != "" {
@@ -99,10 +100,10 @@ func (a *App) etcdContent() content {
 	add("", styleTitle.Render("Members"))
 	if memberProbe == "" {
 		add(styleDim.Render("  no member list. Per node:"))
-		for _, n := range sortedKeys(a.etcd) {
+		for _, n := range strutil.SortedKeys(a.etcd) {
 			p := a.etcd[n]
 			if p.Err != nil {
-				add("  " + styleBold.Render(n) + "  " + styleCrit.Render("probe error: "+firstLine(p.Err.Error())))
+				add("  " + styleBold.Render(n) + "  " + styleCrit.Render("probe error: "+strutil.FirstLine(p.Err.Error())))
 				continue
 			}
 			line := "  " + styleBold.Render(n) + "  " + kv("via", p.EtcdctlVia)
@@ -127,7 +128,7 @@ func (a *App) etcdContent() content {
 			health := styleDim.Render("-")
 			for _, u := range m.ClientURLs {
 				if h, ok := healthByEP[u]; ok {
-					health = okText(h.Healthy, "healthy "+h.Took, "UNHEALTHY "+firstLine(h.Error))
+					health = okText(h.Healthy, "healthy "+h.Took, "UNHEALTHY "+strutil.FirstLine(h.Error))
 				}
 			}
 			if st != nil {
@@ -168,15 +169,15 @@ func (a *App) etcdContent() content {
 
 	add("", styleTitle.Render("Per-node health")+styleDim.Render("  (curl /health and /metrics with the node's client certs)"))
 	var rows [][]string
-	for _, n := range sortedKeys(a.etcd) {
+	for _, n := range strutil.SortedKeys(a.etcd) {
 		p := a.etcd[n]
 		if p.Err != nil {
-			rows = append(rows, []string{n, styleCrit.Render("probe error: " + firstLine(p.Err.Error()))})
+			rows = append(rows, []string{n, styleCrit.Render("probe error: " + strutil.FirstLine(p.Err.Error()))})
 			continue
 		}
 		health := styleDim.Render("-")
 		if p.Health != nil {
-			health = okText(p.Health.Healthy, "healthy", "UNHEALTHY "+firstLine(p.Health.Reason))
+			health = okText(p.Health.Healthy, "healthy", "UNHEALTHY "+strutil.FirstLine(p.Health.Reason))
 		}
 		leader, db, frag, fsync, commit, changes, pend, ver, fs := "-", "-", "-", "-", "-", "-", "-", "-", "-"
 		if m := p.Metrics; m != nil {
@@ -220,7 +221,7 @@ func (a *App) etcdContent() content {
 	}
 
 	add("", styleTitle.Render("Configuration source"))
-	for _, n := range sortedKeys(a.etcd) {
+	for _, n := range strutil.SortedKeys(a.etcd) {
 		p := a.etcd[n]
 		if p.Err != nil {
 			continue
@@ -238,7 +239,7 @@ func (a *App) etcdContent() content {
 		}
 		if len(p.RKE2Config) > 0 {
 			var kvs []string
-			for _, k := range sortedKeys(p.RKE2Config) {
+			for _, k := range strutil.SortedKeys(p.RKE2Config) {
 				kvs = append(kvs, k+"="+p.RKE2Config[k])
 			}
 			add(wrap("  rke2 etcd settings: "+strings.Join(kvs, " "), a.width-2)...)
@@ -276,7 +277,7 @@ func (a *App) etcdContent() content {
 				add(styleDim.Render(fmt.Sprintf("  ... %d more", len(s.RKE2Snapshots)-8)))
 				break
 			}
-			st := okText(r.Status != "failed", r.Status, r.Status+" "+firstLine(r.Message))
+			st := okText(r.Status != "failed", r.Status, r.Status+" "+strutil.FirstLine(r.Message))
 			loc := "local"
 			if r.S3 {
 				loc = "s3"
@@ -323,7 +324,7 @@ func (a *App) etcdContent() content {
 		add(lines...)
 	}
 	var rows2 [][]string
-	for _, n := range sortedKeys(a.etcd) {
+	for _, n := range strutil.SortedKeys(a.etcd) {
 		p := a.etcd[n]
 		for _, d := range p.SnapshotDirs {
 			if len(d.Files) == 0 {
@@ -351,7 +352,7 @@ func (a *App) etcdContent() content {
 		add(lines...)
 	}
 	var hints []string
-	for _, n := range sortedKeys(a.etcd) {
+	for _, n := range strutil.SortedKeys(a.etcd) {
 		for _, hnt := range a.etcd[n].BackupHints {
 			hints = append(hints, n+": "+hnt)
 		}
@@ -398,7 +399,7 @@ type etcdSummary struct {
 func (a *App) etcdSummarize() etcdSummary {
 	sum := etcdSummary{dbPct: nan(), dbSize: nan(), frag: nan(), fsync: nan()}
 	errs := 0
-	for _, n := range sortedKeys(a.etcd) {
+	for _, n := range strutil.SortedKeys(a.etcd) {
 		p := a.etcd[n]
 		if p.Err != nil {
 			errs++
@@ -558,7 +559,7 @@ func (a *App) etcdTiles() []string {
 		tile(tw, "DB size / quota", gauge(dbPct, gw, thr.EtcdDBWarnPct, 95), sparkStyled(a.values("etcd.db:"+dbNode), sw, 100, thr.EtcdDBWarnPct, 95), dbLabel),
 		tile(tw, "Fragmentation", gauge(frag, gw, thr.EtcdFragWarnPct, 80), sparkStyled(a.values("etcd.frag:"+dbNode), sw, 100, thr.EtcdFragWarnPct, 80), styleDim.Render("defrag reclaims")),
 		tile(tw, "WAL fsync (worst)", pctStyle(fsync, int(thr.EtcdFsyncWarnMs), int(thr.EtcdFsyncWarnMs*3)).Render(fmtMs(fsync)), sparkStyled(a.values("etcd.fsync:"+dbNode), sw, 0, int(thr.EtcdFsyncWarnMs), int(thr.EtcdFsyncWarnMs*3)), styleDim.Render(fmt.Sprintf("warn > %.0fms", thr.EtcdFsyncWarnMs))),
-		tile(tw, "Latest backup", backup, styleDim.Render(fmt.Sprintf("%d cluster records", len(a.snap.RKE2Snapshots))), styleDim.Render("max age "+humanDur(a.cfg.Etcd.MaxBackupAge))),
+		tile(tw, "Latest backup", backup, styleDim.Render(fmt.Sprintf("%d cluster records", len(a.snap.RKE2Snapshots))), styleDim.Render("max age "+strutil.HumanDur(a.cfg.Etcd.MaxBackupAge))),
 	}
 	return tileRow(tiles[:n])
 }
@@ -589,14 +590,14 @@ func (a *App) etcdDetail() (string, []string) {
 			out = append(out, styleCrit.Render(x.Err.Error()))
 		}
 		if x.Stderr != "" {
-			out = append(out, styleWarn.Render("stderr: "+firstLine(x.Stderr)))
+			out = append(out, styleWarn.Render("stderr: "+strutil.FirstLine(x.Stderr)))
 		}
 		for _, l := range strings.Split(strings.TrimSpace(x.EtcdctlOut), "\n") {
 			out = append(out, trunc(l, w))
 		}
 		out = append(out, "")
 	}
-	for _, n := range sortedKeys(a.etcd) {
+	for _, n := range strutil.SortedKeys(a.etcd) {
 		p := a.etcd[n]
 		out = append(out, styleTitle.Render("== "+n+" ==")+"  "+kv("dist", p.Dist)+"  "+kv("collected", age(p.Collected)+" ago"))
 		if p.Err != nil {
@@ -615,7 +616,7 @@ func (a *App) etcdDetail() (string, []string) {
 			out = append(out, styleCrit.Render("missing: "+strings.Join(p.Missing, ", ")))
 		}
 		if p.Stderr != "" {
-			out = append(out, styleWarn.Render("stderr: "+firstLine(p.Stderr)))
+			out = append(out, styleWarn.Render("stderr: "+strutil.FirstLine(p.Stderr)))
 		}
 		for _, cf := range p.ConfigDump {
 			out = append(out, "", styleBold.Render("--- "+cf.Path))
@@ -662,7 +663,7 @@ func (a *App) addonsContent() content {
 	// CNI
 	cni := detectCNI(s)
 	add(styleTitle.Render("CNI") + "  " + kv("detected from daemonsets", cni))
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
 			continue
@@ -758,7 +759,7 @@ func (a *App) addonsContent() content {
 			add("  " + kv("system-upgrade-controller", okText(*r.SystemUpgradeOK, "ready", "not ready")))
 		}
 		var env []string
-		for _, k := range sortedKeys(r.Env) {
+		for _, k := range strutil.SortedKeys(r.Env) {
 			if k == "CATTLE_SERVER" {
 				continue
 			}
@@ -766,7 +767,7 @@ func (a *App) addonsContent() content {
 		}
 		add(wrap("  agent env: "+strings.Join(env, " "), a.width-2)...)
 		prov := 0
-		for _, n := range sortedKeys(a.nodes) {
+		for _, n := range strutil.SortedKeys(a.nodes) {
 			ni := a.nodes[n]
 			if ni.Err == nil && ni.Rancher.Provisioned {
 				prov++
@@ -792,7 +793,7 @@ func (a *App) addonsContent() content {
 	// concepts; the kubeadm tab shows the API endpoint the kubelets use
 	var rows [][]string
 	var rowIDs []string
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		if !rancherDist {
 			break
 		}
@@ -833,12 +834,12 @@ func (a *App) addonsContent() content {
 		}
 	}
 	var regs []string
-	for _, r := range sortedKeys(regUse) {
+	for _, r := range strutil.SortedKeys(regUse) {
 		regs = append(regs, fmt.Sprintf("%s (%d)", r, regUse[r]))
 	}
 	add(wrap("  registries used by running pods: "+strings.Join(regs, ", "), a.width-2)...)
 	rows, rowIDs = nil, nil
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
 			continue
@@ -1021,7 +1022,7 @@ func (a *App) addonsDetail(id string) (string, []string) {
 func (a *App) addonsDump() (string, []string) {
 	var out []string
 	w := a.width - 6
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
 			continue
@@ -1122,7 +1123,7 @@ func (a *App) helmContent() content {
 		if l, ok := a.helmLatest[helmKey(r)]; ok {
 			switch {
 			case l.Err != "":
-				latest = styleDim.Render(firstLine(l.Err))
+				latest = styleDim.Render(strutil.FirstLine(l.Err))
 			case helmcheck.CompareVersions(l.Version, r.Version) > 0:
 				latest = styleWarn.Render(l.Version) + styleDim.Render(" "+l.Source)
 			default:
@@ -1224,7 +1225,7 @@ func (a *App) helmDetail(id string) (string, []string) {
 		for _, d := range r.DepRepos {
 			out = append(out, kv("dependency repo", d))
 		}
-		for _, k := range sortedKeys(r.Annotations) {
+		for _, k := range strutil.SortedKeys(r.Annotations) {
 			if strings.HasPrefix(k, "catalog.cattle.io/") || strings.HasPrefix(k, "artifacthub.io/") || strings.HasPrefix(k, "meta.helm.sh/") {
 				out = append(out, kv(k, trunc(strings.ReplaceAll(r.Annotations[k], "\n", " "), a.width-30)))
 			}
@@ -1233,7 +1234,7 @@ func (a *App) helmDetail(id string) (string, []string) {
 			out = append(out, "", styleTitle.Render("History")+styleDim.Render("  (on the Helm tab: b picks a revision to roll back to, B goes straight to the last one that deployed)"))
 			var rows [][]string
 			for _, h := range r.History {
-				rows = append(rows, []string{fmt.Sprint(h.Revision), h.Status, h.Chart + " " + h.Version, h.AppVersion, age(h.Updated) + " ago", firstLine(h.Description)})
+				rows = append(rows, []string{fmt.Sprint(h.Revision), h.Status, h.Chart + " " + h.Version, h.AppVersion, age(h.Updated) + " ago", strutil.FirstLine(h.Description)})
 			}
 			h, lines := renderTable(a.width-6, []column{{title: "REV", right: true}, {title: "STATUS"}, {title: "CHART"}, {title: "APP"}, {title: "UPDATED", right: true}, {title: "DESCRIPTION"}}, rows)
 			out = append(out, h)
@@ -1269,7 +1270,7 @@ func (a *App) imagesContent() content {
 	}
 	var rows [][]string
 	var ids []string
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
 			rows = append(rows, []string{n, styleCrit.Render("ssh error")})
@@ -1708,7 +1709,7 @@ func (a *App) osStigContent() content {
 		if i := strings.Index(ref, " STIG"); i > 0 {
 			ref = ref[:i]
 		}
-		rows = append(rows, []string{stigStyle(r.Status).Render(fmt.Sprintf("%-7s", r.Status.String())), r.Cat, r.ID, orDash(r.RuleID), ref, r.Title, r.Detail})
+		rows = append(rows, []string{stigStyle(r.Status).Render(fmt.Sprintf("%-7s", r.Status.String())), r.Cat, r.ID, strutil.FirstNonEmpty(r.RuleID, "-"), ref, r.Title, r.Detail})
 		ids = append(ids, fmt.Sprint(i))
 	}
 	h, lines := renderTable(a.width, []column{{title: "STATUS"}, {title: "CAT"}, {title: "ID"}, {title: "STIG ID"}, {title: "STIG", max: 22}, {title: "RULE", max: 56}, {title: "DETAIL"}}, rows)
@@ -1723,19 +1724,12 @@ func (a *App) osStigContent() content {
 	return c
 }
 
-func orDash(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
-}
-
 // osBenchmarkLine names the OS STIG release each reachable node is matched to.
 func (a *App) osBenchmarkLine() string {
 	seen := map[string]bool{}
 	var parts []string
 	generic := 0
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni == nil || ni.Err != nil {
 			continue
@@ -1758,7 +1752,7 @@ func (a *App) osBenchmarkLine() string {
 	}
 	var oldest time.Time
 	unprobed := 0
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni == nil || ni.Err != nil {
 			continue
@@ -1904,7 +1898,7 @@ func (a *App) logsContent() content {
 	}
 	var rows [][]string
 	var ids []string
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
 			rows = append(rows, []string{n, styleCrit.Render("ssh error")})
@@ -2141,7 +2135,7 @@ func (a *App) logLineDetail(node, id string) (string, []string) {
 		out = append(out, "", styleTitle.Render("Pattern: "+m.Pattern.Name)+"  "+styleDim.Render("(seen "+fmt.Sprint(ls.ByName[m.Pattern.Name])+"x in this window)"))
 		out = append(out, wrap(m.Pattern.Explain, w)...)
 		if m.Pattern.Persist > 0 {
-			out = append(out, styleDim.Render(fmt.Sprintf("Expected during startup; escalated to a warning when still seen more than %s after the unit came up.", humanDur(m.Pattern.Persist))))
+			out = append(out, styleDim.Render(fmt.Sprintf("Expected during startup; escalated to a warning when still seen more than %s after the unit came up.", strutil.HumanDur(m.Pattern.Persist))))
 		}
 	} else {
 		out = append(out, "", styleDim.Render("No knowledge-base pattern matched this line."))
@@ -2209,7 +2203,7 @@ func logVerdict(ls *logs.Summary, m logs.Match) []string {
 				w = x
 			}
 		}
-		out = append(out, styleOK.Render("Startup race, not a fault: ")+fmt.Sprintf("logged %s after the node's start marker (starting %s, settled by %s) and never again after startup. Nothing to fix.", humanDur(m.Time.Sub(w[0])), clock(w[0]), clock(w[1])))
+		out = append(out, styleOK.Render("Startup race, not a fault: ")+fmt.Sprintf("logged %s after the node's start marker (starting %s, settled by %s) and never again after startup. Nothing to fix.", strutil.HumanDur(m.Time.Sub(w[0])), clock(w[0]), clock(w[1])))
 	case inStart && r.Ongoing:
 		out = append(out, styleWarn.Render("Started as a startup race but is still recurring: ")+"the same message keeps appearing well after the node came up, so whatever it could not reach did not come back. Read the message for the target (an address, a lease, a container, a pod) and check that component; the other nodes' Logs tab shows whether it is node-specific.")
 	case inStart:
@@ -2329,7 +2323,7 @@ func (a *App) cloudLines(s *k8s.Snapshot) []string {
 		}
 	}
 	var ids []string
-	for _, k := range sortedKeys(byScheme) {
+	for _, k := range strutil.SortedKeys(byScheme) {
 		ids = append(ids, fmt.Sprintf("%s:// x%d", k, byScheme[k]))
 	}
 	line := "  " + kv("node providerIDs", strings.Join(ids, ", "))
@@ -2340,11 +2334,11 @@ func (a *App) cloudLines(s *k8s.Snapshot) []string {
 		line += "  " + styleCrit.Render("UNINITIALIZED taint on "+strings.Join(uninit, ","))
 	}
 	if len(zones) > 0 {
-		line += "  " + kv("zones", strings.Join(uniqStrings(zones), ","))
+		line += "  " + kv("zones", strings.Join(strutil.Uniq(zones), ","))
 	}
 	out = append(out, line)
 	// node-side facts from the preflight probe
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
 			continue
@@ -2412,18 +2406,6 @@ func (a *App) cloudLines(s *k8s.Snapshot) []string {
 		if len(d.Failures) > 0 {
 			f := d.Failures[0]
 			out = append(out, "      "+styleWarn.Render(fmt.Sprintf("%d failure events in the last hour", len(d.Failures)))+"  "+styleDim.Render(f.Reason+" "+f.Object+": "+trunc(f.Message, 100)))
-		}
-	}
-	return out
-}
-
-func uniqStrings(in []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, s := range in {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
 		}
 	}
 	return out

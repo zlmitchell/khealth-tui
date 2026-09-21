@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"k8s-health-tui/internal/strutil"
 )
 
 // Preflight holds the facts scripts/preflight.sh collects: what stops rke2
@@ -307,18 +309,6 @@ type FapDeny struct {
 	Exe, Path string
 }
 
-func atoiDef(s string, def int) int {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return def
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return def
-	}
-	return n
-}
-
 func kvLines(s string) map[string]string {
 	m := map[string]string{}
 	for _, l := range nonEmpty(s) {
@@ -382,7 +372,7 @@ func parsePreflight(info *Info, secs map[string]string) {
 		p.Modules[strings.TrimSpace(l)] = true
 	}
 	v := kvLines(secs["VIRT"])
-	p.Virt = VirtInfo{Vendor: v["vendor"], Product: v["product"], VMTools: v["vmtoolsd"] == "yes", SRDevs: strings.Fields(v["srdev"]), CIData: strings.TrimSpace(v["cidata"]), WWNDisks: atoiDef(v["wwn"], 0), IMDS: v["imds"]}
+	p.Virt = VirtInfo{Vendor: v["vendor"], Product: v["product"], VMTools: v["vmtoolsd"] == "yes", SRDevs: strings.Fields(v["srdev"]), CIData: strings.TrimSpace(v["cidata"]), WWNDisks: strutil.AtoiOr(v["wwn"], 0), IMDS: v["imds"]}
 	p.CloudInit = CloudInit{Installed: v["cloud_init"] == "yes", Disabled: v["cloud_init_disabled"] == "yes", DatasourceList: v["datasource_list"], Datasource: strings.TrimSpace(v["datasource"])}
 	if st := v["status"]; st != "" {
 		var doc struct {
@@ -443,13 +433,13 @@ func parsePreflight(info *Info, secs map[string]string) {
 	for _, l := range nonEmpty(secs["VCENTER"]) {
 		f := strings.Split(l, "|")
 		if len(f) == 3 {
-			p.VCenters = append(p.VCenters, VCenterProbe{Host: f[0], Code: atoiDef(f[1], 0), Exit: atoiDef(f[2], 0)})
+			p.VCenters = append(p.VCenters, VCenterProbe{Host: f[0], Code: strutil.AtoiOr(f[1], 0), Exit: strutil.AtoiOr(f[2], 0)})
 		}
 	}
 	fa := kvLines(secs["FAPOLICYD"])
-	p.Fapolicyd = Fapolicyd{Present: fa["present"] == "yes", Permissive: fa["permissive"], RulesFiles: strings.Fields(fa["rules_files"]), DenyFile: fa["deny_file"], CompiledK8s: atoiDef(fa["compiled_k8s"], 0)}
-	p.Fapolicyd.CompiledMtime = int64(atoiDef(fa["compiled_mtime"], 0))
-	p.Fapolicyd.RulesdMtime = int64(atoiDef(fa["rulesd_mtime"], 0))
+	p.Fapolicyd = Fapolicyd{Present: fa["present"] == "yes", Permissive: fa["permissive"], RulesFiles: strings.Fields(fa["rules_files"]), DenyFile: fa["deny_file"], CompiledK8s: strutil.AtoiOr(fa["compiled_k8s"], 0)}
+	p.Fapolicyd.CompiledMtime = int64(strutil.AtoiOr(fa["compiled_mtime"], 0))
+	p.Fapolicyd.RulesdMtime = int64(strutil.AtoiOr(fa["rulesd_mtime"], 0))
 	for _, l := range nonEmpty(secs["FAPOLICYD"]) {
 		if r, ok := strings.CutPrefix(l, "rule="); ok {
 			p.Fapolicyd.AllowRules = append(p.Fapolicyd.AllowRules, r)
@@ -472,7 +462,7 @@ func parsePreflight(info *Info, secs map[string]string) {
 		case "iscsid":
 			p.CSI.ISCSID = v == "active"
 		case "multipath_blacklist":
-			p.CSI.MultipathBlacklist = atoiDef(v, 0)
+			p.CSI.MultipathBlacklist = strutil.AtoiOr(v, 0)
 		case "find_multipaths":
 			p.CSI.FindMultipaths = strings.TrimSpace(v)
 		case "mount_nfs":
@@ -487,7 +477,7 @@ func parsePreflight(info *Info, secs map[string]string) {
 	p.Auditd = kvLines(secs["AUDITD"])
 	acc := kvLines(secs["ACCOUNTS"])
 	p.SudoUser = acc["sudo_user"]
-	p.Today = atoiDef(acc["today"], 0)
+	p.Today = strutil.AtoiOr(acc["today"], 0)
 	p.LoginDefs = map[string]string{}
 	for k, v := range acc {
 		if d, ok := strings.CutPrefix(k, "login_defs_"); ok {
@@ -497,7 +487,7 @@ func parsePreflight(info *Info, secs map[string]string) {
 	if v := acc["default_inactive"]; v != "" {
 		p.LoginDefs["INACTIVE"] = v
 	}
-	p.FaillockDeny = atoiDef(acc["faillock_deny"], 0)
+	p.FaillockDeny = strutil.AtoiOr(acc["faillock_deny"], 0)
 	p.Faillock = map[string]int{}
 	p.CIDefault = acc["ci_default"]
 	p.Sudo = map[string]SudoInfo{}
@@ -505,14 +495,14 @@ func parsePreflight(info *Info, secs map[string]string) {
 		f := strings.Split(l, "|")
 		switch {
 		case f[0] == "user" && len(f) == 11:
-			a := Account{Name: f[1], UID: atoiDef(f[2], -1), Shell: f[3], PW: f[4], LastChange: atoiDef(f[5], -1), Min: atoiDef(f[6], -1), Max: atoiDef(f[7], -1), Warn: atoiDef(f[8], -1), Inactive: atoiDef(f[9], -1), Expire: atoiDef(f[10], -1)}
+			a := Account{Name: f[1], UID: strutil.AtoiOr(f[2], -1), Shell: f[3], PW: f[4], LastChange: strutil.AtoiOr(f[5], -1), Min: strutil.AtoiOr(f[6], -1), Max: strutil.AtoiOr(f[7], -1), Warn: strutil.AtoiOr(f[8], -1), Inactive: strutil.AtoiOr(f[9], -1), Expire: strutil.AtoiOr(f[10], -1)}
 			p.Accounts = append(p.Accounts, a)
 		case f[0] == "faillock" && len(f) == 3:
-			p.Faillock[f[1]] = atoiDef(f[2], 0)
+			p.Faillock[f[1]] = strutil.AtoiOr(f[2], 0)
 		case strings.HasPrefix(f[0], "ci_user="):
 			p.CIUsers = append(p.CIUsers, strings.TrimPrefix(f[0], "ci_user="))
 		case f[0] == "sudo" && len(f) == 4:
-			p.Sudo[f[1]] = SudoInfo{NoPasswd: f[2] == "nopasswd=yes", Keys: atoiDef(strings.TrimPrefix(f[3], "keys="), 0)}
+			p.Sudo[f[1]] = SudoInfo{NoPasswd: f[2] == "nopasswd=yes", Keys: strutil.AtoiOr(strings.TrimPrefix(f[3], "keys="), 0)}
 		}
 	}
 	for _, l := range nonEmpty(secs["PROXY"]) {
@@ -545,7 +535,7 @@ func parsePreflight(info *Info, secs map[string]string) {
 		case f[0] == "skipped" && len(f) == 4:
 			p.RegProbes = append(p.RegProbes, RegProbe{Host: f[1], URL: f[2], Implicit: true, Skipped: f[3]})
 		case len(f) == 8 || len(f) == 9:
-			rp := RegProbe{Host: f[0], URL: f[1], Code: atoiDef(f[2], 0), Exit: atoiDef(f[3], 0), TokenCode: atoiDef(f[4], 0), Auth: f[5] == "yes", CA: f[6] == "yes", Insecure: f[7] == "true"}
+			rp := RegProbe{Host: f[0], URL: f[1], Code: strutil.AtoiOr(f[2], 0), Exit: strutil.AtoiOr(f[3], 0), TokenCode: strutil.AtoiOr(f[4], 0), Auth: f[5] == "yes", CA: f[6] == "yes", Insecure: f[7] == "true"}
 			rp.Implicit = len(f) == 9 && f[8] == "yes"
 			p.RegProbes = append(p.RegProbes, rp)
 		}
@@ -598,8 +588,8 @@ func parseFapDeny(p *Preflight, s string) {
 		if len(f) != 4 {
 			continue
 		}
-		d := FapDeny{Count: atoiDef(f[0], 0), Exe: f[2], Path: f[3]}
-		if ts := atoiDef(f[1], 0); ts > 0 {
+		d := FapDeny{Count: strutil.AtoiOr(f[0], 0), Exe: f[2], Path: f[3]}
+		if ts := strutil.AtoiOr(f[1], 0); ts > 0 {
 			d.Last = time.Unix(int64(ts), 0)
 		}
 		p.Denies = append(p.Denies, d)

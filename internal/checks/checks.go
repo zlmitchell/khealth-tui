@@ -18,6 +18,7 @@ import (
 	"k8s-health-tui/internal/logs"
 	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/stig"
+	"k8s-health-tui/internal/strutil"
 )
 
 // Severity of a finding.
@@ -117,15 +118,15 @@ func Evaluate(in Input) []Finding {
 	for i := range s.Nodes {
 		n := &s.Nodes[i]
 		if st, msg := k8s.NodeCondition(n, corev1.NodeReady); st != corev1.ConditionTrue {
-			add(SevCrit, "node", n.Name, "not Ready: "+firstLine(msg), "check the "+cv.Server+" unit / kubelet and the Logs tab")
+			add(SevCrit, "node", n.Name, "not Ready: "+strutil.FirstLine(msg), "check the "+cv.Server+" unit / kubelet and the Logs tab")
 		}
 		for _, ct := range []corev1.NodeConditionType{corev1.NodeMemoryPressure, corev1.NodeDiskPressure, corev1.NodePIDPressure} {
 			if st, msg := k8s.NodeCondition(n, ct); st == corev1.ConditionTrue {
-				add(SevWarn, "node", n.Name, string(ct)+": "+firstLine(msg), "")
+				add(SevWarn, "node", n.Name, string(ct)+": "+strutil.FirstLine(msg), "")
 			}
 		}
 		if st, msg := k8s.NodeCondition(n, corev1.NodeNetworkUnavailable); st == corev1.ConditionTrue {
-			add(SevCrit, "node", n.Name, "NetworkUnavailable: "+firstLine(msg), "CNI not running on this node")
+			add(SevCrit, "node", n.Name, "NetworkUnavailable: "+strutil.FirstLine(msg), "CNI not running on this node")
 		}
 		if n.Spec.Unschedulable {
 			add(SevInfo, "node", n.Name, "cordoned (unschedulable)", "kubectl uncordon when maintenance is done")
@@ -170,7 +171,7 @@ func Evaluate(in Input) []Finding {
 			if iso.Protected {
 				sev = SevInfo // scheduled deliberately with tolerations
 			}
-			add(sev, "node", iso.Node, fmt.Sprintf("%d user workload pod(s) on control-plane node: %s", len(iso.UserPods), truncList(iso.UserPods, 3)), cv.NodeTaint+"; move workloads to worker nodes")
+			add(sev, "node", iso.Node, fmt.Sprintf("%d user workload pod(s) on control-plane node: %s", len(iso.UserPods), strutil.TruncList(iso.UserPods, 3)), cv.NodeTaint+"; move workloads to worker nodes")
 		}
 		if !iso.Protected {
 			add(SevWarn, "node", iso.Node, "control-plane node has no NoSchedule/NoExecute taint", cv.NodeTaint)
@@ -268,7 +269,7 @@ func Evaluate(in Input) []Finding {
 		}
 		for _, u := range ni.Units {
 			if u.NRestarts > 0 && !u.Started.IsZero() && in.Now.Sub(u.Started) < 24*time.Hour {
-				add(SevWarn, "node", name, fmt.Sprintf("%s restarted %d time(s) (last start %s ago)", u.Name, u.NRestarts, roundDur(in.Now.Sub(u.Started))), "see Logs tab")
+				add(SevWarn, "node", name, fmt.Sprintf("%s restarted %d time(s) (last start %s ago)", u.Name, u.NRestarts, strutil.HumanDur(in.Now.Sub(u.Started))), "see Logs tab")
 			}
 		}
 		if ni.NTPSynced != nil && !*ni.NTPSynced {
@@ -364,16 +365,16 @@ func Evaluate(in Input) []Finding {
 		case st == "Evicted":
 			add(SevInfo, "workload", ref, "Evicted", "kubectl delete pod to clean up")
 		case p.Status.Phase == corev1.PodPending && in.Now.Sub(p.CreationTimestamp.Time) > thr.PendingPodAge:
-			add(SevWarn, "workload", ref, "Pending for "+roundDur(in.Now.Sub(p.CreationTimestamp.Time)), "kubectl describe pod (scheduling / PVC / image)")
+			add(SevWarn, "workload", ref, "Pending for "+strutil.HumanDur(in.Now.Sub(p.CreationTimestamp.Time)), "kubectl describe pod (scheduling / PVC / image)")
 		case p.Status.Phase == corev1.PodFailed && st != "Evicted" && p.Labels["job-name"] == "":
 			add(SevWarn, "workload", ref, "Failed: "+st, "")
 		case p.Status.Phase == corev1.PodUnknown:
 			add(SevWarn, "workload", ref, "Unknown phase", "node may be unreachable")
 		case st == "Terminating" && p.DeletionTimestamp != nil && in.Now.Sub(p.DeletionTimestamp.Time) > 10*time.Minute:
-			add(SevWarn, "workload", ref, "Terminating for "+roundDur(in.Now.Sub(p.DeletionTimestamp.Time)), "stuck finalizer or unreachable node")
+			add(SevWarn, "workload", ref, "Terminating for "+strutil.HumanDur(in.Now.Sub(p.DeletionTimestamp.Time)), "stuck finalizer or unreachable node")
 		}
 		if restarts >= thr.RestartWarn && !lastRestart.IsZero() && in.Now.Sub(lastRestart) < 24*time.Hour {
-			add(SevWarn, "workload", ref, fmt.Sprintf("%d restarts (last %s ago)", restarts, roundDur(in.Now.Sub(lastRestart))), "")
+			add(SevWarn, "workload", ref, fmt.Sprintf("%d restarts (last %s ago)", restarts, strutil.HumanDur(in.Now.Sub(lastRestart))), "")
 		}
 		for _, cs := range p.Status.ContainerStatuses {
 			if cs.LastTerminationState.Terminated != nil && cs.LastTerminationState.Terminated.Reason == "OOMKilled" && in.Now.Sub(cs.LastTerminationState.Terminated.FinishedAt.Time) < 24*time.Hour {
@@ -478,9 +479,9 @@ func Evaluate(in Input) []Finding {
 		pct := u.UsedPct()
 		switch {
 		case pct >= float64(thr.DiskCritPct):
-			add(SevCrit, "storage", "pvc/"+key, fmt.Sprintf("%.0f%% used (%s of %s) on %s", pct, human(float64(u.Used)), human(float64(u.Capacity)), u.Node), "expand the PVC (allowVolumeExpansion) or clean up data")
+			add(SevCrit, "storage", "pvc/"+key, fmt.Sprintf("%.0f%% used (%s of %s) on %s", pct, strutil.HumanBytes(float64(u.Used)), strutil.HumanBytes(float64(u.Capacity)), u.Node), "expand the PVC (allowVolumeExpansion) or clean up data")
 		case pct >= float64(thr.DiskWarnPct):
-			add(SevWarn, "storage", "pvc/"+key, fmt.Sprintf("%.0f%% used (%s of %s)", pct, human(float64(u.Used)), human(float64(u.Capacity))), "")
+			add(SevWarn, "storage", "pvc/"+key, fmt.Sprintf("%.0f%% used (%s of %s)", pct, strutil.HumanBytes(float64(u.Used)), strutil.HumanBytes(float64(u.Capacity))), "")
 		}
 		if u.Inodes > 0 && float64(u.InodesUsed)*100/float64(u.Inodes) >= float64(thr.InodeWarnPct) {
 			add(SevWarn, "storage", "pvc/"+key, fmt.Sprintf("inodes %d%% used", u.InodesUsed*100/u.Inodes), "")
@@ -608,7 +609,7 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 				if triaged[who] {
 					continue
 				}
-				add(SevCrit, "etcd", who, "endpoint unhealthy: "+firstLine(h.Error), "etcdctl endpoint health via "+x.EtcdctlVia)
+				add(SevCrit, "etcd", who, "endpoint unhealthy: "+strutil.FirstLine(h.Error), "etcdctl endpoint health via "+x.EtcdctlVia)
 			}
 		}
 		for _, a := range x.Alarms {
@@ -652,7 +653,7 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 			continue
 		}
 		if p.Health != nil && !p.Health.Healthy && !triaged[name] {
-			add(SevCrit, "etcd", name, "unhealthy: "+firstLine(p.Health.Reason), "")
+			add(SevCrit, "etcd", name, "unhealthy: "+strutil.FirstLine(p.Health.Reason), "")
 		}
 		if m := p.Metrics; m != nil {
 			if !m.HasLeader {
@@ -662,15 +663,15 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 				pct := m.DBSize / m.Quota * 100
 				switch {
 				case pct >= 95:
-					add(SevCrit, "etcd", name, fmt.Sprintf("db size %.0f%% of quota (%s / %s)", pct, human(m.DBSize), human(m.Quota)), "compact + defrag now, raise quota-backend-bytes")
+					add(SevCrit, "etcd", name, fmt.Sprintf("db size %.0f%% of quota (%s / %s)", pct, strutil.HumanBytes(m.DBSize), strutil.HumanBytes(m.Quota)), "compact + defrag now, raise quota-backend-bytes")
 				case pct >= float64(thr.EtcdDBWarnPct):
-					add(SevWarn, "etcd", name, fmt.Sprintf("db size %.0f%% of quota (%s / %s)", pct, human(m.DBSize), human(m.Quota)), "etcdctl defrag")
+					add(SevWarn, "etcd", name, fmt.Sprintf("db size %.0f%% of quota (%s / %s)", pct, strutil.HumanBytes(m.DBSize), strutil.HumanBytes(m.Quota)), "etcdctl defrag")
 				}
 			}
 			if m.DBSize > 100e6 && m.DBSizeInUse > 0 {
 				frag := (m.DBSize - m.DBSizeInUse) / m.DBSize * 100
 				if frag >= float64(thr.EtcdFragWarnPct) {
-					add(SevInfo, "etcd", name, fmt.Sprintf("db %.0f%% fragmented (%s allocated, %s in use)", frag, human(m.DBSize), human(m.DBSizeInUse)), "etcdctl defrag (one member at a time)")
+					add(SevInfo, "etcd", name, fmt.Sprintf("db %.0f%% fragmented (%s allocated, %s in use)", frag, strutil.HumanBytes(m.DBSize), strutil.HumanBytes(m.DBSizeInUse)), "etcdctl defrag (one member at a time)")
 				}
 			}
 			if m.WalFsyncAvgMs > thr.EtcdFsyncWarnMs {
@@ -787,7 +788,7 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 			src = "cluster record " + latestRec.Name
 		}
 		if !latest.IsZero() && in.Now.Sub(latest) > in.Cfg.Etcd.MaxBackupAge {
-			add(SevWarn, "etcd", "backups", fmt.Sprintf("latest etcd snapshot is %s old (%s)", roundDur(in.Now.Sub(latest)), src), "check etcd-snapshot-schedule-cron / backup job")
+			add(SevWarn, "etcd", "backups", fmt.Sprintf("latest etcd snapshot is %s old (%s)", strutil.HumanDur(in.Now.Sub(latest)), src), "check etcd-snapshot-schedule-cron / backup job")
 		}
 	}
 	evalS3(in, add)
@@ -872,47 +873,4 @@ func helmReleaseFix(rel k8s.HelmRelease) string {
 		return fmt.Sprintf("B on the Helm tab rolls back to revision %d (last deployed); helm rollback %s %d -n %s", g.Revision, rel.Name, g.Revision, rel.Namespace)
 	}
 	return fmt.Sprintf("no revision ever deployed: helm history %s -n %s for the error, then helm uninstall and reinstall", rel.Name, rel.Namespace)
-}
-
-func truncList(l []string, n int) string {
-	if len(l) <= n {
-		return strings.Join(l, ", ")
-	}
-	return strings.Join(l[:n], ", ") + fmt.Sprintf(" (+%d more)", len(l)-n)
-}
-
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	if len(s) > 160 {
-		s = s[:157] + "..."
-	}
-	return s
-}
-
-func roundDur(d time.Duration) string {
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
-	}
-	return fmt.Sprintf("%dd", int(d.Hours()/24))
-}
-
-func human(b float64) string {
-	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
-	i := 0
-	for b >= 1024 && i < len(units)-1 {
-		b /= 1024
-		i++
-	}
-	if i == 0 {
-		return fmt.Sprintf("%.0f%s", b, units[i])
-	}
-	return fmt.Sprintf("%.1f%s", b, units[i])
 }

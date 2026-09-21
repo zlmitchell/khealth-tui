@@ -19,6 +19,7 @@ import (
 
 	"k8s-health-tui/internal/nodeinfo"
 	"k8s-health-tui/internal/stigdata"
+	"k8s-health-tui/internal/strutil"
 )
 
 // OSBenchmark is one DISA OS STIG release: the embedded table plus the
@@ -163,11 +164,11 @@ func evalTemplated(info *nodeinfo.Info, rule stigdata.Rule) (Status, string) {
 	}
 	switch {
 	case len(fails) > 0:
-		return Fail, strings.Join(uniq(fails), "; ")
+		return Fail, strings.Join(strutil.Uniq(fails), "; ")
 	case len(manuals) > 0:
-		return Manual, strings.Join(uniq(manuals), "; ")
+		return Manual, strings.Join(strutil.Uniq(manuals), "; ")
 	case len(custom) > 0 && passes > 0:
-		return Manual, "automated part passes; verify " + truncList(custom, 3) + " manually"
+		return Manual, "automated part passes; verify " + strutil.TruncList(custom, 3) + " manually"
 	case passes > 0:
 		return Pass, ""
 	case nas > 0:
@@ -423,7 +424,7 @@ func (e *evaluator) osRules() {
 					for _, c := range rule.Checks {
 						names = append(names, c.Rule)
 					}
-					reason = "custom OVAL only (" + truncList(names, 3) + ")"
+					reason = "custom OVAL only (" + strutil.TruncList(names, 3) + ")"
 				}
 				e.add(Result{ID: rule.VID, Title: rule.Title, Cat: rule.Cat, Group: g, Status: Manual, Detail: reason, Fix: fix})
 			}

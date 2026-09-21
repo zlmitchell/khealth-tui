@@ -8,6 +8,7 @@ import (
 
 	"k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/k8s"
+	"k8s-health-tui/internal/strutil"
 )
 
 // S3Config is the effective etcd snapshot S3 configuration of one server:
@@ -110,7 +111,7 @@ func S3ConfigFor(p *etcd.Probe, sec *k8s.S3SecretInfo) S3Config {
 // evalS3 checks the S3 snapshot destination: consistency across servers,
 // completeness, whether uploads still succeed, and reachability from the nodes.
 func evalS3(in Input, add func(Severity, string, string, string, string)) {
-	nodes := sortedKeys(in.Etcd)
+	nodes := strutil.SortedKeys(in.Etcd)
 	cfgs := map[string]S3Config{}
 	var enabled, disabled []string
 	for _, n := range nodes {
@@ -142,7 +143,7 @@ func evalS3(in Input, add func(Severity, string, string, string, string)) {
 	}
 	if len(dest) > 1 {
 		var parts []string
-		for _, k := range sortedKeys(dest) {
+		for _, k := range strutil.SortedKeys(dest) {
 			parts = append(parts, fmt.Sprintf("%s -> %s", strings.Join(dest[k], ","), k))
 		}
 		add(SevWarn, "etcd", obj, "servers upload snapshots to different S3 destinations: "+strings.Join(parts, "; "), "align etcd-s3-endpoint/bucket/folder on every server")
@@ -156,7 +157,7 @@ func evalS3(in Input, add func(Severity, string, string, string, string)) {
 			key := "secret " + c.SecretName
 			if !seenMissing[key] {
 				seenMissing[key] = true
-				add(SevWarn, "etcd", obj, "etcd-s3-config-secret "+c.SecretName+" not found in kube-system: "+firstLine(in.S3.Err), "create the secret or fix the name")
+				add(SevWarn, "etcd", obj, "etcd-s3-config-secret "+c.SecretName+" not found in kube-system: "+strutil.FirstLine(in.S3.Err), "create the secret or fix the name")
 			}
 			continue
 		}
@@ -196,7 +197,7 @@ func evalS3(in Input, add func(Severity, string, string, string, string)) {
 		if r.Status == "failed" {
 			failedS3++
 			if lastFail == "" {
-				lastFail = firstLine(r.Message)
+				lastFail = strutil.FirstLine(r.Message)
 			}
 			continue
 		}
@@ -208,7 +209,7 @@ func evalS3(in Input, add func(Severity, string, string, string, string)) {
 	case len(in.Snap.RKE2Snapshots) > 0 && total == 0:
 		add(SevWarn, "etcd", obj, "S3 snapshots enabled but no snapshot record is marked as uploaded to S3", "check S3 credentials/endpoint in rke2-server logs")
 	case !latestS3.IsZero() && in.Now.Sub(latestS3) > in.Cfg.Etcd.MaxBackupAge:
-		add(SevWarn, "etcd", obj, fmt.Sprintf("latest S3 snapshot upload is %s old (local snapshots may still be fresh)", roundDur(in.Now.Sub(latestS3))), "uploads have stopped: check credentials, bucket policy, endpoint reachability")
+		add(SevWarn, "etcd", obj, fmt.Sprintf("latest S3 snapshot upload is %s old (local snapshots may still be fresh)", strutil.HumanDur(in.Now.Sub(latestS3))), "uploads have stopped: check credentials, bucket policy, endpoint reachability")
 	}
 	if failedS3 > 0 {
 		add(SevWarn, "etcd", obj, fmt.Sprintf("%d snapshot record(s) failed to upload to S3: %s", failedS3, lastFail), "kubectl get etcdsnapshotfile -o yaml | grep -A3 error")
@@ -236,7 +237,7 @@ func evalS3(in Input, add func(Severity, string, string, string, string)) {
 // S3Rows renders one row per server for the etcd tab.
 func S3Rows(in Input) [][]string {
 	var rows [][]string
-	nodes := sortedKeys(in.Etcd)
+	nodes := strutil.SortedKeys(in.Etcd)
 	sort.Strings(nodes)
 	for _, n := range nodes {
 		p := in.Etcd[n]

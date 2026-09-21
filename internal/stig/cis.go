@@ -16,6 +16,7 @@ import (
 
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/strutil"
 )
 
 func (e *evaluator) cisRules() {
@@ -167,7 +168,7 @@ func (e *evaluator) cisClusterRules() {
 	r := Result{ID: "CIS-5.1.1", Title: "cluster-admin role bindings minimized", Cat: "II", Group: g, Status: Pass, Detail: "only system:masters", Fix: "review and remove unnecessary cluster-admin bindings"}
 	if len(subjects) > 0 {
 		r.Status = Manual
-		r.Detail = fmt.Sprintf("%d subject(s): %s", len(subjects), truncList(subjects, 6))
+		r.Detail = fmt.Sprintf("%d subject(s): %s", len(subjects), strutil.TruncList(subjects, 6))
 	}
 	e.add(r)
 
@@ -190,13 +191,13 @@ func (e *evaluator) cisClusterRules() {
 	r = Result{ID: "CIS-5.2.2", Title: "No privileged containers outside system namespaces", Cat: "II", Group: g, Status: Pass, Detail: "none", Fix: "remove privileged: true or move to a system namespace with PSA privileged"}
 	if len(priv) > 0 {
 		r.Status = Fail
-		r.Detail = fmt.Sprintf("%d pod(s): %s", len(priv), truncList(uniq(priv), 5))
+		r.Detail = fmt.Sprintf("%d pod(s): %s", len(priv), strutil.TruncList(strutil.Uniq(priv), 5))
 	}
 	e.add(r)
 	r = Result{ID: "CIS-5.2.3", Title: "No host PID/IPC/network pods outside system namespaces (CIS 5.2.3-5.2.5)", Cat: "II", Group: g, Status: Pass, Detail: "none", Fix: "remove hostNetwork/hostPID/hostIPC"}
 	if len(hostNS) > 0 {
 		r.Status = Fail
-		r.Detail = fmt.Sprintf("%d pod(s): %s", len(hostNS), truncList(uniq(hostNS), 5))
+		r.Detail = fmt.Sprintf("%d pod(s): %s", len(hostNS), strutil.TruncList(strutil.Uniq(hostNS), 5))
 	}
 	e.add(r)
 
@@ -214,7 +215,7 @@ func (e *evaluator) cisClusterRules() {
 	r = Result{ID: "CIS-5.3.2", Title: "All user namespaces have NetworkPolicies", Cat: "III", Group: g, Status: Pass, Detail: "all covered", Fix: "add a default-deny NetworkPolicy per namespace"}
 	if len(noNP) > 0 {
 		r.Status = Manual
-		r.Detail = fmt.Sprintf("%d namespace(s) without: %s", len(noNP), truncList(noNP, 6))
+		r.Detail = fmt.Sprintf("%d namespace(s) without: %s", len(noNP), strutil.TruncList(noNP, 6))
 	}
 	e.add(r)
 
@@ -232,7 +233,7 @@ func (e *evaluator) cisClusterRules() {
 	r = Result{ID: "CIS-5.1.6", Title: "Pods do not use the default ServiceAccount with automounted tokens", Cat: "III", Group: g, Status: Pass, Detail: "none", Fix: "use dedicated service accounts; automountServiceAccountToken: false"}
 	if len(autoSA) > 0 {
 		r.Status = Manual
-		r.Detail = fmt.Sprintf("%d pod(s): %s", len(autoSA), truncList(autoSA, 5))
+		r.Detail = fmt.Sprintf("%d pod(s): %s", len(autoSA), strutil.TruncList(autoSA, 5))
 	}
 	e.add(r)
 }

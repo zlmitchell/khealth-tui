@@ -30,7 +30,7 @@ func TestFootprintCycleAccounting(t *testing.T) {
 		t.Fatalf("cycle record %+v", a.fp.cur)
 	}
 	lines := strings.Join(a.perfLines(), "\n")
-	for _, want := range []string{"27 requests", "3.0 MB in", "node+journal+images+pv", "0.50s", "etcd", "cp-1"} {
+	for _, want := range []string{"27 requests", "3.0MiB in", "node+journal+images+pv", "0.50s", "etcd", "cp-1"} {
 		if !strings.Contains(lines, want) {
 			t.Errorf("overlay missing %q:\n%s", want, lines)
 		}

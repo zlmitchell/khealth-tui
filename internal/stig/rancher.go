@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 
+	"k8s-health-tui/internal/strutil"
+
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 )
@@ -121,7 +123,7 @@ func (e *evaluator) rancherRules() {
 			}
 		}
 		if len(found) > 0 {
-			r.Status, r.Detail = Manual, "shipper present: "+truncList(uniq(found), 4)+" - confirm the destination is the central log platform"
+			r.Status, r.Detail = Manual, "shipper present: "+strutil.TruncList(strutil.Uniq(found), 4)+" - confirm the destination is the central log platform"
 		}
 		e.add(r)
 	}
@@ -143,7 +145,7 @@ func (e *evaluator) rancherRules() {
 			case len(local) == 0:
 				r.Status, r.Detail = Fail, "no local administrator account"
 			case len(local) > 1:
-				r.Status, r.Detail = Fail, fmt.Sprintf("%d local accounts: %s", len(local), truncList(labels, 6))
+				r.Status, r.Detail = Fail, fmt.Sprintf("%d local accounts: %s", len(local), strutil.TruncList(labels, 6))
 			case !local[0].Admin:
 				r.Status, r.Detail = Fail, local[0].Label()+" is not an administrator"
 			case !local[0].Enabled:
@@ -196,7 +198,7 @@ func (e *evaluator) rancherRules() {
 			probs = append(probs, "no policy allows ingress to port 444")
 		}
 		if len(other) > 0 {
-			probs = append(probs, "policies allow other ports: "+truncList(other, 4))
+			probs = append(probs, "policies allow other ports: "+strutil.TruncList(other, 4))
 		}
 		if len(probs) > 0 {
 			r.Status, r.Detail = Fail, strings.Join(probs, "; ")

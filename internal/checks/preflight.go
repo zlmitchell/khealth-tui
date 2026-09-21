@@ -15,6 +15,7 @@ import (
 	"k8s-health-tui/internal/config"
 	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/strutil"
 )
 
 // evalPreflight raises the "will rke2 keep running / can this node be
@@ -62,15 +63,15 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		switch {
 		case allowed:
 			if ni.SwapTotal-ni.SwapFree > 0 {
-				add(SevInfo, "node", name, fmt.Sprintf("swap in use (%s of %s): the kubelet runs with failSwapOn=false (%s default) so it tolerates it, but the kernel swaps system daemons and STIG images usually expect swap off", human(float64(ni.SwapTotal-ni.SwapFree)), human(float64(ni.SwapTotal)), ni.Dist), "swapoff -a and drop the fstab entry unless memorySwap.swapBehavior=LimitedSwap is intended")
+				add(SevInfo, "node", name, fmt.Sprintf("swap in use (%s of %s): the kubelet runs with failSwapOn=false (%s default) so it tolerates it, but the kernel swaps system daemons and STIG images usually expect swap off", strutil.HumanBytes(float64(ni.SwapTotal-ni.SwapFree)), strutil.HumanBytes(float64(ni.SwapTotal)), ni.Dist), "swapoff -a and drop the fstab entry unless memorySwap.swapBehavior=LimitedSwap is intended")
 			}
 		case kubeletUp:
-			add(SevCrit, "node", name, fmt.Sprintf("swap active (%s on %s): the running kubelet started before it was enabled and refuses to start with swap on - it will not come back after the next restart or reboot", human(float64(total)*1024), strings.Join(devs, ",")), "swapoff -a and remove the swap line from /etc/fstab (or "+v.KubeletArg("fail-swap-on=false", "failSwapOn: false")+")")
+			add(SevCrit, "node", name, fmt.Sprintf("swap active (%s on %s): the running kubelet started before it was enabled and refuses to start with swap on - it will not come back after the next restart or reboot", strutil.HumanBytes(float64(total)*1024), strings.Join(devs, ",")), "swapoff -a and remove the swap line from /etc/fstab (or "+v.KubeletArg("fail-swap-on=false", "failSwapOn: false")+")")
 		default:
-			add(SevCrit, "node", name, fmt.Sprintf("swap active (%s on %s) and the kubelet is not running: kubelet fails with 'running with swap on is not supported'", human(float64(total)*1024), strings.Join(devs, ",")), "swapoff -a; remove the swap line from /etc/fstab; "+v.Restart(ni.ControlPlane))
+			add(SevCrit, "node", name, fmt.Sprintf("swap active (%s on %s) and the kubelet is not running: kubelet fails with 'running with swap on is not supported'", strutil.HumanBytes(float64(total)*1024), strings.Join(devs, ",")), "swapoff -a; remove the swap line from /etc/fstab; "+v.Restart(ni.ControlPlane))
 		}
 	} else if p.Probed && len(p.FstabSwap) > 0 {
-		add(SevWarn, "node", name, "swap is off now but /etc/fstab still lists it: it comes back at the next reboot and the kubelet will not start", "comment out the swap line in /etc/fstab: "+firstLine(p.FstabSwap[0]))
+		add(SevWarn, "node", name, "swap is off now but /etc/fstab still lists it: it comes back at the next reboot and the kubelet will not start", "comment out the swap line in /etc/fstab: "+strutil.FirstLine(p.FstabSwap[0]))
 	}
 
 	// ---- fapolicyd ----
@@ -142,7 +143,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 			if top != nil {
 				ago := ""
 				if !top.Last.IsZero() {
-					ago = " (last " + roundDur(in.Now.Sub(top.Last)) + " ago)"
+					ago = " (last " + strutil.HumanDur(in.Now.Sub(top.Last)) + " ago)"
 				}
 				add(SevCrit, "node", name, fmt.Sprintf("fapolicyd denied %d executions of %s/CSI binaries today, e.g. %s -> %s%s", k8sCount, v.Name, top.Exe, top.Path, ago), "ausearch -m FANOTIFY -ts today -i; add the path to "+v.FapolicydFile+" and fagenrules --load")
 			} else if other > 0 {
@@ -188,7 +189,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 			}
 			if len(actions) > 0 {
 				near := m.UsePct >= thr.DiskWarnPct || (adminMB > 0 && freeMB < adminMB*4) || (spaceMB > 0 && freeMB < spaceMB*2)
-				msg := fmt.Sprintf("auditd %s: the node halts or drops to single-user when %s runs out of space (%s free, %d%% used, admin_space_left=%s)", strings.Join(actions, ","), m.Mountpoint, human(float64(freeMB)*1024*1024), m.UsePct, p.Auditd["admin_space_left"])
+				msg := fmt.Sprintf("auditd %s: the node halts or drops to single-user when %s runs out of space (%s free, %d%% used, admin_space_left=%s)", strings.Join(actions, ","), m.Mountpoint, strutil.HumanBytes(float64(freeMB)*1024*1024), m.UsePct, p.Auditd["admin_space_left"])
 				hint := "rotate/archive audit logs, grow the partition, or set the actions to syslog/rotate"
 				if keep {
 					msg += "; max_log_file_action=keep_logs so the logs only grow"
@@ -200,7 +201,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 					add(SevWarn, "node", name, msg, hint)
 				}
 			} else if (suspends("admin_space_left_action") || suspends("disk_full_action")) && (m.UsePct >= thr.DiskWarnPct || (adminMB > 0 && freeMB < adminMB*4)) {
-				add(SevWarn, "security", name, fmt.Sprintf("auditd suspends logging when %s runs out of space (%s free, %d%% used): audit records are lost silently", m.Mountpoint, human(float64(freeMB)*1024*1024), m.UsePct), "free space on "+m.Mountpoint+" or rotate audit logs")
+				add(SevWarn, "security", name, fmt.Sprintf("auditd suspends logging when %s runs out of space (%s free, %d%% used): audit records are lost silently", m.Mountpoint, strutil.HumanBytes(float64(freeMB)*1024*1024), m.UsePct), "free space on "+m.Mountpoint+" or rotate audit logs")
 			}
 		}
 	}
@@ -290,7 +291,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		// the provisioning user cloud-init created for Rancher: it must not be
 		// subject to STIG password aging (no password, key auth) and must keep
 		// NOPASSWD sudo, or Rancher/automation over SSH breaks when it rotates
-		maxDays := atoiOr(p.LoginDefs["PASS_MAX_DAYS"], 99999)
+		maxDays := strutil.AtoiOr(p.LoginDefs["PASS_MAX_DAYS"], 99999)
 		for _, u := range provisioningUsers(p) {
 			a := p.Account(u)
 			if a == nil {
@@ -357,7 +358,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		}
 		if len(proxySet) > 0 {
 			if len(noProxy) == 0 {
-				add(SevWarn, "node", name, strings.Join(uniq(proxySet), ",")+" set in "+uniq(files)[0]+" without NO_PROXY: node-to-node traffic (supervisor 9345, kubelet 10250, etcd) goes through the proxy", "add NO_PROXY=127.0.0.0/8,<node CIDRs>,<cluster/service CIDRs>,.svc,.cluster.local")
+				add(SevWarn, "node", name, strings.Join(strutil.Uniq(proxySet), ",")+" set in "+strutil.Uniq(files)[0]+" without NO_PROXY: node-to-node traffic (supervisor 9345, kubelet 10250, etcd) goes through the proxy", "add NO_PROXY=127.0.0.0/8,<node CIDRs>,<cluster/service CIDRs>,.svc,.cluster.local")
 			} else if in.Snap != nil {
 				var uncovered []string
 				for i := range in.Snap.Nodes {
@@ -368,7 +369,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 					}
 				}
 				if len(uncovered) > 0 {
-					add(SevWarn, "node", name, fmt.Sprintf("NO_PROXY does not cover node IPs %s: supervisor/kubelet/etcd traffic to them goes through the proxy", truncList(uncovered, 4)), "add the node subnet to NO_PROXY in "+uniq(files)[0]+" and "+v.Restart(ni.ControlPlane))
+					add(SevWarn, "node", name, fmt.Sprintf("NO_PROXY does not cover node IPs %s: supervisor/kubelet/etcd traffic to them goes through the proxy", strutil.TruncList(uncovered, 4)), "add the node subnet to NO_PROXY in "+strutil.Uniq(files)[0]+" and "+v.Restart(ni.ControlPlane))
 				}
 			}
 		}
@@ -402,11 +403,11 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 			add(SevWarn, "node", name, "cloud-init datasource_list "+ci.DatasourceList+" excludes NoCloud but this node was seeded from "+seed, "add NoCloud to datasource_list in /etc/cloud/cloud.cfg.d")
 		}
 		if len(ci.Errors) > 0 {
-			add(SevWarn, "node", name, "cloud-init reported errors: "+truncList(ci.Errors, 2), "cloud-init status --long; /var/log/cloud-init.log")
+			add(SevWarn, "node", name, "cloud-init reported errors: "+strutil.TruncList(ci.Errors, 2), "cloud-init status --long; /var/log/cloud-init.log")
 		} else if len(ci.ResultErrors) > 0 {
-			add(SevWarn, "node", name, "cloud-init result.json lists errors: "+truncList(ci.ResultErrors, 2), "cloud-init status --long; /var/log/cloud-init.log")
+			add(SevWarn, "node", name, "cloud-init result.json lists errors: "+strutil.TruncList(ci.ResultErrors, 2), "cloud-init status --long; /var/log/cloud-init.log")
 		} else if len(ci.LogErrors) > 0 {
-			add(SevWarn, "node", name, "cloud-init.log has errors: "+truncStr(ci.LogErrors[len(ci.LogErrors)-1], 200), "grep -E 'ERROR|CRITICAL' /var/log/cloud-init.log")
+			add(SevWarn, "node", name, "cloud-init.log has errors: "+strutil.TruncStr(ci.LogErrors[len(ci.LogErrors)-1], 200), "grep -E 'ERROR|CRITICAL' /var/log/cloud-init.log")
 		}
 		if fu := ci.FailedUnits(); len(fu) > 0 {
 			add(SevWarn, "node", name, "cloud-init units failed on the last boot: "+strings.Join(fu, ", ")+" - the Rancher user-data (users, ssh keys, rke2 registration) may be half-applied", "journalctl -u "+strings.Fields(fu[0])[0]+"; cloud-init status --long")
@@ -706,26 +707,6 @@ func noProxyCovers(entries []string, ip string) bool {
 	return false
 }
 
-func uniq(s []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, v := range s {
-		if !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
-func atoiOr(s string, def int) int {
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil {
-		return def
-	}
-	return n
-}
-
 // provisioningUsers are the accounts cloud-init created for the platform
 // (Rancher's vSphere/AWS templates): sudoers.d/90-cloud-init-users entries,
 // the image's default_user when it has an account, and the ssh user when
@@ -858,7 +839,7 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 	if len(p.Swaps) > 0 {
 		var devs []string
 		for _, s := range p.Swaps {
-			devs = append(devs, fmt.Sprintf("%s %s", s.Name, human(float64(s.SizeKB)*1024)))
+			devs = append(devs, fmt.Sprintf("%s %s", s.Name, strutil.HumanBytes(float64(s.SizeKB)*1024)))
 		}
 		row("swap", strings.Join(devs, ", "), "warn")
 	} else {
@@ -1022,7 +1003,7 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 		}
 		st := "ok"
 		if len(p.CloudInit.Errors) > 0 {
-			v, st = v+", errors: "+truncList(p.CloudInit.Errors, 1), "warn"
+			v, st = v+", errors: "+strutil.TruncList(p.CloudInit.Errors, 1), "warn"
 		} else if len(p.CloudInit.LogErrors) > 0 {
 			v, st = v+", log errors", "warn"
 		}
@@ -1042,7 +1023,7 @@ func PreflightRows(ni *nodeinfo.Info, cfg config.Config, now time.Time) [][3]str
 		for _, l := range p.Proxy {
 			parts = append(parts, l.Key+"="+l.Value)
 		}
-		row("proxy env", truncList(parts, 3), "ok")
+		row("proxy env", strutil.TruncList(parts, 3), "ok")
 	}
 	for _, r := range p.RegProbes {
 		v := fmt.Sprintf("HTTP %d", r.Code)

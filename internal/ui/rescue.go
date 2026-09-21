@@ -16,6 +16,7 @@ import (
 	etcdpkg "k8s-health-tui/internal/etcd"
 	"k8s-health-tui/internal/k8s"
 	"k8s-health-tui/internal/rescue"
+	"k8s-health-tui/internal/strutil"
 )
 
 // etcd rescue (X on the etcd tab): restore a snapshot over SSH. The overlay
@@ -193,7 +194,7 @@ func (a *App) rescueCandidates() ([]rescueNodeOpt, rescue.Kind, error) {
 	peersByHost := map[string]etcdpkg.Peer{}
 	bestTerm := map[string]uint64{} // member id -> highest term it was elected at
 	bestID, bestT := "", uint64(0)
-	for _, n := range sortedKeys(a.etcd) {
+	for _, n := range strutil.SortedKeys(a.etcd) {
 		p := a.etcd[n]
 		for _, pr := range p.Peers {
 			if cur, ok := peersByHost[pr.Host]; !ok || (cur.ID == "" && pr.ID != "") {
@@ -262,7 +263,7 @@ func (a *App) rescueCandidates() ([]rescueNodeOpt, rescue.Kind, error) {
 			if o.node.IP == "" {
 				for _, m := range p.Members {
 					if p.LocalMemberID != "" && m.ID == p.LocalMemberID && len(m.PeerURLs) > 0 {
-						o.node.IP = hostOfURL(m.PeerURLs[0])
+						o.node.IP = strutil.URLHost(m.PeerURLs[0])
 					}
 				}
 			}
@@ -305,7 +306,7 @@ func (a *App) rescueCandidates() ([]rescueNodeOpt, rescue.Kind, error) {
 	}
 	kind, ok := rescue.Supported(dist)
 	if !ok {
-		return nil, "", fmt.Errorf("the rescue supports rke2, k3s and kubeadm control planes; this cluster looks like %q - follow the triage steps on the etcd tab instead", orDash(dist))
+		return nil, "", fmt.Errorf("the rescue supports rke2, k3s and kubeadm control planes; this cluster looks like %q - follow the triage steps on the etcd tab instead", strutil.FirstNonEmpty(dist, "-"))
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		x, y := out[i], out[j]
@@ -345,16 +346,6 @@ func (a *App) nodeIP(n *corev1.Node) string {
 		return h
 	}
 	return ""
-}
-
-func hostOfURL(u string) string {
-	if i := strings.Index(u, "//"); i >= 0 {
-		u = u[i+2:]
-	}
-	if h, _, err := net.SplitHostPort(u); err == nil {
-		return h
-	}
-	return u
 }
 
 // rescueSnapshots lists the restore points on a node, newest first: local
@@ -698,7 +689,7 @@ func (a *App) handleRescueMsg(m rescueMsg) tea.Cmd {
 		r.scroll = 0
 		switch {
 		case m.ev.Err != nil:
-			a.setStatus("etcd rescue FAILED: " + firstLine(m.ev.Err.Error()))
+			a.setStatus("etcd rescue FAILED: " + strutil.FirstLine(m.ev.Err.Error()))
 		case r.plan.Rejoin:
 			a.setStatus("etcd rescue finished: " + r.plan.Others[0].Name + " rejoined the cluster")
 		default:
@@ -754,7 +745,7 @@ func (a *App) renderRescue() (string, []string) {
 				probing++
 			}
 		}
-		line := fmt.Sprintf("%d control-plane node(s) known: %d healthy, %d reachable but not serving etcd, %d unreachable over SSH; live leader: %s", len(r.nodes), healthy, broken, unreachable-probing, orDash(leader))
+		line := fmt.Sprintf("%d control-plane node(s) known: %d healthy, %d reachable but not serving etcd, %d unreachable over SSH; live leader: %s", len(r.nodes), healthy, broken, unreachable-probing, strutil.FirstNonEmpty(leader, "-"))
 		if probing > 0 {
 			line += fmt.Sprintf("; %s %d still being probed (the recommendation updates when they answer)", a.spinner.View(), probing)
 		}
@@ -818,11 +809,11 @@ func (a *App) renderRescue() (string, []string) {
 			if o.snaps > 0 {
 				snaps = fmt.Sprintf("%d, latest %s ago", o.snaps, age(o.latest))
 			}
-			member := orDash(o.member)
+			member := strutil.FirstNonEmpty(o.member, "-")
 			if o.memberID != "" {
 				member += styleDim.Render(" " + o.memberID)
 			}
-			rows = append(rows, []string{o.node.Name, orDash(o.node.IP), state, role, member, term, idx, snaps, orDash(o.dist)})
+			rows = append(rows, []string{o.node.Name, strutil.FirstNonEmpty(o.node.IP, "-"), state, role, member, term, idx, snaps, strutil.FirstNonEmpty(o.dist, "-")})
 		}
 		hdr, rl := renderTable(w, []column{{title: "NODE"}, {title: "IP"}, {title: "STATE"}, {title: "ROLE"}, {title: "MEMBER", max: 40}, {title: "LEADER TERM", right: true}, {title: "RAFT INDEX", right: true}, {title: "SNAPSHOTS ON NODE"}, {title: "DIST"}}, rows)
 		add("  " + pad(hdr, w))
@@ -896,7 +887,7 @@ func (a *App) renderRescueConfirm(w int) (string, []string) {
 	t := p.Target
 	if p.Rejoin {
 		o := p.Others[0]
-		add(kv("rejoin", styleBold.Render(o.Name)+" "+styleDim.Render(o.Host+", peer "+orDash(o.IP))))
+		add(kv("rejoin", styleBold.Render(o.Name)+" "+styleDim.Render(o.Host+", peer "+strutil.FirstNonEmpty(o.IP, "-"))))
 		add(kv("through", styleBold.Render(t.Name)+" "+styleDim.Render(t.Host+" (healthy member; not touched)")))
 		add(kv("data kept in", o.Facts.Rescue+" on "+o.Name))
 		add("")
@@ -920,7 +911,7 @@ func (a *App) renderRescueConfirm(w int) (string, []string) {
 	if t.Facts.SnapshotSize > 0 {
 		size = " (" + humanBytes(float64(t.Facts.SnapshotSize)) + ")"
 	}
-	add(kv("restore from", styleBold.Render(t.Name)+" "+styleDim.Render(t.Host+", peer "+orDash(t.IP))))
+	add(kv("restore from", styleBold.Render(t.Name)+" "+styleDim.Render(t.Host+", peer "+strutil.FirstNonEmpty(t.IP, "-"))))
 	add(kv("snapshot", p.Snapshot+size+snapAge))
 	var others []string
 	for _, o := range p.Others {
@@ -933,7 +924,7 @@ func (a *App) renderRescueConfirm(w int) (string, []string) {
 	for _, s := range p.Skipped {
 		add(kv("left out", styleCrit.Render(s.Name+": "+s.Facts.Err)))
 	}
-	add(kv("data kept in", t.Facts.Rescue+" on every node (owner "+orDash(t.Facts.Owner)+", mode "+orDash(t.Facts.Mode)+" is re-applied)"))
+	add(kv("data kept in", t.Facts.Rescue+" on every node (owner "+strutil.FirstNonEmpty(t.Facts.Owner, "-")+", mode "+strutil.FirstNonEmpty(t.Facts.Mode, "-")+" is re-applied)"))
 	add("")
 	add(styleCrit.Render("WARNING") + " " + styleWarn.Render("this stops the control plane on every server, replaces the cluster state with the snapshot and rebuilds the members one by one."))
 	add(wrap(styleWarn.Render("- everything written to the cluster after the snapshot is lost; the API is down for several minutes; workloads keep running but cannot be changed meanwhile"), w)...)
@@ -989,15 +980,15 @@ func (a *App) renderRescueProgress(w int) (string, []string) {
 	switch {
 	case r.phase == rescueDone && r.err != nil:
 		title = "etcd rescue: FAILED"
-		add(styleCrit.Render("FAILED after " + humanDur(end.Sub(r.started)) + ": " + r.err.Error()))
+		add(styleCrit.Render("FAILED after " + strutil.HumanDur(end.Sub(r.started)) + ": " + r.err.Error()))
 	case r.phase == rescueDone && r.plan.Rejoin:
 		title = "etcd rescue: finished"
-		add(styleOK.Render("finished in " + humanDur(end.Sub(r.started)) + ": " + r.plan.Others[0].Name + " rejoined the cluster through " + r.plan.Target.Name))
+		add(styleOK.Render("finished in " + strutil.HumanDur(end.Sub(r.started)) + ": " + r.plan.Others[0].Name + " rejoined the cluster through " + r.plan.Target.Name))
 	case r.phase == rescueDone:
 		title = "etcd rescue: finished"
-		add(styleOK.Render("finished in " + humanDur(end.Sub(r.started)) + ": cluster restored from " + r.plan.Snapshot))
+		add(styleOK.Render("finished in " + strutil.HumanDur(end.Sub(r.started)) + ": cluster restored from " + r.plan.Snapshot))
 	default:
-		add(a.spinner.View() + " " + styleWarn.Render("running for "+humanDur(end.Sub(r.started))) + styleDim.Render("  esc hides this view (the rescue continues), x aborts after the step in progress"))
+		add(a.spinner.View() + " " + styleWarn.Render("running for "+strutil.HumanDur(end.Sub(r.started))) + styleDim.Render("  esc hides this view (the rescue continues), x aborts after the step in progress"))
 		if r.plan.Aborting() {
 			add(styleWarn.Render("abort requested: stopping after the step in progress"))
 		}
@@ -1021,7 +1012,7 @@ func (a *App) renderRescueProgress(w int) (string, []string) {
 			if e.IsZero() {
 				e = time.Now()
 			}
-			dur = styleDim.Render(" " + humanDur(e.Sub(s.Started)))
+			dur = styleDim.Render(" " + strutil.HumanDur(e.Sub(s.Started)))
 		}
 		line := fmt.Sprintf(" %s %2d. %-6s %s%s", mark, i+1, s.Node, s.Title, dur)
 		if s.State == rescue.Running {

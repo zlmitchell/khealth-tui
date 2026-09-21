@@ -8,6 +8,7 @@ import (
 	"k8s-health-tui/internal/checks"
 	"k8s-health-tui/internal/distro"
 	"k8s-health-tui/internal/nodeinfo"
+	"k8s-health-tui/internal/strutil"
 )
 
 // settings that should normally agree across nodes of the same role
@@ -50,7 +51,7 @@ func (a *App) rke2Content() content {
 	// drift: value sets per key across server nodes / agent nodes
 	type valSet map[string]map[string]bool // key -> value -> seen
 	servers, agents := valSet{}, valSet{}
-	for _, n := range sortedKeys(a.nodes) {
+	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
 			continue
@@ -115,7 +116,7 @@ func (a *App) rke2Content() content {
 		}
 		user := styleOK.Render("0")
 		if len(iso.UserPods) > 0 {
-			user = styleWarn.Render(fmt.Sprintf("%d: %s", len(iso.UserPods), truncJoin(iso.UserPods, 2)))
+			user = styleWarn.Render(fmt.Sprintf("%d: %s", len(iso.UserPods), strutil.TruncList(iso.UserPods, 2)))
 		}
 		req := styleDim.Render("-")
 		if iso.AllocCPU > 0 {
@@ -244,13 +245,6 @@ func (a *App) rke2Content() content {
 	return c
 }
 
-func truncJoin(l []string, n int) string {
-	if len(l) <= n {
-		return strings.Join(l, ", ")
-	}
-	return strings.Join(l[:n], ", ") + fmt.Sprintf(" +%d", len(l)-n)
-}
-
 // rke2Detail dumps a node's rke2 configuration.
 func (a *App) rke2Detail(node string) (string, []string) {
 	ni := a.nodes[node]
@@ -280,7 +274,7 @@ func (a *App) rke2Detail(node string) (string, []string) {
 	}
 	add(kv("role", role) + "  " + kv("dist", ni.Dist) + "  " + kv("data-dir", ni.DataDir) + "  " + kv("collected", age(ni.Collected)+" ago"))
 	var kvs []string
-	for _, k := range sortedKeys(ni.Settings) {
+	for _, k := range strutil.SortedKeys(ni.Settings) {
 		kvs = append(kvs, k+"="+ni.Settings[k])
 	}
 	add(wrap("effective top-level settings: "+strings.Join(kvs, "  "), w)...)
@@ -347,7 +341,7 @@ func (a *App) rke2Detail(node string) (string, []string) {
 	}
 	if len(ni.KubeletFlags) > 0 {
 		var flags []string
-		for _, k := range sortedKeys(ni.KubeletFlags) {
+		for _, k := range strutil.SortedKeys(ni.KubeletFlags) {
 			flags = append(flags, "--"+k+"="+ni.KubeletFlags[k])
 		}
 		add("", styleTitle.Render("kubelet process args"))
