@@ -1,0 +1,22 @@
+# gitleaks configuration: the default rules plus allowlists for known
+# non-secrets. CI scans the git history (`gitleaks git`); locally, `gitleaks
+# dir .` also walks the gitignored lab directories, hence the path entries.
+title = "khealth-tui"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "gitignored lab material (vagrant keys, hardening playbooks) and build output"
+paths = [
+  '''^vagrant/''',
+  '''^hardening/''',
+  '''^dist/''',
+]
+
+[[allowlists]]
+description = "the OS STIG probe greps for the GRUB password prefix; the literal is the pattern, not a hash"
+regexTarget = "match"
+regexes = [
+  '''GRUB2_PASSWORD=grub\.pbkdf2\.sha512''',
+]

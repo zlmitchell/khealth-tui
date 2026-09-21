@@ -14,6 +14,18 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # scans every commit of the push / PR, not just the tree
+      # rules and allowlists: .gitleaks.toml (picked up from the repo root)
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   test:
     name: fmt, vet, tidy, test
     runs-on: ubuntu-latest
@@ -85,7 +97,7 @@ jobs:
   release:
     name: semantic-release
     runs-on: ubuntu-latest
-    needs: [test, vulncheck, build]
+    needs: [gitleaks, test, vulncheck, build]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write # tag, release, CHANGELOG commit

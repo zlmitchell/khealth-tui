@@ -99,7 +99,7 @@ khealth --export ./reports --export-scan  # no TUI: one cycle + the security sca
 
 - versions are semantic and cut by CI from [conventional commits](https://www.conventionalcommits.org) on `main`: `fix:` -> patch, `feat:` -> minor, `feat!:` / `BREAKING CHANGE:` -> major; `chore:`/`docs:`/`ci:` release nothing
 - each release: tag `vX.Y.Z`, `CHANGELOG.md` entry, and the five binaries plus `checksums.txt` (sha256) attached; the version is embedded (`khealth --version`)
-- CI on every push and PR: `gofmt`, `go vet`, `go mod tidy` check, `go test -race`, `govulncheck`, cross-build of all targets; Renovate keeps Go modules, the Go toolchain and the actions current (weekly, grouped)
+- CI on every push and PR: gitleaks over the commits, `gofmt`, `go vet`, `go mod tidy` check, `go test -race`, `govulncheck`, cross-build of all targets; Renovate keeps Go modules, the Go toolchain and the actions current (weekly, grouped)
 
 ## Support
 
