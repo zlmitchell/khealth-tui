@@ -24,11 +24,11 @@ The screenshot above is the etcd tab's **Triage** block on a three-server RKE2 c
 
 Walkthrough on an RKE2 cluster ([mp4](docs/media/video-preview-rke2.mp4), 8 MB):
 
-<!-- drop docs/media/video-preview-rke2.mp4 into the GitHub web editor here; the inserted user-attachments URL renders as an inline player -->
+https://github.com/user-attachments/assets/6ea280d7-9e2b-486a-ae72-420db5b0ba56
 
 Walkthrough on a kubeadm cluster ([mp4](docs/media/video-preview-kubeadm.mp4), 5 MB):
 
-<!-- drop docs/media/video-preview-kubeadm.mp4 into the GitHub web editor here -->
+https://github.com/user-attachments/assets/ec4e8438-a6a4-43bc-9202-92bfdc07e1b2
 
 ## Tabs
 
