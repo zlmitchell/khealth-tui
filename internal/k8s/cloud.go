@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/yaml"
 )
 
 // Cloud provider integration (CPI / cloud-controller-manager) and CSI
@@ -632,9 +634,22 @@ func (c *Client) vsphereConf(ctx context.Context) (*VSphereConf, error) {
 	return nil, last
 }
 
-var vcSection = regexp.MustCompile(`^\[VirtualCenter\s+"([^"]+)"\]`)
+var (
+	vcSection = regexp.MustCompile(`^\[VirtualCenter\s+"([^"]+)"\]`)
+	iniHeader = regexp.MustCompile(`(?m)^\s*\[`)
+)
 
+// parseVSphereConf reads a vsphere.conf in either shape the vSphere CPI
+// accepts: the in-tree INI ([Global], [VirtualCenter "host"]) and the
+// out-of-tree YAML (global:, vcenter:). Only the INI has [section]
+// headers, and an INI line like [Global] is itself valid YAML (a flow
+// sequence), so the headers decide which parser runs.
 func parseVSphereConf(text string) *VSphereConf {
+	if !iniHeader.MatchString(text) {
+		if v := parseVSphereYAML(text); v != nil {
+			return v
+		}
+	}
 	v := &VSphereConf{}
 	section, secretName, secretNS := "", "", "kube-system"
 	var globalPort string
@@ -689,6 +704,81 @@ func parseVSphereConf(text string) *VSphereConf {
 		v.SecretRef = secretNS + "/" + secretName
 	}
 	return v
+}
+
+// parseVSphereYAML reads the out-of-tree CPI's YAML vsphere.conf. The
+// keys under vcenter: are names, not necessarily hosts: the host is the
+// section's server, the name only when there is none. Values are read
+// loosely because port is written as a number or a string, insecureFlag
+// as a bool or a string, and datacenters as a list or a comma-separated
+// string, all of which the CPI accepts.
+func parseVSphereYAML(text string) *VSphereConf {
+	var y map[string]any
+	if err := yaml.Unmarshal([]byte(text), &y); err != nil {
+		return nil
+	}
+	g, _ := y["global"].(map[string]any)
+	vcs, _ := y["vcenter"].(map[string]any)
+	if g == nil && vcs == nil {
+		return nil
+	}
+	insecure := confStr(g, "insecureFlag", "insecure-flag")
+	v := &VSphereConf{Insecure: insecure == "true" || insecure == "1", Datacenters: confList(g, "datacenters")}
+	globalPort := confStr(g, "port")
+	secretName := confStr(g, "secretName", "secret-name")
+	secretNS := strutil.FirstNonEmpty(confStr(g, "secretNamespace", "secret-namespace"), "kube-system")
+	for _, name := range strutil.SortedKeys(vcs) {
+		c, _ := vcs[name].(map[string]any)
+		host := strutil.FirstNonEmpty(confStr(c, "server"), name)
+		if port := strutil.FirstNonEmpty(confStr(c, "port"), globalPort); port != "" && !strings.Contains(host, ":") {
+			host += ":" + port
+		}
+		v.VCenters = append(v.VCenters, host)
+		v.Datacenters = append(v.Datacenters, confList(c, "datacenters")...)
+		if n := confStr(c, "secretName", "secret-name"); n != "" {
+			secretName = n
+			secretNS = strutil.FirstNonEmpty(confStr(c, "secretNamespace", "secret-namespace"), secretNS)
+		}
+	}
+	v.Datacenters = strutil.Uniq(v.Datacenters)
+	if secretName != "" {
+		v.SecretRef = secretNS + "/" + secretName
+	}
+	return v
+}
+
+// confStr reads the first key present under any of its spellings, as a
+// string whatever the YAML type was.
+func confStr(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if x, ok := m[k]; ok && x != nil {
+			return strings.Trim(fmt.Sprint(x), `"`)
+		}
+	}
+	return ""
+}
+
+// confList reads a key written either as a YAML list or as one
+// comma-separated string.
+func confList(m map[string]any, keys ...string) []string {
+	var out []string
+	for _, k := range keys {
+		switch x := m[k].(type) {
+		case []any:
+			for _, e := range x {
+				if s := strings.TrimSpace(fmt.Sprint(e)); s != "" {
+					out = append(out, s)
+				}
+			}
+		case string:
+			for _, s := range strings.Split(x, ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					out = append(out, s)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // tridentInfo lists the other Trident CRs (best effort, each list skipped

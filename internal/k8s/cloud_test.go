@@ -114,3 +114,40 @@ datacenters = "DC3"
 		t.Errorf("conf: %+v", v)
 	}
 }
+
+// the out-of-tree CPI writes vsphere.conf as YAML: no [VirtualCenter]
+// section to read, so the INI parser found no vCenter at all and the
+// check reported a config that is perfectly fine as having none
+func TestParseVSphereConfYAML(t *testing.T) {
+	v := parseVSphereConf(`global:
+  port: 443
+  insecureFlag: true
+  secretName: vsphere-cloud-secret
+  secretNamespace: kube-system
+
+vcenter:
+  vc1.corp:
+    server: vc1.corp
+    datacenters:
+      - DC1
+    datastore: Datastore
+  tenant-2:
+    server: vc2.corp
+    port: 8443
+    datacenters: DC2, DC1
+`)
+	if len(v.VCenters) != 2 || v.VCenters[0] != "vc2.corp:8443" || v.VCenters[1] != "vc1.corp:443" {
+		t.Errorf("vcenters: %v", v.VCenters)
+	}
+	if len(v.Datacenters) != 2 || !v.Insecure || v.SecretRef != "kube-system/vsphere-cloud-secret" {
+		t.Errorf("conf: %+v", v)
+	}
+	// a vcenter key with no server is the host itself
+	if v := parseVSphereConf("vcenter:\n  10.0.0.1: {}\n"); len(v.VCenters) != 1 || v.VCenters[0] != "10.0.0.1" {
+		t.Errorf("bare vcenter key: %+v", v)
+	}
+	// neither shape: no panic, no vCenters
+	if v := parseVSphereConf("just some text\n"); v == nil || len(v.VCenters) != 0 {
+		t.Errorf("garbage: %+v", v)
+	}
+}

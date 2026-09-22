@@ -122,9 +122,9 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 					add(SevCrit, "cloud", "kube-system/vsphere-cloud-config", "vsphere.conf references credentials secret "+v.SecretRef+" which does not exist: the CPI cannot log in to vCenter", "recreate the secret (<vcenter>.username / <vcenter>.password keys) or fix secret-name/secret-namespace")
 				}
 				if len(v.VCenters) == 0 {
-					add(SevCrit, "cloud", "kube-system/vsphere-cloud-config", "vsphere.conf has no [VirtualCenter] section", "")
+					add(SevCrit, "cloud", "kube-system/vsphere-cloud-config", "vsphere.conf names no vCenter: the CPI has nothing to log in to", `a [VirtualCenter "<host>"] section (INI) or a vcenter: entry (YAML)`)
 				} else if len(v.Datacenters) == 0 {
-					add(SevWarn, "cloud", "kube-system/vsphere-cloud-config", "vsphere.conf lists no datacenters: the CPI cannot find the node VMs", "datacenters = <DC> under each [VirtualCenter] section")
+					add(SevWarn, "cloud", "kube-system/vsphere-cloud-config", "vsphere.conf lists no datacenters: the CPI cannot find the node VMs", "datacenters per vCenter (INI: datacenters = <DC>; YAML: datacenters: [<DC>])")
 				}
 			}
 		}
