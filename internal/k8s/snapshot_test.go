@@ -74,7 +74,8 @@ func rke2Cluster(f *fakeAPI) {
 
 	// rke2 CRs: one snapshot from the CRD and one only in the configmap
 	f.set("/apis/k3s.cattle.io/v1/etcdsnapshotfiles", ulist("k3s.cattle.io/v1", "ETCDSnapshotFile",
-		uobj("", "etcd-snapshot-cp-1-1", map[string]any{"spec": map[string]any{"snapshotName": "etcd-snapshot-cp-1-1", "nodeName": "cp-1", "location": "file:///var/lib/rancher/rke2/server/db/snapshots/etcd-snapshot-cp-1-1"}, "status": map[string]any{"creationTime": "2026-09-18T10:00:00Z", "size": int64(2048), "readyToUse": true}}),
+		uobj("", "etcd-snapshot-cp-1-1", map[string]any{"spec": map[string]any{"snapshotName": "etcd-snapshot-cp-1-1", "nodeName": "cp-1", "location": "file:///var/lib/rancher/rke2/server/db/snapshots/etcd-snapshot-cp-1-1"}, "status": map[string]any{"creationTime": "2026-09-18T10:00:00Z", "size": "2048", "readyToUse": true}}),
+		uobj("", "etcd-snapshot-cp-1-2.part", map[string]any{"spec": map[string]any{"snapshotName": "etcd-snapshot-cp-1-2.part", "nodeName": "cp-1", "location": "file:///var/lib/rancher/rke2/server/db/snapshots/etcd-snapshot-cp-1-2.part"}, "status": map[string]any{"creationTime": "2026-09-19T10:00:00Z", "size": "9Mi", "readyToUse": true}}),
 		uobj("", "etcd-snapshot-cp-1-0", map[string]any{"spec": map[string]any{"snapshotName": "etcd-snapshot-cp-1-0", "nodeName": "cp-1", "s3": map[string]any{"bucket": "b"}}, "status": map[string]any{"creationTime": "2026-09-17T10:00:00Z", "error": map[string]any{"message": "upload failed"}}}),
 	))
 	f.set("/api/v1/namespaces/kube-system/configmaps/rke2-etcd-snapshots", corev1.ConfigMap{TypeMeta: tm("ConfigMap"), ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "rke2-etcd-snapshots"}, Data: map[string]string{
@@ -173,18 +174,27 @@ func TestFetchRKE2(t *testing.T) {
 	if !ok || u.Node != "cp-1" || u.Pod != "web/nginx-b" || u.Used != 250 || u.UsedPct() != 25 || u.InodesUsed != 1 || s.PVCUsageErr != "" {
 		t.Errorf("pvc usage: %+v err=%q", s.PVCUsage, s.PVCUsageErr)
 	}
-	// rke2 snapshot records: CRD + configmap merged, newest first
-	if len(s.RKE2Snapshots) != 3 {
+	// rke2 snapshot records: CRD + configmap merged, newest first; the CR's
+	// size is a quantity string; a .part file is an interrupted save, not a
+	// snapshot, whatever readyToUse says
+	if len(s.RKE2Snapshots) != 4 {
 		t.Fatalf("snapshots: %+v", s.RKE2Snapshots)
 	}
-	if r := s.RKE2Snapshots[0]; r.Name != "etcd-snapshot-cp-1-1" || r.Source != "crd" || r.Status != "successful" || r.Size != 2048 || r.S3 {
+	if r := s.RKE2Snapshots[0]; r.Name != "etcd-snapshot-cp-1-2.part" || r.Status != "failed" || !strings.Contains(r.Message, "incomplete .part file") || r.Size != 9<<20 {
+		t.Errorf("part record: %+v", r)
+	}
+	if r := s.RKE2Snapshots[1]; r.Name != "etcd-snapshot-cp-1-1" || r.Source != "crd" || r.Status != "successful" || r.Size != 2048 || r.S3 {
 		t.Errorf("crd record: %+v", r)
 	}
-	if r := s.RKE2Snapshots[1]; r.Name != "etcd-snapshot-cp-1-0" || r.Status != "failed" || r.Message != "upload failed" || !r.S3 {
+	if r := s.RKE2Snapshots[2]; r.Name != "etcd-snapshot-cp-1-0" || r.Status != "failed" || r.Message != "upload failed" || !r.S3 {
 		t.Errorf("failed s3 record: %+v", r)
 	}
-	if r := s.RKE2Snapshots[2]; r.Name != "old-cm-only" || r.Source != "configmap" || !r.S3 || r.Size != 100 {
+	if r := s.RKE2Snapshots[3]; r.Name != "old-cm-only" || r.Source != "configmap" || !r.S3 || r.Size != 100 {
 		t.Errorf("configmap-only record: %+v", r)
+	}
+	// the configmap's size against its 1 MiB ceiling: the data values
+	if cm := s.SnapshotCM; cm == nil || cm.Name != "rke2-etcd-snapshots" || cm.Entries != 3 || cm.Bytes != len(`{"name":"etcd-snapshot-cp-1-1","nodeName":"cp-1","createdAt":"2026-09-18T10:00:00Z","status":"successful"}`)+len(`{"name":"old-cm-only","nodeName":"cp-1","location":"s3://bucket/old-cm-only","createdAt":"2026-09-16T10:00:00Z","size":100,"status":"successful"}`)+len("not json") || cm.Pct() != 0 {
+		t.Errorf("snapshot configmap: %+v", cm)
 	}
 	// HelmChart CRs with their config overrides
 	if len(s.HelmCharts) != 2 || s.HelmCharts[0].Name != "rke2-canal" || !s.HelmCharts[0].HasConfig || !s.HelmCharts[0].Failed || s.HelmCharts[0].JobName != "helm-install-rke2-canal" || !strings.Contains(s.HelmCharts[0].ConfigValues, "vethuMTU") || s.HelmCharts[1].HasConfig {
@@ -454,7 +464,7 @@ func TestS3SecretAndKubeadmConfig(t *testing.T) {
 func TestRKE2SnapshotsAbsent(t *testing.T) {
 	f := newFakeAPI(t)
 	c := f.client(t, DefaultOptions())
-	if recs := c.rke2Snapshots(context.Background()); len(recs) != 0 {
+	if recs, cm := c.rke2Snapshots(context.Background()); len(recs) != 0 || cm != nil {
 		t.Errorf("no CRD, no configmap: %+v", recs)
 	}
 	// the missing CRD type is remembered so it is not asked again

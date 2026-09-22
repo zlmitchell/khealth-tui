@@ -435,24 +435,6 @@ func (e *evaluator) osRules() {
 			}
 		}
 	}
-
-	// Not STIG rules, but the same per-node facts.
-	e.perNode("OS-reboot", "No pending reboot (kernel/security updates applied)", "III", g, "reboot the node in a maintenance window", nodes, func(n string) (Status, string) {
-		if ni(n).Hardening["reboot_required"] == "yes" {
-			return Fail, "reboot required"
-		}
-		return Pass, ""
-	})
-	e.perNode("OS-secureboot", "UEFI Secure Boot enabled", "III", g, "enable Secure Boot in firmware (signed kernel/modules required)", nodes, func(n string) (Status, string) {
-		sb := ni(n).Hardening["secureboot"]
-		switch {
-		case strings.Contains(sb, "enabled"):
-			return Pass, ""
-		case sb == "":
-			return Manual, "mokutil not available / BIOS boot"
-		}
-		return Fail, sb
-	})
 }
 
 // OSSummary counts a node's OS-group results by status.

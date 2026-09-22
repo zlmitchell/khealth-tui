@@ -77,6 +77,7 @@ type Snapshot struct {
 	CRDs []CRDInfo
 
 	RKE2Snapshots []EtcdSnapshotRecord
+	SnapshotCM    *SnapshotConfigMap // the rke2/k3s-etcd-snapshots ConfigMap, while the release still keeps one
 	HelmCharts    []HelmChartCR
 	Kubeadm       *KubeadmConfig // upstream clusters: kube-system/kubeadm-config ClusterConfiguration
 	// Cloud provider / CSI extras (cloud.go): Trident backends and the
@@ -127,6 +128,25 @@ type NodeMetric struct {
 	CPUMilli int64
 	MemBytes int64
 }
+
+// SnapshotConfigMap is the kube-system/rke2-etcd-snapshots (k3s-etcd-
+// snapshots) ConfigMap: one entry per snapshot on every server, local and
+// S3. A ConfigMap's data may not exceed 1 MiB (MaxSecretSize), and every
+// server rewrites the whole map after each snapshot, so with enough servers
+// x retention x targets the update is refused ("must have at most 1048576
+// bytes") and snapshot bookkeeping stops. Releases that keep the metadata in
+// ETCDSnapshotFile CRs only (rke2 v1.35+) have no such ConfigMap.
+type SnapshotConfigMap struct {
+	Name    string
+	Entries int
+	Bytes   int // sum of the data values: what the 1 MiB limit is checked against
+}
+
+// SnapshotConfigMapLimit is the ConfigMap data size the apiserver enforces.
+const SnapshotConfigMapLimit = 1 << 20
+
+// Pct is how much of the limit the map uses.
+func (m *SnapshotConfigMap) Pct() int { return m.Bytes * 100 / SnapshotConfigMapLimit }
 
 // EtcdSnapshotRecord is a cluster-level etcd snapshot record (rke2/k3s).
 type EtcdSnapshotRecord struct {
@@ -519,9 +539,9 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		recs := c.rke2Snapshots(ctx)
+		recs, cm := c.rke2Snapshots(ctx)
 		mu.Lock()
-		s.RKE2Snapshots = recs
+		s.RKE2Snapshots, s.SnapshotCM = recs, cm
 		mu.Unlock()
 	}()
 	wg.Add(1)
@@ -872,9 +892,26 @@ var etcdSnapshotGVR = schema.GroupVersionResource{Group: "k3s.cattle.io", Versio
 var helmChartGVR = schema.GroupVersionResource{Group: "helm.cattle.io", Version: "v1", Resource: "helmcharts"}
 var helmChartConfigGVR = schema.GroupVersionResource{Group: "helm.cattle.io", Version: "v1", Resource: "helmchartconfigs"}
 
-func (c *Client) rke2Snapshots(ctx context.Context) []EtcdSnapshotRecord {
+// quantityBytes reads a size that may be a JSON number or a Kubernetes
+// quantity string ("9252896", "9Mi").
+func quantityBytes(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case float64:
+		return int64(x)
+	case string:
+		if q, err := resource.ParseQuantity(x); err == nil {
+			return q.Value()
+		}
+	}
+	return 0
+}
+
+func (c *Client) rke2Snapshots(ctx context.Context) ([]EtcdSnapshotRecord, *SnapshotConfigMap) {
 	seen := map[string]bool{}
 	var out []EtcdSnapshotRecord
+	var cmInfo *SnapshotConfigMap
 
 	if l, err := c.dynList(ctx, "etcdsnapshotfiles.k3s.cattle.io", etcdSnapshotGVR); err == nil {
 		for _, it := range l.Items {
@@ -891,8 +928,10 @@ func (c *Client) rke2Snapshots(ctx context.Context) []EtcdSnapshotRecord {
 			if ts, ok, _ := unstructured.NestedString(it.Object, "status", "creationTime"); ok {
 				r.Created, _ = time.Parse(time.RFC3339, ts)
 			}
-			if sz, ok, _ := unstructured.NestedInt64(it.Object, "status", "size"); ok {
-				r.Size = sz
+			// status.size is a resource.Quantity: a string ("9252896", "9Mi"),
+			// not a number
+			if sz, ok, _ := unstructured.NestedFieldNoCopy(it.Object, "status", "size"); ok {
+				r.Size = quantityBytes(sz)
 			}
 			ready, _, _ := unstructured.NestedBool(it.Object, "status", "readyToUse")
 			if errMap, ok, _ := unstructured.NestedMap(it.Object, "status", "error"); ok && len(errMap) > 0 {
@@ -900,6 +939,12 @@ func (c *Client) rke2Snapshots(ctx context.Context) []EtcdSnapshotRecord {
 				if msg, ok := errMap["message"].(string); ok {
 					r.Message = msg
 				}
+			} else if strings.HasSuffix(r.Name, ".part") {
+				// the file a save writes before renaming it: the save was
+				// interrupted (node or rke2 stopped mid-snapshot); rke2 lists
+				// it as ready, but it is not a snapshot
+				r.Status = "failed"
+				r.Message = "incomplete .part file: the snapshot save was interrupted; delete it (rke2 etcd-snapshot delete " + r.Name + ")"
 			} else if ready {
 				r.Status = "successful"
 			} else {
@@ -914,6 +959,13 @@ func (c *Client) rke2Snapshots(ctx context.Context) []EtcdSnapshotRecord {
 		cm, err := c.CS.CoreV1().ConfigMaps("kube-system").Get(ctx, cmName, metav1.GetOptions{})
 		if err != nil {
 			continue
+		}
+		cmInfo = &SnapshotConfigMap{Name: cmName, Entries: len(cm.Data)}
+		for _, val := range cm.Data {
+			cmInfo.Bytes += len(val)
+		}
+		for _, val := range cm.BinaryData {
+			cmInfo.Bytes += len(val)
 		}
 		for key, val := range cm.Data {
 			var rec struct {
@@ -944,7 +996,7 @@ func (c *Client) rke2Snapshots(ctx context.Context) []EtcdSnapshotRecord {
 			out = append(out, r)
 		}
 	}
-	return out
+	return out, cmInfo
 }
 
 // S3Secret reads the rke2 etcd S3 config secret from kube-system.

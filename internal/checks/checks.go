@@ -548,6 +548,7 @@ func Evaluate(in Input) []Finding {
 	}
 
 	// ---- addons / rancher ----
+	evalACE(in, add) // Authorized Cluster Endpoint on Rancher-managed clusters (ace.go)
 	if r := s.Rancher; r != nil && r.Managed {
 		if !r.ClusterAgentOK {
 			add(SevCrit, "addons", "rancher", "cattle-cluster-agent not ready ("+r.ClusterAgent+") - cluster disconnected from Rancher "+r.Server, "check agent logs, Rancher URL/CA")
@@ -796,6 +797,7 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 			backupMechanism = true
 		}
 	}
+	evalSnapshotConfigMap(in, add) // the records ConfigMap against its 1 MiB ceiling (etcd_snapshot_cm.go)
 	if failed > 0 {
 		add(SevWarn, "etcd", "backups", fmt.Sprintf("%d failed snapshot record(s) in cluster", failed), "check ETCDSnapshotFile objects / rke2-etcd-snapshots configmap")
 	}

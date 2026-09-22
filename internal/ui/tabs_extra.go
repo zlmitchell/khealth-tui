@@ -250,9 +250,9 @@ func (a *App) etcdContent() content {
 
 	add("", styleTitle.Render("Backups / snapshots"))
 	if len(s.RKE2Snapshots) > 0 {
-		latest := s.RKE2Snapshots[0]
+		latest := s.RKE2Snapshots[0] // newest first; the newest usable one is what "latest" means
 		ok, failed, s3n := 0, 0, 0
-		for _, r := range s.RKE2Snapshots {
+		for i, r := range s.RKE2Snapshots {
 			switch r.Status {
 			case "failed":
 				failed++
@@ -262,6 +262,9 @@ func (a *App) etcdContent() content {
 			if r.S3 {
 				s3n++
 			}
+			if r.Status != "failed" && (latest.Status == "failed" || i == 0) {
+				latest = r
+			}
 		}
 		ageTxt := age(latest.Created) + " ago"
 		if time.Since(latest.Created) > a.cfg.Etcd.MaxBackupAge {
@@ -270,6 +273,19 @@ func (a *App) etcdContent() content {
 			ageTxt = styleOK.Render(ageTxt)
 		}
 		add(kv("cluster records", fmt.Sprintf("%d (%d ok, %s, %d on S3) via %s", len(s.RKE2Snapshots), ok, colorCount(failed, "failed", styleCrit), s3n, latest.Source)))
+		if cm := s.SnapshotCM; cm != nil {
+			// the ConfigMap has a 1 MiB ceiling; full = the records stop
+			use := fmt.Sprintf("%d KiB of 1 MiB (%d%%), %d entries", cm.Bytes/1024, cm.Pct(), cm.Entries)
+			switch {
+			case cm.Pct() >= 90:
+				use = styleCrit.Render(use + " - nearly full: the next rewrite is refused and the records stop")
+			case cm.Pct() >= 70:
+				use = styleWarn.Render(use + " - lower etcd-snapshot-retention before it fills")
+			default:
+				use = styleOK.Render(use)
+			}
+			add(kv("records configmap", "kube-system/"+cm.Name+"  "+use))
+		}
 		add(kv("latest", fmt.Sprintf("%s on %s, %s, %s, %s", latest.Name, latest.Node, ageTxt, humanBytes(float64(latest.Size)), map[bool]string{true: "s3", false: "local"}[latest.S3])))
 		var rows [][]string
 		for i, r := range s.RKE2Snapshots {
@@ -763,6 +779,22 @@ func (a *App) addonsContent() content {
 		}
 		if r.SystemUpgradeOK != nil {
 			add("  " + kv("system-upgrade-controller", okText(*r.SystemUpgradeOK, "ready", "not ready")))
+		}
+		// the Authorized Cluster Endpoint: direct kubectl that survives a
+		// Rancher outage (webhook on every apiserver + kube-api-auth)
+		if ace := s.ACE(); len(ace.Servers)+len(ace.Without) > 0 {
+			txt := ""
+			switch {
+			case len(ace.Servers) == 0:
+				txt = styleWarn.Render("not enabled") + styleDim.Render("  every kubectl goes through Rancher; enable it in Cluster Management > Edit Config > Networking")
+			case len(ace.Without) > 0:
+				txt = styleWarn.Render("webhook on " + strutil.TruncList(ace.Servers, 3) + ", missing on " + strutil.TruncList(ace.Without, 3))
+			case !ace.AuthFound:
+				txt = styleCrit.Render("enabled, kube-api-auth DaemonSet missing (direct requests get 401)")
+			default:
+				txt = styleOK.Render("enabled") + "  " + kv("kube-api-auth", okText(ace.AuthReady == ace.AuthDesired, fmt.Sprintf("%d/%d", ace.AuthReady, ace.AuthDesired), fmt.Sprintf("%d/%d", ace.AuthReady, ace.AuthDesired))) + styleDim.Render("  webhook "+ace.Webhook)
+			}
+			add("  " + kv("authorized cluster endpoint", txt))
 		}
 		var env []string
 		for _, k := range strutil.SortedKeys(r.Env) {

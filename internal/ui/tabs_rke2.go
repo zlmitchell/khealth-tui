@@ -9,25 +9,16 @@ import (
 	"github.com/zlmitchell/khealth-tui/internal/distro"
 	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 	"github.com/zlmitchell/khealth-tui/internal/strutil"
-	corev1 "k8s.io/api/core/v1"
 )
 
-// sharedSANs is a node's tls-san list as a sorted set without the entries
-// that name the node itself (its hostname, node name and addresses): the
-// part every server should agree on.
-func sharedSANs(ni *nodeinfo.Info, node *corev1.Node) []string {
-	self := map[string]bool{strings.ToLower(ni.Hostname): true}
-	if node != nil {
-		self[strings.ToLower(node.Name)] = true
-		for _, a := range node.Status.Addresses {
-			self[strings.ToLower(a.Address)] = true
-		}
-	}
+// sanSet is a node's tls-san list as a sorted, lowercased set: order is
+// not drift. (Each server's own name in the list is not stripped: Rancher
+// writes one identical list to every server, and stripping the entry that
+// happens to name one of them made that look like drift.)
+func sanSet(ni *nodeinfo.Info) []string {
 	var out []string
 	for _, s := range strutil.Uniq(ni.TLSSAN) {
-		if !self[strings.ToLower(s)] {
-			out = append(out, strings.ToLower(s))
-		}
+		out = append(out, strings.ToLower(s))
 	}
 	sort.Strings(out)
 	return out
@@ -73,6 +64,7 @@ func (a *App) rke2Content() content {
 	// drift: value sets per key across server nodes / agent nodes
 	type valSet map[string]map[string]bool // key -> value -> seen
 	servers, agents := valSet{}, valSet{}
+	byNode := map[string]string{} // "key|node" -> value
 	for _, n := range strutil.SortedKeys(a.nodes) {
 		ni := a.nodes[n]
 		if ni.Err != nil {
@@ -89,24 +81,51 @@ func (a *App) rke2Content() content {
 			v := ni.Settings[k]
 			if k == "tls-san" {
 				// block lists are empty in Settings; compare the parsed list
-				// as a set, without the node's own name and addresses (each
-				// server may list itself) - order and self-entries are not drift
-				v = strings.Join(sharedSANs(ni, a.snap.Node(n)), ",")
+				// as a set - order is not drift
+				v = strings.Join(sanSet(ni), ",")
 			}
 			vs[k][v] = true
+			byNode[k+"|"+n] = v
 		}
 	}
 	var drift []string
+	// who has what: the values per node, so the line says what differs
+	describe := func(k string, names []string) string {
+		groups := map[string][]string{} // value -> nodes
+		for _, n := range names {
+			v := byNode[k+"|"+n]
+			groups[v] = append(groups[v], n)
+		}
+		var parts []string
+		for _, v := range strutil.SortedKeys(groups) {
+			shown := v
+			if shown == "" {
+				shown = "(unset)"
+			}
+			parts = append(parts, strutil.TruncList(groups[v], 3)+"="+strutil.TruncStr(shown, 60))
+		}
+		return k + " [" + strings.Join(parts, " | ") + "]"
+	}
+	var serverNames, agentNames []string
+	for _, n := range strutil.SortedKeys(a.nodes) {
+		if ni := a.nodes[n]; ni.Err == nil {
+			if ni.ControlPlane {
+				serverNames = append(serverNames, n)
+			} else {
+				agentNames = append(agentNames, n)
+			}
+		}
+	}
 	for _, k := range keys {
 		if len(servers[k]) > 1 {
-			drift = append(drift, "servers:"+k)
+			drift = append(drift, "servers:"+describe(k, serverNames))
 		}
 		if len(agents[k]) > 1 {
-			drift = append(drift, "agents:"+k)
+			drift = append(drift, "agents:"+describe(k, agentNames))
 		}
 	}
 	if len(drift) > 0 {
-		hdr = append(hdr, styleWarn.Render("config drift between nodes: ")+strings.Join(drift, ", "))
+		hdr = append(hdr, flow(a.width-2, 2, append([]string{styleWarn.Render("config drift between nodes:")}, drift...)...)...)
 	} else if len(a.nodes) > 1 {
 		hdr = append(hdr, styleOK.Render("no config drift across nodes for ")+styleDim.Render(strings.Join(keys[:8], ", ")+", ..."))
 	}
@@ -421,6 +440,8 @@ func (a *App) endpointLines() []string {
 	if rep.Host != "" {
 		ep = styleBold.Render(rep.Host)
 		switch {
+		case rep.Proxied:
+			ep += "  " + styleInfo.Render("Rancher proxy (/k8s/clusters/...): TLS ends at Rancher, the cluster's own endpoint is what ACE would give")
 		case rep.IsNode != "":
 			ep += "  " + styleWarn.Render("single server node ("+rep.IsNode+")")
 		default:
@@ -451,6 +472,9 @@ func (a *App) endpointLines() []string {
 		host := styleDim.Render("-")
 		if rep.Host != "" && s.HasCert {
 			host = okText(s.HostOK, "in cert", "NOT in cert")
+			if rep.Proxied {
+				host = styleDim.Render("n/a (proxied)")
+			}
 		}
 		rows = append(rows, []string{s.Node, tls, cert, missing, host})
 	}

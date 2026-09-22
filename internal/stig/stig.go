@@ -51,10 +51,10 @@ func (b Benchmark) Matches(id string) bool {
 // IDs are a best-effort mapping: confirm against the release you are audited on.
 var Benchmarks = []Benchmark{
 	{Name: "DISA Kubernetes STIG", Version: "V2R6 (01 Apr 2026)", Prefixes: []string{"V-242", "V-245", "V-2548", "V-2748"}, Note: "vulnerability IDs V-2423xx..V-2424xx, V-2455xx, V-2548xx, V-2748xx (secrets at rest, new in V2R6)"},
-	{Name: "DISA Rancher Government RKE2 STIG", Version: "V2R7 (01 Jul 2026)", Prefixes: []string{"V-2545", "V-268", "RKE2-"}, Note: "V-2545xx/V-268321; RKE2-* are rke2 hardening-guide prerequisites (etcd user, SELinux) not carried as STIG IDs"},
+	{Name: "DISA Rancher Government RKE2 STIG", Version: "V2R7 (01 Jul 2026)", Prefixes: []string{"V-2545", "V-268", "RKE2-"}, Note: "all 21 rules (V-2545xx, V-268321; rule ids CNTR-R2-*): those that restate a Kubernetes STIG check alias it and name the source; RKE2-* are the rke2 hardening-guide prerequisites (etcd user, SELinux, per-component ciphers, audit-log-mode)"},
 	{Name: "DISA Rancher Government MCM STIG", Version: "V2R2 (05 Jan 2026)", Prefixes: []string{"V-2528", "V-257292"}, Note: "Rancher Multi-Cluster Manager; evaluated only on the cluster that runs Rancher"},
 	{Name: "CIS Kubernetes Benchmark", Version: "v2.0.1 (Jun 2026) / rke2 CIS self-assessment v1.12", Prefixes: []string{"CIS-"}, Note: "section numbers follow v2.0 (renumbered from v1.9)"},
-	{Name: "Generic OS checks", Version: "(no STIG ID)", Prefixes: []string{"OS-"}, Note: "pending reboot, Secure Boot, and the fallback checks for distributions without a DISA table; the OS STIGs themselves are listed in OSBenchmarks"},
+	{Name: "Generic OS checks", Version: "(no STIG ID)", Prefixes: []string{"OS-"}, Note: "the fallback checks for distributions without a DISA table (SLES, Flatcar, ...); the OS STIGs themselves are listed in OSBenchmarks. Pending reboot is an Overview finding, not a rule"},
 }
 
 // Status of one rule.
@@ -134,6 +134,7 @@ func Evaluate(in Input) []Result {
 		e.rke2Rules()
 		e.osRules()
 	}
+	e.rke2STIGRules() // every RKE2 STIG rule with its own row (rke2stig.go)
 	e.clusterRules()
 	e.rancherRules()
 

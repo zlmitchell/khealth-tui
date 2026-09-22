@@ -14,6 +14,7 @@ import (
 
 	"github.com/zlmitchell/khealth-tui/internal/config"
 	"github.com/zlmitchell/khealth-tui/internal/distro"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
 	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
@@ -113,10 +114,15 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				add(SevWarn, "node", name, "fapolicyd rules.d changed after compiled.rules was generated: the running rule set is stale", "fagenrules --load && systemctl restart fapolicyd")
 			}
 		}
-		// storage drivers execute host binaries the distribution's rules do not cover
+		// storage drivers execute host binaries the distribution's rules do
+		// not cover - for the drivers that actually run here: the directory
+		// alone (a leftover of an uninstalled driver) proves nothing
 		if fa.Permissive != "1" && (len(fa.K8sRules) > 0 || !isRancher) {
 			for _, d := range p.CSI.HostDirs {
 				if d == "/var/lib/longhorn" && slices.Contains(p.CSI.HostDirs, "/var/lib/longhorn/engine-binaries") {
+					continue
+				}
+				if !csiDirInUse(d, p.CSI.Drivers, in.Snap) {
 					continue
 				}
 				if _, ok := fa.Covers(d); ok {
@@ -471,12 +477,24 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				missing[strings.Fields(l)[1]] = true
 			}
 		}
+		sev := SevWarn
+		if ni.Settings["selinux"] == "true" {
+			sev = SevCrit
+		}
 		if missing["container-selinux"] || (ni.Dist == "rke2" && missing["rke2-selinux"]) || (ni.Dist == "k3s" && missing["k3s-selinux"]) {
-			sev := SevWarn
-			if ni.Settings["selinux"] == "true" {
-				sev = SevCrit
-			}
 			add(sev, "node", name, "SELinux is enforcing but the "+ni.Dist+"-selinux/container-selinux policy packages are not installed: containers and the runtime run with the wrong labels and get denied", "dnf install "+ni.Dist+"-selinux container-selinux from the rancher repo (or use the RPM install), then restart "+ni.Dist)
+		}
+		// a Rancher-provisioned node also runs rancher-system-agent, which
+		// has its own policy package; a plain rke2 node needs rke2-selinux only
+		if provisioned := ni.Rancher.Provisioned || ni.Service("rancher-system-agent") != nil; provisioned && missing["rancher-selinux"] {
+			add(sev, "node", name, "SELinux is enforcing on a Rancher-provisioned node but rancher-selinux is not installed: rancher-system-agent runs unlabeled and its plans (config, registries, manifests) are denied", "dnf install rancher-selinux (rancher rpm repo), then systemctl restart rancher-system-agent; a non-Rancher rke2 node needs rke2-selinux only")
+		}
+		// the other way round: the host and rke2 are confined, the pods are
+		// not - selinux: true is what makes containerd label containers
+		// (container_t with MCS categories); without it they run unconfined
+		// however hardened the host looks
+		if !missing["container-selinux"] && !missing[ni.Dist+"-selinux"] && ni.Settings["selinux"] != "true" {
+			add(SevWarn, "node", name, "SELinux is enforcing and the policy packages are installed, but "+v.ConfigName+" has no selinux: true: containerd runs the pods unconfined (no container_t label), the host policy protects "+ni.Dist+" only", "add selinux: true to "+v.ConfigFile+" and restart "+v.Server+" / "+v.Agent+" (one node at a time; pods restart with labels)")
 		}
 	}
 
@@ -642,6 +660,43 @@ func ruleDir(rule string) string {
 		return d
 	}
 	return ""
+}
+
+// csiDirInUse reports whether the driver that executes from dir is present:
+// registered with this node's kubelet (plugins_registry), else installed in
+// the cluster (CSIDriver objects). FlexVolume dirs have no driver object to
+// check and count when present.
+func csiDirInUse(dir string, nodeDrivers []string, snap *k8s.Snapshot) bool {
+	var want []string
+	switch {
+	case strings.HasPrefix(dir, "/var/lib/longhorn"):
+		want = []string{"longhorn"}
+	case strings.HasPrefix(dir, "/opt/pwx"):
+		want = []string{"portworx", "pxd"}
+	case strings.HasPrefix(dir, "/var/lib/rook"):
+		want = []string{"ceph"}
+	case strings.HasPrefix(dir, "/var/lib/trident"):
+		want = []string{"trident"}
+	case strings.HasPrefix(dir, "/var/openebs"):
+		want = []string{"openebs"}
+	default:
+		return true
+	}
+	var names []string
+	names = append(names, nodeDrivers...)
+	if snap != nil {
+		for i := range snap.CSIDrivers {
+			names = append(names, snap.CSIDrivers[i].Name)
+		}
+	}
+	for _, n := range names {
+		for _, w := range want {
+			if strings.Contains(strings.ToLower(n), w) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // csiOwner names the storage driver that executes from a host directory.

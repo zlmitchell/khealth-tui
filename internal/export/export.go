@@ -355,27 +355,45 @@ func FileBase(r *Report) string {
 // WriteFiles writes <dir>/<base>.json and <dir>/<base>.xlsx and returns
 // their paths.
 func WriteFiles(dir string, r *Report) (jsonPath, xlsxPath string, err error) {
+	paths, err := WriteFormats(dir, r, true, true)
+	if err != nil {
+		return "", "", err
+	}
+	return paths[0], paths[1], nil
+}
+
+// WriteFormats writes the report as JSON and/or XLSX under dir and returns
+// the paths written, JSON first.
+func WriteFormats(dir string, r *Report, json, xlsx bool) ([]string, error) {
 	if dir == "" {
 		dir = "."
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", "", err
+		return nil, err
 	}
 	base := filepath.Join(dir, FileBase(r))
-	jsonPath, xlsxPath = base+".json", base+".xlsx"
-	f, err := os.Create(jsonPath)
-	if err != nil {
-		return "", "", err
+	var out []string
+	if json {
+		p := base + ".json"
+		f, err := os.Create(p)
+		if err != nil {
+			return nil, err
+		}
+		if err := WriteJSON(f, r); err != nil {
+			f.Close()
+			return nil, err
+		}
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
 	}
-	if err := WriteJSON(f, r); err != nil {
-		f.Close()
-		return "", "", err
+	if xlsx {
+		p := base + ".xlsx"
+		if err := WriteXLSX(p, r); err != nil {
+			return nil, fmt.Errorf("xlsx: %w", err)
+		}
+		out = append(out, p)
 	}
-	if err := f.Close(); err != nil {
-		return "", "", err
-	}
-	if err := WriteXLSX(xlsxPath, r); err != nil {
-		return "", "", fmt.Errorf("xlsx: %w", err)
-	}
-	return jsonPath, xlsxPath, nil
+	return out, nil
 }

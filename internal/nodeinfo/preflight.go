@@ -38,7 +38,7 @@ type Preflight struct {
 	FaillockDeny  int
 	Proxy         []ProxyLine
 	Iptables      string
-	SEPkgs        []string // rpm -q rke2-selinux k3s-selinux container-selinux
+	SEPkgs        []string // rpm -q rke2-selinux k3s-selinux container-selinux rancher-selinux
 	NMUnmanaged   []string
 	RegProbes     []RegProbe
 	RegFiles      []RegFile

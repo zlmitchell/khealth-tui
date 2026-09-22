@@ -39,6 +39,15 @@ func TestEndpointReport(t *testing.T) {
 	if rep.Servers[0].HostOK {
 		t.Errorf("host should not be in cert")
 	}
+	// the kubeconfig Rancher hands out without ACE: TLS ends at Rancher, so
+	// the apiserver certificate is not what the client sees
+	rep = Endpoint("https://rancher.example.com/k8s/clusters/c-m-abc123", nodes, infos, nil)
+	if !rep.Proxied || rep.Host != "rancher.example.com" || !rep.Servers[0].HostOK || rep.IsNode != "" {
+		t.Errorf("proxied: %+v", rep)
+	}
+	if RancherProxied("https://k8s.example.com:6443") || !RancherProxied("https://rancher.example.com/k8s/clusters/local") {
+		t.Error("RancherProxied")
+	}
 }
 
 func TestEndpointKubeadm(t *testing.T) {

@@ -7,7 +7,7 @@ The RHEL 9 STIG (V-258019 / `service_fapolicyd_enabled`) requires `fapolicyd` ru
 1. the file is owned by an installed RPM (the rpmdb is a trust source), or
 2. its path + size + SHA-256 is listed in `/etc/fapolicyd/trust.d/*` or `/etc/fapolicyd/fapolicyd.trust`.
 
-Everything a Kubernetes distribution downloads, extracts or generates at runtime is neither, so it is denied — silently unless you know where to look. This doc lists what breaks per install method and the existing ways to fix it. The hardened hosts in `hardening/rhel9/` use method A.
+Everything a Kubernetes distribution downloads, extracts or generates at runtime is neither, so it is denied — silently unless you know where to look. This doc lists what breaks per install method and the existing ways to fix it. Method A is what the STIG-hardened lab hosts use.
 
 ## What is and is not mediated
 
@@ -33,12 +33,12 @@ type=FANOTIFY msg=audit(...): resp=2   # 2 = deny
 
 Turn on `--debug-deny` for the full rule trace: `fapolicyd --debug-deny` in the foreground, or `sed -i 's/^#*\s*debug.*/debug = 2/' /etc/fapolicyd/fapolicyd.conf` (noisy — turn it off after).
 
-## Method A — path rules (`rules.d`) — used on the hardened hosts
+## Method A — path rules (`rules.d`) — the usual choice
 
 Rancher's RKE2 STIG guidance takes this route: allow execution from the directories the distribution owns, in a rule file that sorts **before** `90-deny-execute.rules`.
 
 ```sh
-cat >/etc/fapolicyd/rules.d/80-rke2.rules <<'EOF'
+cat >/etc/fapolicyd/rules.d/81-rke2-local.rules <<'EOF'
 # RKE2 / Kubernetes host-side binaries (Rancher STIG guidance). Everything under these
 # trees is either the rke2 binary itself or extracted from images RKE2 pulled.
 allow perm=any all : dir=/usr/local/bin/
@@ -48,9 +48,32 @@ allow perm=any all : dir=/opt/cni/
 allow perm=any all : dir=/var/lib/kubelet/
 allow perm=any all : dir=/run/k3s/
 EOF
-chmod 644 /etc/fapolicyd/rules.d/80-rke2.rules
+chmod 644 /etc/fapolicyd/rules.d/81-rke2-local.rules
 fagenrules --check && fagenrules --load     # compiles rules.d/* into /etc/fapolicyd/compiled.rules
 systemctl restart fapolicyd
+```
+
+**Why `81-rke2-local.rules` and not `80-rke2.rules`:** RKE2's own `install.sh` (`setup_fapolicy_rules`) writes `/etc/fapolicyd/rules.d/80-rke2.rules` itself on every run on a RHEL-family host with fapolicyd active — exactly four lines (`/var/lib/rancher/`, `/opt/cni/`, `/run/k3s/`, `/var/lib/kubelet/`), overwriting whatever was there. On a Rancher-provisioned node that installer runs again from the `system-agent-installer-rke2` image on **every plan apply** (any cluster-spec edit), with `INSTALL_RKE2_SKIP_RELOAD` set, so the file changes and `compiled.rules` goes stale until the next `fagenrules --load`. Observed 2026-09-21 on the `baremetal-a` lab node: the hardening's `/usr/local/bin/` and `/opt/rke2/` allows vanished after the first config change (root could still execute `/usr/local/bin/rke2`, an unprivileged user could not). Keep the additions in a file the installer does not own; treat `80-rke2.rules` as RKE2's.
+
+For reference, the file RKE2's installer writes (`80-rke2.rules`, verbatim from an rke2 v1.35 node):
+
+```
+allow perm=any all : dir=/var/lib/rancher/
+allow perm=any all : dir=/opt/cni/
+allow perm=any all : dir=/run/k3s/
+allow perm=any all : dir=/var/lib/kubelet/
+```
+
+Storage drivers that execute host binaries need their own file, again sorted before the deny (khealth's *fapolicyd has no allow rule for `<dir>`* finding names the directory when the driver is present on the node):
+
+```sh
+cat >/etc/fapolicyd/rules.d/81-csi.rules <<'EOF'
+allow perm=any all : dir=/var/lib/longhorn/      # Longhorn: engine binaries the instance-manager runs from the host
+# allow perm=any all : dir=/var/lib/trident/     # NetApp Trident node plugin
+# allow perm=any all : dir=/var/lib/rook/        # Rook/Ceph
+# allow perm=any all : dir=/opt/pwx/             # Portworx
+EOF
+fagenrules --load && systemctl restart fapolicyd
 ```
 
 For upstream kubeadm nodes drop the rke2/rancher lines and keep `/opt/cni/`, `/var/lib/kubelet/` and (if you install Helm or kubectl plugins there) `/usr/local/bin/`.
@@ -79,16 +102,16 @@ Entries land in `/etc/fapolicyd/trust.d/rke2` as `path size sha256`. The catch i
 
 RPMs are trusted automatically. `curl https://get.rke2.io | sh -` on a host with `yum` defaults to the RPM method (`rke2-server`, `rke2-common`, `rke2-selinux` from `rpm.rancher.io`), and kubeadm/kubelet/containerd from `pkgs.k8s.io` and Docker's repo are RPMs.
 
-This covers the launcher only. RKE2 still extracts its runtime into `/var/lib/rancher/rke2/data` and the CNI still writes `/opt/cni/bin`, so you need A or B for those anyway. The installer-image method in `gpu-workloads/docs/33-rke2-install-from-image.md` forces the *tar* method (`INSTALL_RKE2_ARTIFACT_PATH`), so there the launcher is untrusted too — install `rke2-selinux` from the RPM repo first (for the SELinux policy) and use Method A.
+This covers the launcher only. RKE2 still extracts its runtime into `/var/lib/rancher/rke2/data` and the CNI still writes `/opt/cni/bin`, so you need A or B for those anyway. An install from the system-agent installer image forces the *tar* method (`INSTALL_RKE2_ARTIFACT_PATH`), so there the launcher is untrusted too — install `rke2-selinux` from the RPM repo first (for the SELinux policy) and use Method A.
 
 ## Method D — disable fapolicyd (documented deviation)
 
-`gpu-workloads/docs/09-hardening.md` masks fapolicyd on GPU nodes because DKMS rebuilds produce new kernel modules and CUDA produces fresh ELF binaries that would need re-trusting on every driver update. That is a legitimate, documented STIG deviation for that node class; it is *not* applied on the STIG evaluation hosts here, since the point of those is to see what a compliant node looks like to `khealth`.
+GPU nodes are often run with fapolicyd masked: DKMS rebuilds produce new kernel modules and CUDA produces fresh ELF binaries that would need re-trusting on every driver update. That is a legitimate STIG deviation when documented for that node class; it is *not* applied on the STIG evaluation hosts here, since the point of those is to see what a compliant node looks like to `khealth`.
 
 ## Checklist for a new node
 
 1. `rke2-selinux` / `container-selinux` from the RPM repo (SELinux policy — unrelated to fapolicyd but the same "install before first start" timing).
-2. Write `80-rke2.rules` (or the kubeadm subset), `fagenrules --load`, `systemctl restart fapolicyd`.
+2. Write `81-rke2-local.rules` (or the kubeadm subset), `fagenrules --load`, `systemctl restart fapolicyd`.
 3. Install the distribution (image export + `installer.sh`, or RPM, or kubeadm).
 4. Start it. If it does not come up, `ausearch -m fanotify -ts recent -i | grep -E 'exe=|resp='` before anything else.
 5. After upgrades with Method B: re-run `fapolicyd-cli --file add` and `--update`.

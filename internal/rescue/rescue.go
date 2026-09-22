@@ -624,14 +624,22 @@ func (p *Plan) addressWarnings() []string {
 			w = append(w, fmt.Sprintf("%s joins through server: %s, the old address of %s: after the rejoin nothing answers there. %s restarts from its saved server list while that lasts, but point server: at %s (or a VIP) once %s is back", n.Name, n.Facts.ServerURL, m.Name, p.Svc(), m.CurrentAddr(), m.Name))
 			continue
 		}
-		known := false
+		known := ""
 		for _, o := range all {
 			if (len(o.Facts.Addrs) > 0 && o.Facts.HasAddr(h)) || o.IP == h {
-				known = true
+				known = o.Name
 			}
 		}
-		if !known && net.ParseIP(h) != nil {
+		switch {
+		case known == "" && net.ParseIP(h) != nil:
 			w = append(w, fmt.Sprintf("%s joins through server: %s, which is no address of a server in this rescue (a VIP, or a server that is gone?)", n.Name, n.Facts.ServerURL))
+		case known != "":
+			// the rescue never rewrites server: (the join goes through a
+			// temporary drop-in that is removed again); say where the node
+			// will join from at its next restart, since a single server is
+			// a single point of failure and rke2 wants a fixed registration
+			// address there
+			w = append(w, fmt.Sprintf("%s keeps server: %s (%s) for its next restarts - the rescue joins it through a temporary drop-in and leaves the file alone; a VIP or DNS name in front of the servers is what rke2 recommends for server:", n.Name, n.Facts.ServerURL, known))
 		}
 	}
 	return w

@@ -9,7 +9,7 @@ Every DISA document is downloaded from the DoD Cyber Exchange (`https://dl.dod.c
 | Reference | Release used | Zip | Rules in repo |
 |---|---|---|---|
 | DISA Kubernetes STIG | V2R6, 01 Apr 2026 | `U_Kubernetes_V2R6_STIG.zip` | [internal/stig/kubernetes.go](../internal/stig/kubernetes.go) |
-| DISA Rancher Government RKE2 STIG | V2R7, 01 Jul 2026 | `U_RGS_RKE2_V2R7_STIG.zip` | [internal/stig/rke2.go](../internal/stig/rke2.go) |
+| DISA Rancher Government RKE2 STIG | V2R7, 01 Jul 2026 | `U_RGS_RKE2_V2R7_STIG.zip` | [internal/stig/rke2stig.go](../internal/stig/rke2stig.go) (all 21 rules, CNTR-R2-* ids), [rke2.go](../internal/stig/rke2.go) (RKE2-* prerequisites) |
 | DISA Rancher Government MCM STIG | V2R2, 05 Jan 2026 | `U_RGS_MCM_V2R2_STIG.zip` | [internal/stig/rancher.go](../internal/stig/rancher.go) |
 | CIS Kubernetes Benchmark | v2.0.1 (Jun 2026); numbering cross-checked with kube-bench `cfg/cis-2.0` | cisecurity.org | [internal/stig/cis.go](../internal/stig/cis.go) |
 | DISA RHEL 8 / 9 / 10 STIG | V2R8 / V2R9 / V1R2, 01 Jul 2026 | `U_RHEL_<n>_V…_STIG.zip` | generated: [internal/stigdata/data/rhel*.json.gz](../internal/stigdata/data) |
@@ -32,7 +32,8 @@ The Kubernetes, RKE2, MCM and CIS rules are hand-written Go. Their IDs were veri
 internal/stig/          rule engine, one file per reference
   stig.go               Benchmark table, Result/Status types, Evaluate(), perNode() helper
   kubernetes.go         DISA Kubernetes STIG (apiserver, controller-manager, scheduler, etcd, kubelet, node files, cluster)
-  rke2.go               DISA RKE2 STIG (profile: cis, config permissions) + RKE2-* hardening-guide prerequisites
+  rke2stig.go           DISA RKE2 STIG: every V2R7 rule as its own row - restated Kubernetes STIG checks alias the evaluated rule (same evidence, source named in the detail); the rke2-specific ones (TLS on all three components, audit-log-mode, disable:, PPSM ports, secrets as literal env, streaming timeout >= 5m, system namespaces, PSA file defaults, image versions) are evaluated here
+  rke2.go               RKE2-* hardening-guide prerequisites (profile: cis, etcd user, config permissions, SELinux)
   rancher.go            DISA Rancher MCM STIG (management cluster only)
   cis.go                CIS Kubernetes Benchmark recommendations not covered by a DISA ID
   os.go                 OS STIG driver: matches nodes to a table, applies overrides / templates / MANUAL

@@ -424,6 +424,19 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	if info.Dist == "" {
 		info.Dist = "unknown"
 	}
+	// the directories say what the node has been, the units say what it
+	// is: an rke2/k3s node runs exactly one of server and agent, so an
+	// active agent unit makes it a worker whatever a leftover server/ dir
+	// (a former server, a reinstall as agent) suggests. A server whose unit
+	// is down keeps its role - that is the case the rescue is for.
+	for _, agent := range []string{"rke2-agent", "k3s-agent"} {
+		server := strings.TrimSuffix(agent, "-agent")
+		if a := info.Service(agent); a != nil && a.Active == "active" {
+			if s := info.Service(server); s == nil || s.Active != "active" {
+				info.ControlPlane = false
+			}
+		}
+	}
 	for _, l := range nonEmpty(secs["CERTS"]) {
 		p, d, ok := strings.Cut(l, "|")
 		if !ok {

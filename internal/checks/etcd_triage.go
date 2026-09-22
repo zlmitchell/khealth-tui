@@ -147,11 +147,30 @@ func triageEtcd(in Input, add func(Finding)) map[string]bool {
 		if t.status != nil && len(t.status.Errors) > 0 && (!t.known || t.healthy) {
 			t.known, t.healthy, t.reason = true, false, strutil.FirstLine(t.status.Errors[0])
 		}
+		// an endpoint status the member answered (raft term, db size, no
+		// error) is proof it serves, even when no /health line matched its
+		// client URL (the exec probe asks 127.0.0.1, the member advertises
+		// its node address)
+		if !t.known && t.status != nil && len(t.status.Errors) == 0 && (t.status.RaftTerm > 0 || t.status.MemberID != "") {
+			t.known, t.healthy = true, true
+		}
 		recs = append(recs, t)
 	}
 
 	q := etcdQuorumOf(recs, members, statusByID)
-	if q.lost || (len(recs) > 0 && q.healthy == 0) {
+	// "lost" needs evidence: members known unhealthy, or fewer healthy than
+	// a majority. Members whose health nobody could read (no SSH, no exec)
+	// are unknown, not down - the apiserver answering says as much.
+	known := 0
+	for _, t := range recs {
+		if t.known {
+			known++
+		}
+	}
+	if known == 0 && !apiDown {
+		q.lost = false
+	}
+	if q.lost || (known > 0 && q.healthy == 0) {
 		add(triageClusterDown(in, recs, members, q))
 		for _, t := range recs { // the cluster finding speaks for every member
 			covered[t.node] = true
@@ -469,6 +488,23 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 			f.Steps = append(f.Steps, causeSteps...)
 		}
 		f.Steps = append(f.Steps, "systemctl restart "+svc+"; then watch etcdctl endpoint health --cluster until "+t.node+" reports healthy")
+		return f, true
+
+	// ---- recovered: the container restarted within the hour but the member
+	// serves now - worth a look at why, not an outage ----
+	case t.sshOK && containerDown && t.known && t.healthy && t.ready && t.pod != nil && t.pod.Status.Phase == corev1.PodRunning && podState != "CrashLoopBackOff":
+		f.Severity = SevWarn
+		ago := ""
+		if !lastRestart.IsZero() {
+			ago = ", last " + strutil.HumanDur(in.Now.Sub(lastRestart)) + " ago"
+		}
+		f.Message = fmt.Sprintf("etcd container restarted %d time(s) in the last hour%s, %s is healthy now", restarts, ago, memberTxt)
+		f.Hint = "crictl logs --previous on the etcd container shows what the last exit was"
+		f.Steps = []string{q.String(), "Read the previous container's log: " + strings.ReplaceAll(rt.logs, "<node>", t.node)}
+		if cause != "" {
+			f.Steps = append(f.Steps, "Journal points at: "+cause)
+		}
+		f.Steps = append(f.Steps, "Nothing to do while it stays up; the restart count resets with the next pod recreation")
 		return f, true
 
 	// ---- unit up, etcd container not running / crash-looping (static pod runtimes) ----

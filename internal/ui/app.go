@@ -72,6 +72,7 @@ const (
 	ovDetail
 	ovConfirm
 	ovScanPeek // esc on the running security scan: partial results?
+	ovExport   // e: which format(s) to write
 	ovRevisions
 	ovInspect
 	ovPodLogs
@@ -1523,7 +1524,7 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "P":
 		a.setDetail("Footprint: what khealth costs the cluster and this host", a.perfLines())
 	case "e":
-		a.exportReport()
+		a.exportPrompt()
 	case "tab", "]":
 		a.tab = (a.tab + 1) % tabCount
 		return a, a.onEnter()
@@ -1803,6 +1804,19 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.setStatus("showing partial results - the scan keeps running")
 		}
 		a.overlay = ovNone
+		return a, nil
+	case ovExport:
+		a.overlay = ovNone
+		switch key {
+		case "j", "J":
+			a.exportReport(true, false)
+		case "x", "X":
+			a.exportReport(false, true)
+		case "b", "B", "enter":
+			a.exportReport(true, true)
+		default:
+			a.setStatus("export canceled")
+		}
 		return a, nil
 	case ovInspect:
 		return a.handleInspectKey(key)
@@ -2368,9 +2382,26 @@ func (a *App) renderHeader() string {
 	parts = append(parts, kv("ns", styleBold.Render(ns)))
 	ssh := "off"
 	if a.sshEnabled {
-		ssh = fmt.Sprintf("%d/%d", len(a.nodes)-len(a.pending), len(a.nodes))
+		// reached/total: a probe that came back with an error (auth, host
+		// key, timeout) is not a reached node
+		total := len(a.nodes)
 		if len(a.pending) > 0 && a.snap != nil {
-			ssh = fmt.Sprintf("%d/%d", len(a.snap.Nodes)-len(a.pending), len(a.snap.Nodes))
+			total = len(a.snap.Nodes)
+		}
+		ok, failed := 0, 0
+		for _, ni := range a.nodes {
+			if ni == nil || a.pending[ni.Node] {
+				continue
+			}
+			if ni.Err == nil {
+				ok++
+			} else {
+				failed++
+			}
+		}
+		ssh = fmt.Sprintf("%d/%d", ok, total)
+		if failed > 0 {
+			ssh = styleWarn.Render(ssh)
 		}
 	} else if a.sshErr != "" {
 		ssh = styleWarn.Render("disabled")
@@ -2547,6 +2578,8 @@ func (a *App) renderFooter() string {
 		keys = []string{"esc close", "j/k scroll", "PgUp/PgDn page", "g/G top/bottom", "/ find", "n/N next/prev hit", "(tabs resume after esc)"}
 	case ovConfirm, ovRevisions:
 		keys = []string{"esc cancel", "enter confirm", "j/k choose", "(tabs resume after esc)"}
+	case ovExport:
+		keys = []string{"j json", "x xlsx", "b/enter both", "esc cancel"}
 	case ovNamespace:
 		keys = []string{"esc cancel", "enter select", "type filter", "↑/↓ choose"}
 	case ovContext:
@@ -2615,6 +2648,8 @@ func (a *App) renderOverlay() string {
 		}
 	case ovConfirm, ovRevisions:
 		title, lines = a.renderActionOverlay()
+	case ovExport:
+		title, lines = a.renderExportPrompt()
 	case ovScanPeek:
 		title = "Security scan still running"
 		pend := 0
@@ -2747,7 +2782,7 @@ func helpLines(width int) []string {
 		{key("R"), "full refresh: journal logs, images, tarballs, PV du (not the OS STIG)"},
 		{key("s"), "toggle SSH collection on/off"},
 		{key("P"), "footprint: what khealth itself costs the API server, the nodes (remote CPU per probe) and this host"},
-		{key("e"), "export the findings, the security scan (one sheet per benchmark) and the node hardening table as JSON + XLSX (--export-dir / export.dir, default: current directory)"},
+		{key("e"), "export the findings, the security scan (one sheet per benchmark) and the node hardening table: asks for JSON, XLSX or both (--export-dir / export.dir, default: current directory)"},
 		{key("?"), "this help"},
 		{key("q"), "quit (steps back first when inside an object/log view)"},
 	})

@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	storagev1 "k8s.io/api/storage/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/zlmitchell/khealth-tui/internal/distro"
 	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 )
@@ -19,6 +22,7 @@ func preflightInfo() *nodeinfo.Info {
 		KubeletFlags: map[string]string{}, Sysctl: map[string]string{"net.ipv4.ip_forward": "0", "fs.inotify.max_user_instances": "128"},
 		Settings:   map[string]string{"cni": "canal", "selinux": "true"},
 		Hardening:  map[string]string{},
+		Rancher:    nodeinfo.RancherNode{Provisioned: true},
 		Registries: []nodeinfo.ConfigFile{{Path: "/etc/rancher/rke2/registries.yaml", Content: "mirrors:\n  docker.io:\n    endpoint:\n      - \"https://harbor.corp:5000\"\nconfigs:\n  \"harbor.corp\":\n    auth:\n      username: <masked>\n      password: <masked>\n"}},
 	}
 	ni.Preflight = nodeinfo.Preflight{
@@ -45,7 +49,7 @@ func preflightInfo() *nodeinfo.Info {
 		Faillock: map[string]int{"rancher": 3, "root": 0}, FaillockDeny: 3,
 		Proxy:    []nodeinfo.ProxyLine{{File: "/etc/default/rke2-server", Key: "HTTP_PROXY", Value: "http://proxy:3128"}, {File: "/etc/default/rke2-server", Key: "NO_PROXY", Value: "127.0.0.0/8,10.42.0.0/16,10.43.0.0/16"}},
 		Iptables: "iptables v1.8.4 (nf_tables)",
-		SEPkgs:   []string{"package rke2-selinux is not installed", "container-selinux-2.229.0-1.el9.noarch"},
+		SEPkgs:   []string{"package rke2-selinux is not installed", "container-selinux-2.229.0-1.el9.noarch", "package rancher-selinux is not installed"},
 		RegFiles: []nodeinfo.RegFile{{Key: "harbor.corp:5000", Kind: "ca_file", Path: "/etc/rancher/rke2/ca.crt", Missing: true}},
 		RegProbes: []nodeinfo.RegProbe{
 			{Host: "harbor.corp:5000", URL: "https://harbor.corp:5000", Code: 401, TokenCode: 401, Auth: true},
@@ -98,6 +102,7 @@ func TestPreflightFindings(t *testing.T) {
 		{SevWarn, "node", "nm-cloud-setup is enabled"},
 		{SevWarn, "node", "host iptables v1.8.4"},
 		{SevCrit, "node", "SELinux is enforcing but the rke2-selinux/container-selinux"},
+		{SevCrit, "node", "SELinux is enforcing on a Rancher-provisioned node but rancher-selinux is not installed"},
 		{SevCrit, "node", "net.ipv4.ip_forward=0"},
 		{SevInfo, "node", "fs.inotify.max_user_instances=128"},
 		{SevCrit, "images", "registries.yaml configs harbor.corp:5000: ca_file /etc/rancher/rke2/ca.crt does not exist"},
@@ -330,5 +335,57 @@ func TestRegistryPullFindingsAndRows(t *testing.T) {
 	}
 	if !got {
 		t.Error("no crictl-missing finding")
+	}
+}
+
+// Host enforcing with the policy packages installed but no selinux: true:
+// rke2 is confined, the pods are not.
+func TestSELinuxPodsUnconfined(t *testing.T) {
+	ni := preflightInfo()
+	ni.Preflight.SEPkgs = []string{"rke2-selinux-0.19-1.el9.noarch", "container-selinux-2.229.0-1.el9.noarch", "rancher-selinux-0.5-1.el9.noarch"}
+	ni.Settings = map[string]string{"cni": "canal"}
+	in := baseInput()
+	in.Nodes["cp-1"] = ni
+	fs := Evaluate(in)
+	if f := findingWith(fs, SevWarn, "node", "has no selinux: true: containerd runs the pods unconfined"); f == nil {
+		t.Errorf("unconfined pods not reported")
+	}
+	for _, f := range fs {
+		if strings.Contains(f.Message, "policy packages are not installed") || strings.Contains(f.Message, "rancher-selinux is not installed") {
+			t.Errorf("packages reported missing: %s", f.Message)
+		}
+	}
+	// with selinux: true everything is in place: nothing about SELinux
+	ni.Settings["selinux"] = "true"
+	for _, f := range Evaluate(in) {
+		if strings.Contains(f.Message, "SELinux is enforcing") {
+			t.Errorf("unexpected: %s", f.Message)
+		}
+	}
+}
+
+// A leftover /var/lib/rook or /var/lib/trident on a node whose cluster runs
+// neither driver is not a fapolicyd finding; the driver registered on the
+// node (or installed in the cluster) is what makes the directory matter.
+func TestFapolicydCSIDirsOnlyForPresentDrivers(t *testing.T) {
+	ni := preflightInfo()
+	ni.Preflight.CSI.Drivers = []string{"driver.longhorn.io"}
+	ni.Preflight.CSI.HostDirs = []string{"/var/lib/longhorn/engine-binaries", "/var/lib/rook", "/var/lib/trident"}
+	in := baseInput()
+	in.Nodes["cp-1"] = ni
+	fs := Evaluate(in)
+	if findingWith(fs, SevCrit, "storage", "fapolicyd has no allow rule for /var/lib/longhorn/engine-binaries") == nil {
+		t.Error("longhorn dir (driver registered) not reported")
+	}
+	for _, d := range []string{"/var/lib/rook", "/var/lib/trident"} {
+		if f := findingWith(fs, SevCrit, "storage", "fapolicyd has no allow rule for "+d); f != nil {
+			t.Errorf("leftover %s reported without the driver: %s", d, f.Message)
+		}
+	}
+	// Trident installed in the cluster (CSIDriver object) but not registered
+	// on this node yet: the cluster-level presence counts
+	in.Snap.CSIDrivers = []storagev1.CSIDriver{{ObjectMeta: metav1.ObjectMeta{Name: "csi.trident.netapp.io"}}}
+	if findingWith(Evaluate(in), SevCrit, "storage", "fapolicyd has no allow rule for /var/lib/trident") == nil {
+		t.Error("trident dir not reported although the driver is installed")
 	}
 }

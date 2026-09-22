@@ -88,6 +88,7 @@ func Script(o Options) string {
 	}
 
 	var b strings.Builder
+	b.WriteString(AsYAMLShell)
 	base := strings.ReplaceAll(baseScript, "__CONFIG__", map[bool]string{true: "1", false: "0"}[o.Config])
 	base = strings.ReplaceAll(base, "__CPUSAMPLE__", map[bool]string{true: "1", false: "0"}[o.CPUSample])
 	base = strings.ReplaceAll(base, "__KPID__", fmt.Sprint(max(o.KubeletPID, 0)))
@@ -128,6 +129,14 @@ func Script(o Options) string {
 
 //go:embed scripts/base.sh
 var baseScript string
+
+// AsYAMLShell defines j2y / asyaml / isjson / jsonnote: the JSON-to-YAML
+// step for the files Rancher delivers as JSON (config.yaml.d/50-rancher.yaml,
+// registries.yaml). Every probe script that reads those files starts with
+// it (the node probe here, the etcd probe in package etcd).
+//
+//go:embed scripts/asyaml.sh
+var AsYAMLShell string
 
 // osStigScript collects the generic facts the OS STIG templates evaluate
 // (see internal/stigdata); the data-derived stat/find/dump sections are
