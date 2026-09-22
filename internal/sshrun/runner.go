@@ -405,6 +405,36 @@ func (r *Runner) bastionClient() (*ssh.Client, error) {
 	return r.bastion, nil
 }
 
+// explainDial turns the library's "unable to authenticate" into what was
+// tried: the user and the credentials (ssh.user defaults to the local
+// login, which is rarely the node's; a kubeconfig without a khealth hint
+// gives no better default), so the fix is in the message.
+func (r *Runner) explainDial(err error) error {
+	if !strings.Contains(err.Error(), "unable to authenticate") {
+		return err
+	}
+	user := r.cfg.User
+	prefix := ""
+	if strings.HasPrefix(err.Error(), "bastion:") {
+		// the jump host refused, possibly its own user
+		prefix = "bastion: "
+		if u, _, ok := strings.Cut(r.cfg.Bastion, "@"); ok {
+			user = u
+		}
+	}
+	var creds []string
+	for _, n := range r.notes {
+		if strings.HasPrefix(n, "key ") || n == "ssh-agent" || n == "password fallback" {
+			creds = append(creds, n)
+		}
+	}
+	tried := strings.Join(creds, ", ")
+	if tried == "" {
+		tried = "no key, no agent, no password"
+	}
+	return fmt.Errorf("%sssh: authentication refused for user %s (offered: %s): set --ssh-user / --ssh-key (or ssh.user / ssh.key in the config, --ask-pass for a password); khealth user@host remembers them per cluster", prefix, user, tried)
+}
+
 func (r *Runner) client(host string) (*ssh.Client, error) {
 	addr := r.addr(host)
 	r.mu.Lock()
@@ -480,7 +510,7 @@ func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
 	c, err := r.client(host)
 	res.HostKey = r.HostKey(host)
 	if err != nil {
-		res.Err = err
+		res.Err = r.explainDial(err)
 		res.Finished = time.Now()
 		return res
 	}
