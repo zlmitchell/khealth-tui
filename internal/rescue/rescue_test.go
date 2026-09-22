@@ -1,6 +1,7 @@
 package rescue
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"regexp"
@@ -42,6 +43,11 @@ type fakeNode struct {
 	dropIn                                             bool
 	initialCluster                                     string
 	preflightFail                                      bool
+	// an address change: the cluster recorded oldIP (peer URL, and node-ip
+	// pinned in config.yaml) while the node now holds ip only
+	oldIP      string
+	nodeIPFix  string // what fix_node_ip rewrote node-ip to
+	serverHost string // server: URL host in config.yaml (default 10.0.0.1)
 }
 
 func (c *fakeCluster) note(f string, a ...any) {
@@ -100,12 +106,18 @@ func (c *fakeCluster) handle(n *fakeNode) sshtest.Handler {
 				say("rescue_dir=/var/lib/rancher/rke2/server/etcd-rescue-x")
 				say("bin=/usr/local/bin/rke2")
 				if n.hasServer {
-					say("config: server: https://10.0.0.1:9345")
+					say("config: server: https://%s:9345", cmp.Or(n.serverHost, "10.0.0.1"))
 				} else {
 					say("config: cluster-init: true")
 				}
+				if n.oldIP != "" {
+					say("config: node-ip: %s", n.oldIP)
+					say("name=%s-abcd1234", n.name)
+					say("peer=https://%s:2380", n.oldIP)
+				}
 				say("etcd_user=998")
 			}
+			say("addrs=%s fd00::%s", n.ip, n.name)
 			role := "other"
 			if strings.Contains(stdin, `"target" = target`) {
 				role = "target"
@@ -164,12 +176,20 @@ func (c *fakeCluster) handle(n *fakeNode) sshtest.Handler {
 		case strings.Contains(stdin, `say "member_remove=ok"`):
 			peer := varOf(stdin, "PEER")
 			for name, o := range c.nodes {
-				if o.ip == peer {
+				if o.ip == peer || (o.oldIP != "" && o.oldIP == peer) {
 					c.members = remove(c.members, name)
 					c.note("%s member remove %s", n.name, name)
 				}
 			}
 			say("member_remove=ok")
+		case strings.Contains(stdin, `say "fix_node_ip=ok"`):
+			old, nw := varOf(stdin, "OLD"), varOf(stdin, "NEW")
+			if old != n.oldIP {
+				return "", "fix_node_ip for " + old + ", node pins " + n.oldIP, 1
+			}
+			n.nodeIPFix = nw
+			c.note("%s node-ip %s -> %s", n.name, old, nw)
+			say("fix_node_ip=ok")
 		case strings.Contains(stdin, `say "wiped=ok"`):
 			c.note("%s wipe again", n.name)
 			say("wiped=ok")
@@ -659,6 +679,90 @@ func TestRejoinOne(t *testing.T) {
 			t.Errorf("%s: notes %v", kind, p.Notes)
 		}
 		r.Close()
+	}
+}
+
+// A server that changed address: the cluster lists its member at the old
+// one, config.yaml pins node-ip to it, another server's server: points at
+// it. The rejoin removes the recorded entry, rewrites node-ip, waits on
+// the new address, and the confirmation says what stays wrong.
+func TestRejoinAfterAddressChange(t *testing.T) {
+	c := &fakeCluster{kind: RKE2, polls: map[string]int{}, nodes: map[string]*fakeNode{}}
+	c.nodes["cp-1"] = &fakeNode{name: "cp-1", ip: "10.0.0.191", oldIP: "10.0.0.143"}
+	c.nodes["cp-2"] = &fakeNode{name: "cp-2", ip: "10.0.0.2", hasServer: true, serverHost: "10.0.0.143", started: true, apiUp: true}
+	c.nodes["cp-3"] = &fakeNode{name: "cp-3", ip: "10.0.0.3", hasServer: true, serverHost: "10.0.0.143", started: true, apiUp: true}
+	c.members = []string{"cp-1", "cp-2", "cp-3"}
+	var first *sshtest.Server
+	hosts := map[string]string{}
+	for _, name := range []string{"cp-1", "cp-2", "cp-3"} {
+		srv := sshtest.New(t, c.handle(c.nodes[name]))
+		if first == nil {
+			first = srv
+		} else {
+			srv.AcceptKey(first.ClientPub)
+		}
+		hosts[name] = srv.Addr
+	}
+	t.Setenv("SSH_AUTH_SOCK", "")
+	r, err := sshrun.New(config.SSH{User: "root", Key: first.KeyPath, Timeout: 5 * time.Second, Concurrency: 4, Become: "auto", Sudo: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	// the UI passes the address the node object still carries: the old one
+	p := NewRejoin(RKE2, Node{Name: "cp-2", Host: hosts["cp-2"], IP: "10.0.0.2"}, Node{Name: "cp-1", Host: hosts["cp-1"], IP: "10.0.0.143"})
+	p.PollInterval = 10 * time.Millisecond
+	p.WaitTimeout = 5 * time.Second
+	if err := p.Preflight(context.Background(), r); err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	o := p.Others[0]
+	if o.StaleAddr() != "10.0.0.143" || o.CurrentAddr() != "10.0.0.191" || o.PeerHost() != "10.0.0.143" {
+		t.Errorf("addresses: stale %q current %q peer %q", o.StaleAddr(), o.CurrentAddr(), o.PeerHost())
+	}
+	warn := strings.Join(p.Warnings, "\n")
+	for _, w := range []string{
+		"cp-1 no longer holds 10.0.0.143 (it answers at 10.0.0.191): config.yaml pins node-ip: 10.0.0.143",
+		"the rejoin rewrites it to 10.0.0.191",
+		"cp-2 joins through server: https://10.0.0.143:9345, the old address of cp-1",
+	} {
+		if !strings.Contains(warn, w) {
+			t.Errorf("missing warning %q in:\n%s", w, warn)
+		}
+	}
+	var titles []string
+	for _, st := range p.Steps() {
+		titles = append(titles, st.Node+": "+st.Title)
+	}
+	joined := strings.Join(titles, "|")
+	for _, w := range []string{"cp-2: Remove the stale member entry for cp-1 (10.0.0.143)", "cp-1: Rewrite node-ip 10.0.0.143 -> 10.0.0.191 in config.yaml"} {
+		if !strings.Contains(joined, w) {
+			t.Errorf("missing %q in %v", w, titles)
+		}
+	}
+	last, _ := run(t, p)
+	if last.Err != nil {
+		t.Fatalf("rejoin failed: %v\n%s", last.Err, strings.Join(c.log, "\n"))
+	}
+	if c.nodes["cp-1"].nodeIPFix != "10.0.0.191" {
+		t.Errorf("node-ip rewritten to %q", c.nodes["cp-1"].nodeIPFix)
+	}
+	if got := strings.Join(c.members, ","); got != "cp-2,cp-3,cp-1" {
+		t.Errorf("members %s (the recorded entry at 10.0.0.143 must be the one removed)", got)
+	}
+	// the node is fine where it is: no address warnings, no rewrite step
+	c.nodes["cp-1"].oldIP = ""
+	p2 := NewRejoin(RKE2, Node{Name: "cp-2", Host: hosts["cp-2"], IP: "10.0.0.2"}, Node{Name: "cp-1", Host: hosts["cp-1"], IP: "10.0.0.191"})
+	if err := p2.Preflight(context.Background(), r); err != nil {
+		t.Fatalf("preflight 2: %v", err)
+	}
+	if w := strings.Join(p2.Warnings, "\n"); strings.Contains(w, "no longer holds") || strings.Contains(w, "old address") {
+		t.Errorf("warnings without an address change:\n%s", w)
+	}
+	for _, st := range p2.Steps() {
+		if strings.Contains(st.Title, "Rewrite node-ip") {
+			t.Error("node-ip rewrite without an address change")
+		}
 	}
 }
 

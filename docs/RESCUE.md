@@ -97,9 +97,12 @@ N = the broken server, A = the healthy member it joins through (the live leader 
 |---|---|---|---|---|
 | 1 | N | Stop | `stop.sh` | |
 | 2 | N | Move etcd data | `backup.sh` | |
-| 3 | A | Remove the stale member entry for N (rke2/k3s) | `member_remove.sh`: `etcdctl member remove` of every member whose peer URL is N's address - rke2 refuses a join while a member of that name exists ("duplicate node name found") | |
-| 4.. | | the rejoin steps of the restore (rke2/k3s 9-12, kubeadm 9-14) with A as T | | member count back to what A saw before |
+| 3 | A | Remove the stale member entry for N (rke2/k3s) | `member_remove.sh`: `etcdctl member remove` of every member whose peer URL is the address N is *recorded* at (`initial-advertise-peer-urls` in its etcd config on disk, else its node address) - rke2 refuses a join while a member of that name exists ("duplicate node name found") | |
+| 3b | N | Rewrite node-ip (only when config.yaml pins an address N no longer holds) | `fix_node_ip.sh`: `node-ip: <old>` becomes N's current address in place, a `.khealth-<stamp>` copy is kept; a Rancher-delivered `50-rancher.yaml` is rewritten too, with a note that the next plan puts it back | |
+| 4.. | | the rejoin steps of the restore (rke2/k3s 9-12, kubeadm 9-14) with A as T; the "healthy member" wait looks for N at its current address | | member count back to what A saw before |
 | last | A | Verify the cluster | `status.sh` | all healthy, one leader, apiserver up |
+
+**A server that changed address** (DHCP, re-IP): the cluster still lists its member at the old address, `config.yaml` may pin `node-ip:` to it (every listener rke2 renders binds to node-ip, so etcd dies with `bind: cannot assign requested address` and the kubelet keeps reporting the old InternalIP), and the other servers' `server:` may still point there. The preflight reads the addresses the node holds, the pinned `node-ip`, the recorded peer URL and every server's `server:`, and the confirmation says which of these is stale and what the rejoin does about it: the recorded entry is the one removed (step 3), `node-ip` is rewritten (3b), and a `server:` pointing at the old address is called out - rke2 restarts from its saved server list while that lasts, but point `server:` at a VIP or the new address afterwards. The Overview shows the same as findings (`config.yaml pins node-ip ...`, `server: ... points at the old address of ...`) without a rescue. khealth dials the node at the address the node object carries, which is the old one: put the new address under `ssh.hosts` (`ssh.hosts: {<node>: <address>}`) so the node can be chosen. Keeping the member's data instead (`etcdctl member update <id> --peer-urls=https://<new>:2380` on a healthy member, fix `node-ip`, restart) is the lighter route when the data is intact; the rejoin is the one khealth automates.
 
 ## What is left behind
 
@@ -120,6 +123,7 @@ N = the broken server, A = the healthy member it joins through (the live leader 
 - calico-node on the restored node drops the local pod routes while the apiserver comes up ("no route to host" from every pod there).
 - With a member down, `etcdctl endpoint health/status --cluster -w json` prints the JSON array and then `Error: unhealthy cluster` on the same stream; the parser trims to the array.
 - rke2 refuses a rejoin while the stale member of the same name exists.
+- A server that changed address keeps `node-ip:` pinned to the old one (every rke2 listener binds to it) and stays registered at it; the node object's InternalIP follows the kubelet, so it stays old too. Nothing in the API says where the node went - only the node itself does.
 
 ## Tested
 

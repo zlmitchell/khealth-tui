@@ -150,6 +150,10 @@ sec SVC
 echo "$UNITS_OUT" | awk -F'|' '$1=="kubelet"||$1=="containerd"||$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="etcd"||$1=="docker"||$1=="crio"||$1=="rancher-system-agent"||$1=="chronyd"||$1=="chrony"||$1=="ntpd"||$1=="ntp"||$1=="systemd-timesyncd"||$1=="firewalld"||$1=="ufw"||$1=="nftables"||$1=="iptables"||$1=="apparmor"{print $1, $2, $3, $4}'
 sec UNITS
 echo "$UNITS_OUT" | awk -F'|' '$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="kubelet"||$1=="containerd"||$1=="rancher-system-agent"||$1=="etcd"||$1=="cloud-init-local"||$1=="cloud-init"||$1=="cloud-config"||$1=="cloud-final"{print $1"|"$3"|"$4"|"$5"|"$6"|"$7"|"}'
+sec ADDRS
+# the global-scope addresses the node holds: against node-ip in config.yaml,
+# the etcd peer URL the cluster recorded and other servers' server: URL
+{ ip -o -4 addr show scope global 2>/dev/null; ip -o -6 addr show scope global 2>/dev/null; } | awk '{print $4}' | cut -d/ -f1
 sec NETLINK
 # every interface: name, mtu, oper state, flags - the overlay (flannel.1,
 # vxlan.calico, cilium_vxlan, flannel-wg, tunl0, cni0) vs the underlay MTU

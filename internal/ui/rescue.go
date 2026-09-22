@@ -467,7 +467,9 @@ func (a *App) handleRescueKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			o := r.nodes[r.nodeCur]
 			if !o.online {
-				a.setStatus(o.node.Name + " is " + o.state + ": khealth has to reach it over SSH")
+				// the node is dialed at the address the node object carries,
+				// which a node that changed address still reports as the old one
+				a.setStatus(o.node.Name + " is " + o.state + ": khealth has to reach it over SSH (it dials " + o.node.Host + "; if the node moved, name its address under ssh.hosts - ssh.hosts: {" + o.node.Name + ": <new address>} - and restart)")
 				return a, nil
 			}
 			if r.rejoin {

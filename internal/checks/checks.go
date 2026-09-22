@@ -222,6 +222,7 @@ func Evaluate(in Input) []Finding {
 			add(SevWarn, "node", name, "SSH host key is shared with "+strings.Join(others, ", ")+" (cloned image not re-keyed)", "rm /etc/ssh/ssh_host_*; ssh-keygen -A; restart sshd; ssh-keygen -R <addr> on clients; check /etc/machine-id is unique too")
 		}
 	}
+	evalAddresses(in, add) // node-ip pinned to a gone address, server: pointing at one (address.go)
 	for name, ni := range in.Nodes {
 		if ni == nil {
 			continue

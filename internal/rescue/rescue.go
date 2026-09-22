@@ -23,6 +23,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -86,12 +87,16 @@ type Facts struct {
 	Rescue   string // where the data goes
 	Config   []string
 	// rke2 / k3s
-	HasServer   bool // config.yaml has server: (join URL)
+	HasServer   bool   // config.yaml has server: (join URL)
+	ServerURL   string // that server: value
+	NodeIP      string // config.yaml node-ip: (every listener rke2 renders binds to it)
 	ClusterInit bool
-	Profile     string
-	S3          bool
-	S3Secret    string
-	EtcdUser    bool
+	// every kind
+	Addrs    []string // global-scope addresses the node holds right now
+	Profile  string
+	S3       bool
+	S3Secret string
+	EtcdUser bool
 	// kubeadm
 	Manifest       string
 	APIEndpoint    string // server: of admin.conf (the controlPlaneEndpoint, or this node)
@@ -104,6 +109,61 @@ type Facts struct {
 	Snapshot     string
 	SnapshotSize int64
 	SnapshotTime time.Time
+}
+
+// HasAddr reports whether the node holds the address (unknown when
+// preflight reported none: then true, so nothing is second-guessed).
+func (f Facts) HasAddr(ip string) bool {
+	if len(f.Addrs) == 0 || ip == "" {
+		return true
+	}
+	for _, a := range f.Addrs {
+		if a == ip {
+			return true
+		}
+	}
+	return false
+}
+
+// PeerHost is the address the cluster lists this member at: the peer URL
+// recorded on disk, else the address peers were told to use.
+func (n Node) PeerHost() string {
+	if h := strutil.URLHost(n.Facts.PeerURL); h != "" {
+		return h
+	}
+	return n.IP
+}
+
+// StaleAddr is the address the node was known by but no longer holds: a
+// pinned node-ip, the recorded peer URL or the address the node object
+// carries, whichever is not on any interface. "" when the node still
+// answers where the cluster expects it.
+func (n Node) StaleAddr() string {
+	for _, ip := range []string{n.Facts.NodeIP, strutil.URLHost(n.Facts.PeerURL), n.IP} {
+		if ip != "" && !n.Facts.HasAddr(ip) {
+			return ip
+		}
+	}
+	return ""
+}
+
+// CurrentAddr is the address peers can reach the node at now: the SSH
+// address when the node holds it, else the address it was known by when it
+// still holds that, else the first address preflight saw.
+func (n Node) CurrentAddr() string {
+	h, _, err := net.SplitHostPort(n.Host)
+	if err != nil {
+		h = n.Host
+	}
+	for _, ip := range []string{h, n.IP, strutil.URLHost(n.Facts.PeerURL)} {
+		if ip != "" && net.ParseIP(ip) != nil && len(n.Facts.Addrs) > 0 && n.Facts.HasAddr(ip) {
+			return ip
+		}
+	}
+	if len(n.Facts.Addrs) > 0 {
+		return n.Facts.Addrs[0]
+	}
+	return n.IP
 }
 
 // State of a step.
@@ -239,7 +299,7 @@ func (p *Plan) render(name string, n Node, vars map[string]string) string {
 	all := map[string]string{
 		"KIND": string(p.Kind), "DD": p.DD, "DATADIR": p.dataDir(n), "STAMP": p.Stamp, "RESCUE": n.Facts.Rescue, "IP": n.IP,
 		"ROLE": "other", "SNAP": "", "S3": "0", "API": "0", "PROMOTE": "0", "JOIN": "", "OWNER": "",
-		"NAME": "", "PEER": "", "IMAGE": "", "INITIAL_CLUSTER": "", "LOG": "", "EXIT": "", "DIR": "", "FORCE": "0", "SINCE": "0", "NODE": "",
+		"NAME": "", "PEER": "", "IMAGE": "", "INITIAL_CLUSTER": "", "LOG": "", "EXIT": "", "DIR": "", "FORCE": "0", "SINCE": "0", "NODE": "", "OLD": "", "NEW": "",
 	}
 	for k, v := range vars {
 		all[k] = v
@@ -327,6 +387,7 @@ func (p *Plan) Preflight(ctx context.Context, r Runner) error {
 		}
 		p.members = st.Members
 		p.Warnings = append(p.Warnings, fmt.Sprintf("%s sees %d members, %d healthy, leader %s; %s rejoins through it and keeps that data (nothing is restored)", p.Target.Name, st.Members, st.Healthy, st.Leader, p.Others[0].Name))
+		p.Warnings = append(p.Warnings, p.addressWarnings()...)
 		p.build()
 		return nil
 	}
@@ -393,6 +454,9 @@ func parseFacts(out string) Facts {
 			switch strings.TrimSpace(k) {
 			case "server":
 				f.HasServer = v != ""
+				f.ServerURL = v
+			case "node-ip":
+				f.NodeIP = v
 			case "cluster-init":
 				f.ClusterInit = v == "true"
 			case "profile":
@@ -432,6 +496,8 @@ func parseFacts(out string) Facts {
 			f.Rescue = v
 		case "etcd_user":
 			f.EtcdUser = v != "none" && v != ""
+		case "addrs":
+			f.Addrs = strings.Fields(v)
 		case "manifest":
 			f.Manifest = v
 		case "api_endpoint":
@@ -513,6 +579,61 @@ func (p *Plan) assess() []string {
 	if len(p.Others) == 0 && len(p.Skipped) == 0 {
 		w = append(w, "single-server cluster: the restore reboots the only control plane")
 	}
+	w = append(w, p.addressWarnings()...)
+	return w
+}
+
+// addressWarnings covers a node that changed address: the cluster still
+// lists it, and other servers' server: may still point, at the old one.
+func (p *Plan) addressWarnings() []string {
+	var w []string
+	all := append([]Node{p.Target}, p.Others...)
+	moved := map[string]Node{} // old address -> node
+	for _, n := range all {
+		old := n.StaleAddr()
+		if old == "" {
+			continue
+		}
+		cur := n.CurrentAddr()
+		moved[old] = n
+		msg := fmt.Sprintf("%s no longer holds %s (it answers at %s)", n.Name, old, cur)
+		rejoining := p.Rejoin && len(p.Others) > 0 && n.Name == p.Others[0].Name
+		switch {
+		case n.Facts.NodeIP == old:
+			msg += ": config.yaml pins node-ip: " + old + ", so etcd and the kubelet try to bind an address that is gone"
+			if rejoining {
+				msg += " - the rejoin rewrites it to " + cur + " (a copy of the file is kept)"
+			} else {
+				msg += " - fix node-ip before starting " + p.Svc() + " there"
+			}
+		case strutil.URLHost(n.Facts.PeerURL) == old:
+			msg += ": the cluster lists its member at " + old
+			if rejoining {
+				msg += " - that entry is the one the rejoin removes"
+			}
+		}
+		w = append(w, msg)
+	}
+	// every server's server: URL against the addresses still held
+	for _, n := range all {
+		h := strutil.URLHost(n.Facts.ServerURL)
+		if h == "" {
+			continue
+		}
+		if m, ok := moved[h]; ok {
+			w = append(w, fmt.Sprintf("%s joins through server: %s, the old address of %s: after the rejoin nothing answers there. %s restarts from its saved server list while that lasts, but point server: at %s (or a VIP) once %s is back", n.Name, n.Facts.ServerURL, m.Name, p.Svc(), m.CurrentAddr(), m.Name))
+			continue
+		}
+		known := false
+		for _, o := range all {
+			if (len(o.Facts.Addrs) > 0 && o.Facts.HasAddr(h)) || o.IP == h {
+				known = true
+			}
+		}
+		if !known && net.ParseIP(h) != nil {
+			w = append(w, fmt.Sprintf("%s joins through server: %s, which is no address of a server in this rescue (a VIP, or a server that is gone?)", n.Name, n.Facts.ServerURL))
+		}
+	}
 	return w
 }
 
@@ -539,12 +660,22 @@ func (p *Plan) build() {
 		})
 		// the stale member entry for this node has to go first: rke2 refuses
 		// a join while a member of that name exists (kubeadm: member_add.sh
-		// removes it itself), so the count ends where it started
+		// removes it itself), so the count ends where it started. The entry
+		// is the one at the address the cluster recorded, which after an
+		// address change is not the address the node answers at now.
 		if p.Kind == RKE2 || p.Kind == K3s {
-			p.add("Remove the stale member entry for "+o.Name, p.Target, func(ctx context.Context, s *Step) error {
-				_, err := p.exec(ctx, s, p.Target, "member_remove", map[string]string{"PEER": o.IP}, 2*time.Minute, "member_remove=ok")
+			peer := o.PeerHost()
+			p.add("Remove the stale member entry for "+o.Name+" ("+peer+")", p.Target, func(ctx context.Context, s *Step) error {
+				_, err := p.exec(ctx, s, p.Target, "member_remove", map[string]string{"PEER": peer}, 2*time.Minute, "member_remove=ok")
 				return err
 			})
+			if old := o.StaleAddr(); old != "" && o.Facts.NodeIP == old {
+				cur := o.CurrentAddr()
+				p.add("Rewrite node-ip "+old+" -> "+cur+" in config.yaml", o, func(ctx context.Context, s *Step) error {
+					_, err := p.exec(ctx, s, o, "fix_node_ip", map[string]string{"OLD": old, "NEW": cur}, time.Minute, "fix_node_ip=ok")
+					return err
+				})
+			}
 		}
 		p.rejoinSteps(p.Target, o, p.members, p.members)
 		p.add("Verify the cluster", p.Target, func(ctx context.Context, s *Step) error {
@@ -644,7 +775,7 @@ func (p *Plan) rejoinSteps(t, o Node, want, total int) {
 			return err
 		})
 		p.add(fmt.Sprintf("Wait until %s is a healthy member (%d/%d)", o.Name, want, total), t, func(ctx context.Context, s *Step) error {
-			return p.waitStatus(ctx, s, t, want, false, false, o.IP)
+			return p.waitStatus(ctx, s, t, want, false, false, o.CurrentAddr())
 		})
 		p.add("Remove the join drop-in", o, func(ctx context.Context, s *Step) error {
 			_, err := p.exec(ctx, s, o, "join_cleanup", nil, time.Minute, "cleanup=ok")

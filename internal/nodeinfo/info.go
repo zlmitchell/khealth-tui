@@ -2,6 +2,7 @@ package nodeinfo
 
 import (
 	"encoding/json"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ type Info struct {
 	ScriptSize int // script size sent
 
 	Hostname, Kernel, Arch string
+	Addrs                  []string // global-scope IPs the node holds (ADDRS section)
 	Uptime                 time.Duration
 	Load1, Load5, Load15   float64
 	CPUs                   int
@@ -553,6 +555,7 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 	for _, cf := range ParseDumps(secs["CNI"]) {
 		info.CNI = append(info.CNI, parseCNI(cf))
 	}
+	info.Addrs = nonEmpty(secs["ADDRS"])
 	parseNetwork(info, secs)
 	info.Registries = ParseDumps(secs["REGISTRIES"])
 	info.RegistryMirrors = parseRegistryMirrors(info.Registries)
@@ -811,6 +814,33 @@ func (i *Info) Service(name string) *Service {
 		}
 	}
 	return nil
+}
+
+// HasAddr reports whether the node holds the address; true when the probe
+// did not list addresses (older output), so nothing is second-guessed.
+func (i *Info) HasAddr(ip string) bool {
+	if len(i.Addrs) == 0 {
+		return true
+	}
+	for _, a := range i.Addrs {
+		if a == ip {
+			return true
+		}
+	}
+	return false
+}
+
+// FirstAddr is the node's first IPv4 address, else its first address.
+func FirstAddr(i *Info) string {
+	for _, a := range i.Addrs {
+		if ip := net.ParseIP(a); ip != nil && ip.To4() != nil {
+			return a
+		}
+	}
+	if len(i.Addrs) > 0 {
+		return i.Addrs[0]
+	}
+	return ""
 }
 
 // SupervisorUnit names the unit that carries the kubelet on this node:

@@ -24,6 +24,9 @@ if [ "$MP" = yes ]; then
   RESCUE=$DATADIR/rescue-$STAMP
 fi
 say "rescue_dir=$RESCUE"
+# the addresses this node holds right now (global scope): what peers can
+# reach, against the node-ip config.yaml pins and the peer URL etcd recorded
+say "addrs=$( { ip -o -4 addr show scope global 2>/dev/null; ip -o -6 addr show scope global 2>/dev/null; } | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ')"
 say "avail_kb=$(df -Pk "$(dirname "$DATADIR")" 2>/dev/null | tail -1 | awk '{print $4}')"
 say "etcd_container=$(etcd_cid)"
 case "$KIND" in
@@ -32,11 +35,22 @@ case "$KIND" in
     say "bin=$BIN"
     [ -f "$DD/server/db/reset-flag" ] && die "$DD/server/db/reset-flag exists: a previous cluster-reset was not followed by a normal start of $SVC (start it once, or remove the flag)"
     [ -d "$DD/server" ] || die "$DD/server missing: not a server node"
-    # join URL and cluster-init decide how this node comes back (values only; tokens never printed)
+    # join URL, cluster-init and node-ip decide how this node comes back
+    # (values only; tokens never printed). Rancher-provisioned nodes keep
+    # config.yaml.d/50-rancher.yaml as JSON: its pairs are read too.
     for f in $CONFDIR/config.yaml $CONFDIR/config.yaml.d/*.yaml; do
       [ -f "$f" ] || continue
-      grep -E '^[[:space:]]*(server|cluster-init|profile|etcd-s3|etcd-s3-config-secret|data-dir)[[:space:]]*:' "$f" 2>/dev/null | sed -E 's/^[[:space:]]*//' | sed "s|^|config: |"
+      if head -c 64 "$f" 2>/dev/null | grep -q '^[[:space:]]*{'; then
+        tr ',' '\n' < "$f" | grep -oE '"(server|cluster-init|profile|etcd-s3|etcd-s3-config-secret|data-dir|node-ip)"[[:space:]]*:[[:space:]]*"?[^"}]*' | sed -E 's/"//g; s/[[:space:]]*:[[:space:]]*/: /' | sed "s|^|config: |"
+      else
+        grep -E '^[[:space:]]*(server|cluster-init|profile|etcd-s3|etcd-s3-config-secret|data-dir|node-ip)[[:space:]]*:' "$f" 2>/dev/null | sed -E 's/^[[:space:]]*//' | sed "s|^|config: |"
+      fi
     done
+    # the member identity on disk: rke2/k3s write the etcd name and the
+    # peer URL it registered with; after an address change the peer URL is
+    # the stale one the cluster still lists
+    [ -f "$DD/server/db/etcd/name" ] && say "name=$(cat "$DD/server/db/etcd/name" 2>/dev/null)"
+    [ -f "$DD/server/db/etcd/config" ] && say "peer=$(grep -m1 -E '^initial-advertise-peer-urls:' "$DD/server/db/etcd/config" 2>/dev/null | awk '{print $2}')"
     say "etcd_user=$(id -u etcd 2>/dev/null || echo none)"
     ;;
   *)
