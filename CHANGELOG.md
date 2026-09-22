@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/zlmitchell/khealth-tui/compare/v1.0.5...v1.1.0) (2026-09-22)
+
+
+### Features
+
+* etcd rescue expansion, Rancher downstream fixes, RKE2 STIG in full ([#1](https://github.com/zlmitchell/khealth-tui/issues/1)) ([3d311cf](https://github.com/zlmitchell/khealth-tui/commit/3d311cf846fc065b2b4bfb8e88175685a50b0b6d))
+
 ## [1.0.5](https://github.com/zlmitchell/khealth-tui/compare/v1.0.4...v1.0.5) (2026-09-22)
 
 
