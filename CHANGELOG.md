@@ -1,3 +1,10 @@
+## [1.0.3](https://github.com/zlmitchell/khealth-tui/compare/v1.0.2...v1.0.3) (2026-09-22)
+
+
+### Bug Fixes
+
+* unwrap the driver union in the TridentBackend config ([97c68f7](https://github.com/zlmitchell/khealth-tui/commit/97c68f7dbd66c289df1906721e9736b6de0e65e9))
+
 ## [1.0.2](https://github.com/zlmitchell/khealth-tui/compare/v1.0.1...v1.0.2) (2026-09-22)
 
 
