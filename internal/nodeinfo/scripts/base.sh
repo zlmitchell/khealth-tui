@@ -89,6 +89,8 @@ cfgtop() { cfgall | sed -nE "s/^$1:[[:space:]]*\"?(\/[^\"#[:space:]]+).*/\1/p" |
 KUBELET_CFG=$(cfgarg kubelet-arg config)
 PSA_CFG=$(cfgarg kube-apiserver-arg admission-control-config-file); [ -n "$PSA_CFG" ] || PSA_CFG=$(cfgtop pod-security-admission-config-file)
 AUDIT_POLICY=$(cfgarg kube-apiserver-arg audit-policy-file); [ -n "$AUDIT_POLICY" ] || AUDIT_POLICY=$(cfgtop audit-policy-file)
+# Rancher's local cluster auth endpoint (ACE) webhook kubeconfig; no secrets in it
+AUTHN_WEBHOOK=$(cfgarg kube-apiserver-arg authentication-token-webhook-config-file)
 # secrets in YAML lines (quoted keys included) and, should JSON ever reach
 # it unconverted, in "key":"value" pairs anywhere on the line
 mask() { sed -E 's/^([[:space:]]*"?(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)"?[[:space:]]*:).*/\1 <masked>/; s/"(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/"\1":"<masked>"/g' "$1"; }
@@ -255,10 +257,13 @@ for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml /e
   asyaml "$f" | grep -vE '^[[:space:]]*#' | mask /dev/stdin
 done
 sec RKE2EXTRA
-# the admission (PSA) config and audit policy config.yaml points at, then
-# the files rke2/k3s create for profile: cis; each once
+# the admission (PSA) config, audit policy and authn webhook config.yaml
+# points at, then the files rke2/k3s create for profile: cis; each once.
+# Rancher delivers cloud-provider-config (vCenter credentials) and
+# flannel-conf under <data-dir>/etc/config-files too: listed below, never
+# dumped
 DUMPED=" "
-for f in "${PSA_CFG:-/dev/null/none}" "${AUDIT_POLICY:-/dev/null/none}" /etc/rancher/rke2/audit-policy.yaml /etc/rancher/rke2/rke2-pss.yaml /etc/rancher/rke2/psa.yaml /etc/rancher/rke2/rke2-cis-sysctl.conf /etc/rancher/rke2/rke2-cis.yaml /etc/rancher/k3s/audit-policy.yaml /etc/rancher/k3s/psa.yaml; do
+for f in "${PSA_CFG:-/dev/null/none}" "${AUDIT_POLICY:-/dev/null/none}" "${AUTHN_WEBHOOK:-/dev/null/none}" /etc/rancher/rke2/audit-policy.yaml /etc/rancher/rke2/rke2-pss.yaml /etc/rancher/rke2/psa.yaml /etc/rancher/rke2/rke2-cis-sysctl.conf /etc/rancher/rke2/rke2-cis.yaml /etc/rancher/k3s/audit-policy.yaml /etc/rancher/k3s/psa.yaml; do
   [ -f "$f" ] || continue
   case "$DUMPED" in *" $f "*) continue;; esac
   DUMPED="$DUMPED$f "
@@ -266,7 +271,7 @@ for f in "${PSA_CFG:-/dev/null/none}" "${AUDIT_POLICY:-/dev/null/none}" /etc/ran
   jsonnote "$f"
   asyaml "$f" | head -c 16384 | mask /dev/stdin
 done
-for d in /etc/rancher/rke2 /etc/rancher/k3s /etc/rancher/agent /etc/rancher/node; do
+for d in /etc/rancher/rke2 /etc/rancher/rke2/config.yaml.d /etc/rancher/k3s /etc/rancher/k3s/config.yaml.d /etc/rancher/agent /etc/rancher/node "$RKE2_DD/etc/config-files" "$K3S_DD/etc/config-files"; do
   [ -d "$d" ] || continue
   echo "--- listing $d"
   ls -la "$d" 2>/dev/null | tail -n +2
