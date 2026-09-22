@@ -55,6 +55,27 @@ systemctl restart fapolicyd
 
 **Why `81-rke2-local.rules` and not `80-rke2.rules`:** RKE2's own `install.sh` (`setup_fapolicy_rules`) writes `/etc/fapolicyd/rules.d/80-rke2.rules` itself on every run on a RHEL-family host with fapolicyd active — exactly four lines (`/var/lib/rancher/`, `/opt/cni/`, `/run/k3s/`, `/var/lib/kubelet/`), overwriting whatever was there. On a Rancher-provisioned node that installer runs again from the `system-agent-installer-rke2` image on **every plan apply** (any cluster-spec edit), with `INSTALL_RKE2_SKIP_RELOAD` set, so the file changes and `compiled.rules` goes stale until the next `fagenrules --load`. Observed 2026-09-21 on the `baremetal-a` lab node: the hardening's `/usr/local/bin/` and `/opt/rke2/` allows vanished after the first config change (root could still execute `/usr/local/bin/rke2`, an unprivileged user could not). Keep the additions in a file the installer does not own; treat `80-rke2.rules` as RKE2's.
 
+For reference, the file RKE2's installer writes (`80-rke2.rules`, verbatim from an rke2 v1.35 node):
+
+```
+allow perm=any all : dir=/var/lib/rancher/
+allow perm=any all : dir=/opt/cni/
+allow perm=any all : dir=/run/k3s/
+allow perm=any all : dir=/var/lib/kubelet/
+```
+
+Storage drivers that execute host binaries need their own file, again sorted before the deny (khealth's *fapolicyd has no allow rule for `<dir>`* finding names the directory when the driver is present on the node):
+
+```sh
+cat >/etc/fapolicyd/rules.d/81-csi.rules <<'EOF'
+allow perm=any all : dir=/var/lib/longhorn/      # Longhorn: engine binaries the instance-manager runs from the host
+# allow perm=any all : dir=/var/lib/trident/     # NetApp Trident node plugin
+# allow perm=any all : dir=/var/lib/rook/        # Rook/Ceph
+# allow perm=any all : dir=/opt/pwx/             # Portworx
+EOF
+fagenrules --load && systemctl restart fapolicyd
+```
+
 For upstream kubeadm nodes drop the rke2/rancher lines and keep `/opt/cni/`, `/var/lib/kubelet/` and (if you install Helm or kubectl plugins there) `/usr/local/bin/`.
 
 Pros: survives upgrades (new `data/<sha>` directories are covered), one-time. Cons: it is a path allow-list — anyone who can write to `/var/lib/rancher` or `/usr/local/bin` as root can execute there, which is what fapolicyd was meant to stop. Those paths are root-owned 0755 or stricter, so the trust boundary is unchanged for non-root, and root already gets `allow perm=any uid=0 trust=1 : all`. Document it as a deviation from the letter of the rule.
