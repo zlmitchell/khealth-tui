@@ -7,7 +7,7 @@ The RHEL 9 STIG (V-258019 / `service_fapolicyd_enabled`) requires `fapolicyd` ru
 1. the file is owned by an installed RPM (the rpmdb is a trust source), or
 2. its path + size + SHA-256 is listed in `/etc/fapolicyd/trust.d/*` or `/etc/fapolicyd/fapolicyd.trust`.
 
-Everything a Kubernetes distribution downloads, extracts or generates at runtime is neither, so it is denied — silently unless you know where to look. This doc lists what breaks per install method and the existing ways to fix it. The hardened hosts (scripts now in the gpu-workloads repo, `hardening/rhel9/`) use method A.
+Everything a Kubernetes distribution downloads, extracts or generates at runtime is neither, so it is denied — silently unless you know where to look. This doc lists what breaks per install method and the existing ways to fix it. Method A is what the STIG-hardened lab hosts use.
 
 ## What is and is not mediated
 
@@ -33,7 +33,7 @@ type=FANOTIFY msg=audit(...): resp=2   # 2 = deny
 
 Turn on `--debug-deny` for the full rule trace: `fapolicyd --debug-deny` in the foreground, or `sed -i 's/^#*\s*debug.*/debug = 2/' /etc/fapolicyd/fapolicyd.conf` (noisy — turn it off after).
 
-## Method A — path rules (`rules.d`) — used on the hardened hosts
+## Method A — path rules (`rules.d`) — the usual choice
 
 Rancher's RKE2 STIG guidance takes this route: allow execution from the directories the distribution owns, in a rule file that sorts **before** `90-deny-execute.rules`.
 
@@ -81,11 +81,11 @@ Entries land in `/etc/fapolicyd/trust.d/rke2` as `path size sha256`. The catch i
 
 RPMs are trusted automatically. `curl https://get.rke2.io | sh -` on a host with `yum` defaults to the RPM method (`rke2-server`, `rke2-common`, `rke2-selinux` from `rpm.rancher.io`), and kubeadm/kubelet/containerd from `pkgs.k8s.io` and Docker's repo are RPMs.
 
-This covers the launcher only. RKE2 still extracts its runtime into `/var/lib/rancher/rke2/data` and the CNI still writes `/opt/cni/bin`, so you need A or B for those anyway. The installer-image method in `gpu-workloads/docs/33-rke2-install-from-image.md` forces the *tar* method (`INSTALL_RKE2_ARTIFACT_PATH`), so there the launcher is untrusted too — install `rke2-selinux` from the RPM repo first (for the SELinux policy) and use Method A.
+This covers the launcher only. RKE2 still extracts its runtime into `/var/lib/rancher/rke2/data` and the CNI still writes `/opt/cni/bin`, so you need A or B for those anyway. An install from the system-agent installer image forces the *tar* method (`INSTALL_RKE2_ARTIFACT_PATH`), so there the launcher is untrusted too — install `rke2-selinux` from the RPM repo first (for the SELinux policy) and use Method A.
 
 ## Method D — disable fapolicyd (documented deviation)
 
-`gpu-workloads/docs/09-hardening.md` masks fapolicyd on GPU nodes because DKMS rebuilds produce new kernel modules and CUDA produces fresh ELF binaries that would need re-trusting on every driver update. That is a legitimate, documented STIG deviation for that node class; it is *not* applied on the STIG evaluation hosts here, since the point of those is to see what a compliant node looks like to `khealth`.
+GPU nodes are often run with fapolicyd masked: DKMS rebuilds produce new kernel modules and CUDA produces fresh ELF binaries that would need re-trusting on every driver update. That is a legitimate STIG deviation when documented for that node class; it is *not* applied on the STIG evaluation hosts here, since the point of those is to see what a compliant node looks like to `khealth`.
 
 ## Checklist for a new node
 
