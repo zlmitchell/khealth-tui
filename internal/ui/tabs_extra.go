@@ -886,7 +886,7 @@ func (a *App) addonsContent() content {
 		if !rancherDist {
 			var cfg string
 			for _, f := range ni.ContainerdConfig {
-				if strings.HasSuffix(f.Path, "config.toml") {
+				if strings.Contains(f.Path, "config.toml") {
 					cfg = shortPath(f.Path)
 				}
 			}
@@ -902,7 +902,7 @@ func (a *App) addonsContent() content {
 			case configPath != "":
 				state = styleDim.Render("config_path set, no hosts.toml")
 			}
-			rows = append(rows, []string{n, cfg, applied, configPath, ni.ContainerdSetting("sandbox_image"), state})
+			rows = append(rows, []string{n, cfg, applied, configPath, ni.ContainerdSetting("sandbox_image", "sandbox"), state})
 			rowIDs = append(rowIDs, "registries:"+n)
 			continue
 		}
@@ -990,7 +990,7 @@ func (a *App) addonsDetail(id string) (string, []string) {
 			}
 			dump(ni.Registries)
 		} else {
-			out = append(out, kv("containerd certs.d hosts", strings.Join(ni.ContainerdHosts, ", "))+"  "+kv("config_path", ni.ContainerdSetting("config_path"))+"  "+kv("sandbox_image", ni.ContainerdSetting("sandbox_image")))
+			out = append(out, kv("containerd certs.d hosts", strings.Join(ni.ContainerdHosts, ", "))+"  "+kv("config_path", ni.ContainerdSetting("config_path"))+"  "+kv("sandbox_image", ni.ContainerdSetting("sandbox_image", "sandbox")))
 		}
 		if len(ni.ContainerdConfig) > 0 {
 			title := "containerd configuration (config.toml registry lines, certs.d/*/hosts.toml)"

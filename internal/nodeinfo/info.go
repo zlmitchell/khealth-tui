@@ -1190,21 +1190,25 @@ func parseCNI(cf ConfigFile) CNIConf {
 
 // ContainerdSetting returns the quoted value of a `key = "value"` line in the
 // node's containerd config.toml dump ("config_path", "sandbox_image", ...),
-// "" when unset. The dump is grep -n output, so lines carry a "NN:" prefix.
-func (i *Info) ContainerdSetting(key string) string {
-	for _, cf := range i.ContainerdConfig {
-		if !strings.HasSuffix(cf.Path, "config.toml") {
-			continue
-		}
-		for _, l := range strings.Split(cf.Content, "\n") {
-			if num, rest, ok := strings.Cut(l, ":"); ok && num != "" && strings.Trim(num, "0123456789") == "" {
-				l = rest
-			}
-			k, v, ok := strings.Cut(l, "=")
-			if !ok || strings.TrimSpace(k) != key {
+// "" when unset. Pass alternate spellings in priority order: containerd 2.x
+// renamed sandbox_image to sandbox. The dump is grep -n output, so lines carry
+// a "NN:" prefix.
+func (i *Info) ContainerdSetting(keys ...string) string {
+	for _, key := range keys {
+		for _, cf := range i.ContainerdConfig {
+			if !strings.Contains(cf.Path, "config.toml") {
 				continue
 			}
-			return strings.Trim(strings.TrimSpace(v), `"'`)
+			for _, l := range strings.Split(cf.Content, "\n") {
+				if num, rest, ok := strings.Cut(l, ":"); ok && num != "" && strings.Trim(num, "0123456789") == "" {
+					l = rest
+				}
+				k, v, ok := strings.Cut(l, "=")
+				if !ok || strings.TrimSpace(k) != key {
+					continue
+				}
+				return strings.Trim(strings.TrimSpace(v), `"'`)
+			}
 		}
 	}
 	return ""

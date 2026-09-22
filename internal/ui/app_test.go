@@ -631,15 +631,15 @@ server = "https://docker.io"
 [host."https://harbor.corp"]
   capabilities = ["pull", "resolve"]
 --- /etc/containerd/config.toml
-12:      sandbox_image = "registry.k8s.io/pause:3.10.1"
+12:      sandbox = 'registry.k8s.io/pause:3.10.1'
 40:    [plugins."io.containerd.cri.v1.images".registry]
 41:      config_path = ""
 ===END
 `
 	a.nodes = map[string]*nodeinfo.Info{"cp-1": nodeinfo.Parse("cp-1", "10.0.0.1", kubeadmNode, time.Now())}
 	ni := a.nodes["cp-1"]
-	if ni.Dist != "kubeadm" || ni.ContainerdSetting("sandbox_image") != "registry.k8s.io/pause:3.10.1" || ni.ContainerdSetting("config_path") != "" {
-		t.Fatalf("fixture: dist=%q sandbox=%q config_path=%q", ni.Dist, ni.ContainerdSetting("sandbox_image"), ni.ContainerdSetting("config_path"))
+	if ni.Dist != "kubeadm" || ni.ContainerdSetting("sandbox_image", "sandbox") != "registry.k8s.io/pause:3.10.1" || ni.ContainerdSetting("config_path") != "" {
+		t.Fatalf("fixture: dist=%q sandbox=%q config_path=%q", ni.Dist, ni.ContainerdSetting("sandbox_image", "sandbox"), ni.ContainerdSetting("config_path"))
 	}
 	a.tab = tabAddons
 	got := ansi.Strip(strings.Join(rowsText(a.currentContent()), "\n"))

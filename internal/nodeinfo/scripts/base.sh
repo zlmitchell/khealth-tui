@@ -324,9 +324,19 @@ for d in /var/lib/rancher/rke2/agent/etc/containerd/certs.d /var/lib/rancher/k3s
   [ -d "$d" ] || continue
   for h in "$d"/*; do [ -d "$h" ] || continue; echo "--- $h/hosts.toml"; grep -viE 'password|username' "$h/hosts.toml" 2>/dev/null; done
 done
-for f in /var/lib/rancher/rke2/agent/etc/containerd/config.toml /var/lib/rancher/k3s/agent/etc/containerd/config.toml /etc/containerd/config.toml; do
+# config.toml can pull in conf.d overrides through `imports`, so ask containerd
+# for the effective config; the file itself is the fallback and misses those.
+CTD=
+if [ -x "$RKE2_DD"/bin/containerd ]; then CTD=$RKE2_DD/bin/containerd
+elif command -v k3s >/dev/null 2>&1 && [ -S /run/k3s/containerd/containerd.sock ]; then CTD="k3s containerd"
+elif command -v containerd >/dev/null 2>&1; then CTD=$(command -v containerd)
+fi
+ctdkeys() { grep -nE 'registry|mirrors|config_path|endpoint|sandbox|SystemdCgroup|snapshotter|default_runtime|disable_snapshot_annotations' 2>/dev/null | grep -viE 'password|username|auth' | head -120; }
+for f in "$RKE2_DD"/agent/etc/containerd/config.toml "$K3S_DD"/agent/etc/containerd/config.toml /etc/containerd/config.toml; do
   [ -f "$f" ] || continue
-  echo "--- $f"
-  grep -nE 'registry|mirrors|config_path|endpoint|sandbox_image|SystemdCgroup|snapshotter|default_runtime|disable_snapshot_annotations' "$f" 2>/dev/null | grep -viE 'password|username|auth' | head -80
+  dump=
+  [ -n "$CTD" ] && dump=$($CTD -c "$f" config dump 2>/dev/null)
+  if [ -n "$dump" ]; then echo "--- $f (effective)"; printf '%s\n' "$dump" | ctdkeys
+  else echo "--- $f"; ctdkeys < "$f"; fi
 done
 fi

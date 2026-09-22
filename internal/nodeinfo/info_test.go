@@ -552,3 +552,17 @@ func TestRoleFollowsTheActiveUnit(t *testing.T) {
 		t.Error("running server not a control plane")
 	}
 }
+
+// containerd 2.x renamed the CRI sandbox_image key to sandbox and quotes values
+// with '; both spellings must resolve, in the config.toml file dump and in the
+// effective dump that merges the conf.d imports.
+func TestContainerdSandboxImageKeys(t *testing.T) {
+	for _, path := range []string{"/etc/containerd/config.toml", "/etc/containerd/config.toml (effective)"} {
+		for _, line := range []string{`12:      sandbox_image = "registry.k8s.io/pause:3.10.1"`, `12:    sandbox = 'registry.k8s.io/pause:3.10.1'`} {
+			i := Parse("n1", "10.0.0.1", "===CONTAINERDREG\n--- "+path+"\n"+line+"\n===END\n", time.Now())
+			if got := i.ContainerdSetting("sandbox_image", "sandbox"); got != "registry.k8s.io/pause:3.10.1" {
+				t.Errorf("%s | %s -> %q", path, line, got)
+			}
+		}
+	}
+}
