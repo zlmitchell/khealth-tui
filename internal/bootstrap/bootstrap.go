@@ -364,6 +364,33 @@ func Verify(ctx context.Context, kubeconfig []byte) (string, error) {
 	return v.GitVersion, nil
 }
 
+// ownNode is the node name to dial at Host when Host is one of the node's
+// own addresses (an IP on its interfaces, or a name resolving to one);
+// "" when the host is a VIP or load balancer that merely landed here -
+// pinning that node to a VIP would send its probes to whichever server
+// holds the VIP.
+func (s *Source) ownNode(lookup Lookup) string {
+	h, _, err := net.SplitHostPort(s.Host)
+	if err != nil {
+		h = s.Host
+	}
+	own := map[string]bool{}
+	for _, ip := range s.NodeIPs {
+		own[ip] = true
+	}
+	if own[h] {
+		return strings.ToLower(strings.TrimSuffix(s.Hostname, "."))
+	}
+	if net.ParseIP(h) == nil && lookup != nil {
+		for _, ip := range lookup(h) {
+			if own[ip.String()] {
+				return strings.ToLower(strings.TrimSuffix(s.Hostname, "."))
+			}
+		}
+	}
+	return ""
+}
+
 // ClusterName picks the name for the context: an explicit name, else the
 // endpoint's DNS name, else the node hostname without its trailing node
 // index, with the dots turned into dashes (api.prod.example.com ->
@@ -526,7 +553,18 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 			}
 			if v, err := Verify(ctx, e.Raw); err == nil {
 				logf("  %s is this cluster (same CA) via %s and connects (%s): reusing it", e.Path, e.Host, v)
-				return reuse(e, v), nil
+				res := reuse(e, v)
+				// the node was reached at an address the file did not know
+				// (it moved, or another server was used): remember it, so
+				// the TUI dials the node there and not where the node
+				// object says
+				if node := src.ownNode(o.Lookup); node != "" && (res.SSH.Host != src.Host || res.SSH.Node != node) {
+					res.SSH.Host, res.SSH.Node = src.Host, node
+					if err := RememberSSH(e.Path, e.Context, res.SSH); err == nil {
+						logf("  remembered %s as the address of %s in %s", src.Host, node, filepath.Base(e.Path))
+					}
+				}
+				return res, nil
 			} else {
 				logf("  %s is this cluster (same CA) but %s does not connect (%s): replacing it", e.Path, e.Host, shortErr(err))
 				stale[e.Path] = true
@@ -547,6 +585,7 @@ func Run(ctx context.Context, r *sshrun.Runner, o Options) (*Result, error) {
 	var out []byte
 	hint := o.SSH
 	hint.Host = src.Host
+	hint.Node = src.ownNode(o.Lookup)
 	hint.Bootstrapped = time.Now().UTC().Format(time.RFC3339)
 	res.SSH = hint
 	sshHost, _, _ := strings.Cut(src.Host, ":")

@@ -376,6 +376,17 @@ func applySSHHint(cfg *config.Config, h k8s.SSHHint) {
 	if h.Become != "" && !cfg.Flags["become"] {
 		cfg.SSH.Become = h.Become
 	}
+	// the bootstrap host is one of a node's own addresses: dial that node
+	// there (ssh.hosts semantics), even when the node object reports another
+	// address - a node that changed address keeps reporting the old one
+	if h.Node != "" && h.Host != "" {
+		if cfg.SSH.Hosts == nil {
+			cfg.SSH.Hosts = map[string]string{}
+		}
+		if _, set := cfg.SSH.Hosts[h.Node]; !set {
+			cfg.SSH.Hosts[h.Node] = h.Host
+		}
+	}
 	cfg.SSH.AddFallbackHost(h.Host)
 }
 

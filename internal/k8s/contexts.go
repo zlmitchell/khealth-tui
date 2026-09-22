@@ -30,7 +30,8 @@ type SSHHint struct {
 	Port         int    `json:"ssh-port,omitempty"`
 	Become       string `json:"become,omitempty"`
 	Host         string `json:"bootstrap-host,omitempty"`
-	Bootstrapped string `json:"bootstrapped,omitempty"` // RFC 3339
+	Node         string `json:"bootstrap-node,omitempty"` // the node Host is an address of (its hostname): dial that node there, whatever the node object says
+	Bootstrapped string `json:"bootstrapped,omitempty"`   // RFC 3339
 }
 
 // Empty reports whether the hint carries nothing worth applying.

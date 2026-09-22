@@ -349,6 +349,31 @@ func TestRankAndNames(t *testing.T) {
 	if ClusterName("", Endpoint{}, &Source{Hostname: "node7"}) != "node" {
 		t.Error("empty endpoint uses the hostname")
 	}
+
+	// the SSH host is the node's own address: the hint pins that node to it;
+	// a VIP that landed on the node is not the node's address
+	own := &Source{Host: "10.0.0.191:22", Hostname: "Redhat9-Test", NodeIPs: []string{"10.0.0.191", "fd00::1"}}
+	if got := own.ownNode(nil); got != "redhat9-test" {
+		t.Errorf("own address: %q", got)
+	}
+	ownLookup := func(name string) []net.IP {
+		if name == "cp-1.corp" {
+			return []net.IP{net.ParseIP("10.0.0.191")}
+		}
+		return []net.IP{net.ParseIP("10.0.0.100")}
+	}
+	own.Host = "cp-1.corp:22"
+	if got := own.ownNode(ownLookup); got != "redhat9-test" {
+		t.Errorf("own name: %q", got)
+	}
+	own.Host = "api.corp"
+	if got := own.ownNode(ownLookup); got != "" {
+		t.Errorf("VIP pinned to the node: %q", got)
+	}
+	own.Host = "10.0.0.100"
+	if got := own.ownNode(nil); got != "" {
+		t.Errorf("foreign address: %q", got)
+	}
 }
 
 func TestDistHints(t *testing.T) {

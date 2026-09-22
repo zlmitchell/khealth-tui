@@ -30,6 +30,7 @@ type rescuePhase int
 const (
 	rescuePickMode rescuePhase = iota
 	rescuePickNode
+	rescuePickAddr // an unreachable node: ask where to reach it
 	rescuePickSnap
 	rescuePreflight
 	rescueConfirm
@@ -157,7 +158,7 @@ func (a *App) openRescue() tea.Cmd {
 // keep arriving), keeping the selection on the same node.
 func (a *App) rescueRefresh() {
 	r := a.rescue
-	if r == nil || (r.phase != rescuePickMode && r.phase != rescuePickNode) {
+	if r == nil || (r.phase != rescuePickMode && r.phase != rescuePickNode && r.phase != rescuePickAddr) {
 		return
 	}
 	nodes, kind, err := a.rescueCandidates()
@@ -468,9 +469,12 @@ func (a *App) handleRescueKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			o := r.nodes[r.nodeCur]
 			if !o.online {
 				// the node is dialed at the address the node object carries,
-				// which a node that changed address still reports as the old one
-				a.setStatus(o.node.Name + " is " + o.state + ": khealth has to reach it over SSH (it dials " + o.node.Host + "; if the node moved, name its address under ssh.hosts - ssh.hosts: {" + o.node.Name + ": <new address>} - and restart)")
-				return a, nil
+				// which a node that changed address still reports as the old
+				// one: ask where it is now
+				r.phase = rescuePickAddr
+				r.input.SetValue("")
+				r.input.Placeholder = "address or host[:port] to reach " + o.node.Name + " (empty = keep " + o.node.Host + ")"
+				return a, r.input.Focus()
 			}
 			if r.rejoin {
 				anchor, ok := r.bestAnchor(o.node.Name)
@@ -513,6 +517,37 @@ func (a *App) handleRescueKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			a.overlay = ovNone // preflight is read-only; its result is dropped
 			a.rescue = nil
+		}
+	case rescuePickAddr:
+		switch key {
+		case "esc":
+			r.input.Blur()
+			r.phase = rescuePickNode
+		case "enter":
+			o := r.nodes[r.nodeCur]
+			addr := strings.TrimSpace(r.input.Value())
+			r.input.Blur()
+			r.phase = rescuePickNode
+			if addr == "" {
+				return a, nil
+			}
+			if h, _, err := net.SplitHostPort(addr); err == nil {
+				addr = net.JoinHostPort(h, strings.TrimPrefix(addr, h+":"))
+			} else if strings.ContainsAny(addr, " \t/@") {
+				a.setStatus("not an address: " + addr)
+				return a, nil
+			}
+			// the same override ssh.hosts gives, for this session
+			if a.cfg.SSH.Hosts == nil {
+				a.cfg.SSH.Hosts = map[string]string{}
+			}
+			a.cfg.SSH.Hosts[o.node.Name] = addr
+			a.setStatus("probing " + o.node.Name + " at " + addr + " (put ssh.hosts: {" + o.node.Name + ": " + addr + "} in the config to keep it)")
+			return a, a.probeNodeNow(o.node.Name)
+		default:
+			var cmd tea.Cmd
+			r.input, cmd = r.input.Update(m)
+			return a, cmd
 		}
 	case rescueConfirm:
 		switch key {
@@ -827,6 +862,12 @@ func (a *App) renderRescue() (string, []string) {
 			}
 		}
 		add("", styleDim.Render("MEMBER = name/id from the node's db and config (readable with etcd down); LEADER TERM = highest term the etcd logs show that member elected (\"last leader\" = highest of all); RAFT INDEX = on-disk WAL position"))
+		if r.phase == rescuePickAddr {
+			o := r.nodes[r.nodeCur]
+			add("", styleWarn.Render(o.node.Name+" is "+o.state+" at "+o.node.Host)+styleDim.Render(" - the address the node object carries. A node that changed address still reports the old one; type where it answers now (enter probes it, esc keeps the old address)."))
+			add(r.input.View())
+			return "etcd rescue: where is " + o.node.Name + "?", lines
+		}
 		if r.rejoin {
 			add(styleDim.Render("j/k choose, enter runs the read-only preflight, esc goes back"))
 			return "etcd rescue: choose the server to rejoin (" + string(r.kind) + ")", lines

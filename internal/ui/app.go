@@ -519,6 +519,48 @@ func (a *App) collectCmds(snap *k8s.Snapshot) tea.Cmd {
 }
 
 // nodeProbeCmd runs one node probe script and delivers its nodeMsg.
+// probeNodeNow runs the light node probe and the etcd probe on one node
+// right away (after its address was changed in the rescue picker) instead
+// of on the next refresh tick; the results arrive like any other probe's.
+func (a *App) probeNodeNow(name string) tea.Cmd {
+	if a.runner == nil || a.snap == nil {
+		return nil
+	}
+	nodes, offline := a.sshTargets(a.snap)
+	var n *corev1.Node
+	for i := range nodes {
+		if nodes[i].Name == name {
+			n = &nodes[i]
+		}
+	}
+	if n == nil {
+		return nil
+	}
+	host := a.nodeAddress(n)
+	runner, gen, timeout := a.runner, a.gen, 3*a.cfg.SSH.Timeout
+	opts := a.nodeOptions(a.snap, name, pvPathsOf(a.snap), false, false, false, false)
+	a.collecting[name] = opts.Tiers()
+	cmds := []tea.Cmd{a.nodeProbeCmd(name, host, opts, timeout)}
+	if offline || k8s.IsEtcdNode(nodes, n) {
+		a.etcdPend[name] = true
+		script := etcd.Script(a.cfg.Etcd, false, true)
+		cmds = append(cmds, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			res := runner.Run(ctx, host, script)
+			p := etcd.Parse(name, res.Stdout)
+			p.Duration = res.Finished.Sub(res.Started)
+			p.ScriptSize = res.ScriptSize
+			p.Stderr = strings.TrimSpace(res.Stderr)
+			if res.Err != nil && !strings.Contains(res.Stdout, "===END") {
+				p.Err = fmt.Errorf("%s", strutil.FirstLine(res.Err.Error()+" "+res.Stderr))
+			}
+			return etcdMsg{gen: gen, probe: p}
+		})
+	}
+	return tea.Batch(cmds...)
+}
+
 func (a *App) nodeProbeCmd(name, host string, opts nodeinfo.Options, timeout time.Duration) tea.Cmd {
 	gen, runner := a.gen, a.runner
 	a.pending[name] = true
