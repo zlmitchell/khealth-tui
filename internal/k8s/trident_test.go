@@ -22,7 +22,7 @@ func TestTridentBackendPools(t *testing.T) {
 			map[string]any{"labels": map[string]any{"performance": "silver", "site": "dc2"}},
 		},
 	}}
-	labels, region, zone, pools := parseTridentBackendConfig(o)
+	labels, region, zone, pools := parseTridentBackendConfig(tridentBackendCfg(o))
 	if labels["site"] != "dc1" || region != "us" || zone != "us-a" || len(pools) != 2 {
 		t.Fatalf("backend: labels=%v region=%q zone=%q pools=%d", labels, region, zone, len(pools))
 	}
@@ -41,7 +41,7 @@ func TestTridentBackendPools(t *testing.T) {
 		}
 	}
 	// no virtual pools: one pool named after the backend with the backend defaults
-	_, _, _, pools = parseTridentBackendConfig(map[string]any{"config": map[string]any{"backendName": "san-1", "defaults": map[string]any{"spaceReserve": "volume"}}})
+	_, _, _, pools = parseTridentBackendConfig(tridentBackendCfg(map[string]any{"config": map[string]any{"ontap_config": map[string]any{"backendName": "san-1", "defaults": map[string]any{"spaceReserve": "volume"}}}}))
 	if len(pools) != 1 || pools[0].Name != "san-1" || pools[0].Defaults["spaceReserve"] != "volume" {
 		t.Errorf("physical pool: %+v", pools)
 	}
@@ -156,5 +156,32 @@ func TestTridentStorageClassCRs(t *testing.T) {
 	}
 	if plain := ti.StorageClasses[1]; plain.Name != "plain" || plain.Attributes["backendType"] != "ontap-san" {
 		t.Errorf("plain: %+v", plain)
+	}
+}
+
+// Trident persists the backend config wrapped in a driver-specific key
+// (BackendPersistent.Config): unwrapping it is what gives the driver name
+// and the pools, without which every StorageClass matches no backend.
+func TestTridentBackendCfgUnion(t *testing.T) {
+	o := map[string]any{"backendName": "aggr_data_n1", "config": map[string]any{"ontap_config": map[string]any{
+		"storageDriverName": "ontap-nas", "backendName": "aggr_data_n1",
+		"labels":   map[string]any{"performance": "gold"},
+		"defaults": map[string]any{"snapshotPolicy": "hourly"},
+	}}}
+	cfg := tridentBackendCfg(o)
+	if cfg["storageDriverName"] != "ontap-nas" {
+		t.Fatalf("union not unwrapped: %v", cfg)
+	}
+	_, _, _, pools := parseTridentBackendConfig(cfg)
+	if len(pools) != 1 || pools[0].Name != "aggr_data_n1" || pools[0].Labels["performance"] != "gold" || pools[0].Defaults["snapshotPolicy"] != "hourly" {
+		t.Fatalf("pools: %+v", pools)
+	}
+	// a flat config (older CRs / tests) still parses
+	flat := tridentBackendCfg(map[string]any{"config": map[string]any{"storageDriverName": "ontap-san", "backendName": "san-1"}})
+	if flat["backendName"] != "san-1" {
+		t.Errorf("flat config: %v", flat)
+	}
+	if cfg := tridentBackendCfg(map[string]any{}); cfg != nil {
+		t.Errorf("no config: %v", cfg)
 	}
 }

@@ -118,10 +118,28 @@ var (
 	selNotExist = regexp.MustCompile(`^!([\w-]+)$`)
 )
 
+// tridentBackendCfg returns the driver config of a TridentBackend CR.
+// Trident persists BackendPersistent.Config, a union that wraps the config
+// in a driver-specific key (ontap_config, solidfire_config, azure_config,
+// ...), so unwrap that when the fields are not at the top level - without
+// it the driver name and the pools are simply missing and every
+// StorageClass resolves to no backend.
+func tridentBackendCfg(o map[string]any) map[string]any {
+	cfg, _, _ := unstructured.NestedMap(o, "config")
+	if _, ok := cfg["storageDriverName"]; ok {
+		return cfg
+	}
+	for k, v := range cfg {
+		if m, ok := v.(map[string]any); ok && strings.HasSuffix(k, "_config") {
+			return m
+		}
+	}
+	return cfg
+}
+
 // parseTridentBackendConfig reads the non-secret parts of a TridentBackend
 // config: labels, region/zone, policy defaults and the virtual pools.
-func parseTridentBackendConfig(o map[string]any) (labels map[string]string, region, zone string, pools []TridentPool) {
-	cfg, _, _ := unstructured.NestedMap(o, "config")
+func parseTridentBackendConfig(cfg map[string]any) (labels map[string]string, region, zone string, pools []TridentPool) {
 	if cfg == nil {
 		return nil, "", "", nil
 	}
