@@ -1,3 +1,10 @@
+## [1.1.1](https://github.com/zlmitchell/khealth-tui/compare/v1.1.0...v1.1.1) (2026-09-22)
+
+
+### Bug Fixes
+
+* say who SSH tried to log in as when a node refuses the login ([#2](https://github.com/zlmitchell/khealth-tui/issues/2)) ([edd1798](https://github.com/zlmitchell/khealth-tui/commit/edd1798e055e505ae2dba28437300a2fe5676fcb))
+
 # [1.1.0](https://github.com/zlmitchell/khealth-tui/compare/v1.0.5...v1.1.0) (2026-09-22)
 
 
