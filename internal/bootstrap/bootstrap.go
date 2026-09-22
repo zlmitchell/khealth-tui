@@ -392,17 +392,26 @@ func (s *Source) ownNode(lookup Lookup) string {
 }
 
 // ClusterName picks the name for the context: an explicit name, else the
-// endpoint's DNS name, else the node hostname without its trailing node
-// index, with the dots turned into dashes (api.prod.example.com ->
-// api-prod-example-com, cp-1.corp -> cp-corp). The whole name is kept: the
-// first label alone (api, k8s, cp) is the same for every cluster of an
-// organisation and their khealth-<name>.yaml files would overwrite each other.
+// endpoint's DNS name, else a DNS name the cluster was given (tls-san, or
+// the certificate) that is not a node's own name, else the node hostname
+// without its trailing node index - with the dots turned into dashes
+// (api.prod.example.com -> api-prod-example-com, cp-1.corp -> cp-corp).
+// The whole name is kept: the first label alone (api, k8s, cp) is the
+// same for every cluster of an organisation and their khealth-<name>.yaml
+// files would overwrite each other. A node hostname is the last resort:
+// on a multi-server cluster it names the cluster after whichever server
+// was reached.
 func ClusterName(explicit string, ep Endpoint, src *Source) string {
 	if explicit != "" {
 		return explicit
 	}
 	if net.ParseIP(ep.Host) == nil && ep.Host != "" {
 		return dashed(ep.Host)
+	}
+	if src != nil {
+		if n := src.clusterDNSName(); n != "" {
+			return dashed(n)
+		}
 	}
 	h := strings.ToLower(strings.TrimSuffix(src.Hostname, "."))
 	first, rest, _ := strings.Cut(h, ".")
@@ -418,6 +427,27 @@ func ClusterName(explicit string, ep Endpoint, src *Source) string {
 
 func dashed(name string) string {
 	return strings.ReplaceAll(strings.ToLower(strings.TrimSuffix(name, ".")), ".", "-")
+}
+
+// clusterDNSName is a DNS name the cluster was given as a whole: the first
+// tls-san entry (then certificate SAN) that has a dot, is not an IP, not an
+// in-cluster name and not this node's own hostname.
+func (s *Source) clusterDNSName() string {
+	host := strings.ToLower(strings.TrimSuffix(s.Hostname, "."))
+	short, _, _ := strings.Cut(host, ".")
+	for _, list := range [][]string{s.TLSSAN, s.CertDNS} {
+		for _, n := range list {
+			n = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(n), "."))
+			if n == "" || net.ParseIP(n) != nil || !strings.Contains(n, ".") || nodeinfo.InClusterSAN(n, nil) {
+				continue
+			}
+			if n == host || n == short || strings.HasPrefix(n, short+".") {
+				continue
+			}
+			return n
+		}
+	}
+	return ""
 }
 
 // Options drive Run.

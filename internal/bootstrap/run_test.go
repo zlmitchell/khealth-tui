@@ -143,14 +143,14 @@ func TestRunEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, strings.Join(logs, "\n"))
 	}
-	if res.Version != "v1.30.4+rke2r1" || res.Name != "cp-example-com" || res.Server != "https://127.0.0.1" || res.Endpoint.Host != "127.0.0.1" || res.Endpoint.Score != 10 {
+	if res.Version != "v1.30.4+rke2r1" || res.Name != "k8s-prod-example-invalid" || res.Server != "https://127.0.0.1" || res.Endpoint.Host != "127.0.0.1" || res.Endpoint.Score != 10 {
 		t.Errorf("result: %+v", res)
 	}
-	if res.Path != filepath.Join(home, ".kube", "khealth-cp-example-com.yaml") {
+	if res.Path != filepath.Join(home, ".kube", "khealth-k8s-prod-example-invalid.yaml") {
 		t.Errorf("path %q", res.Path)
 	}
 	kc, err := clientcmd.LoadFromFile(res.Path)
-	if err != nil || kc.CurrentContext != "cp-example-com" || kc.Clusters["cp-example-com"] == nil || kc.Clusters["cp-example-com"].Server != "https://127.0.0.1:"+port {
+	if err != nil || kc.CurrentContext != "k8s-prod-example-invalid" || kc.Clusters["k8s-prod-example-invalid"] == nil || kc.Clusters["k8s-prod-example-invalid"].Server != "https://127.0.0.1:"+port {
 		t.Errorf("written kubeconfig: %v %+v", err, kc)
 	}
 	joined := strings.Join(res.Notes, "\n")
@@ -480,5 +480,43 @@ func TestRunReusesExisting(t *testing.T) {
 	res, err = Run(context.Background(), r, Options{Hosts: []string{srv.Addr}, Fresh: true})
 	if err != nil || res.Path == good {
 		t.Fatalf("fresh: %v %+v", err, res)
+	}
+}
+
+// A different cluster whose derived name lands on an existing file (the
+// same node hostnames re-provisioned into a new cluster, or one name
+// given twice) is written next to it, never over it.
+func TestRunNeverOverwritesAnotherCluster(t *testing.T) {
+	api, caData := apiserver(t)
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(api.URL, "https://"))
+	cert := servingCert(t, []string{"kubernetes"}, []string{"127.0.0.1", "10.43.0.1"})
+	srv := node(t, nodeOutput(nodeKubeconfig(port, caData), cert))
+	r := runner(t, srv)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	kube := filepath.Join(home, ".kube")
+	_ = os.MkdirAll(kube, 0o700)
+	// the file the derived name would use belongs to another cluster (other
+	// CA) and does not connect any more (its nodes were re-provisioned)
+	other := filepath.Join(kube, "khealth-lab.yaml")
+	otherCA := strings.Repeat("Q", len(caData)/4*4)
+	_ = os.WriteFile(other, []byte(strings.ReplaceAll(strings.ReplaceAll(nodeKubeconfig("1", caData), caData, otherCA), "default", "lab")), 0o600)
+	before, _ := os.ReadFile(other)
+	res, err := Run(context.Background(), r, Options{Hosts: []string{srv.Addr}, Name: "lab"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Path != filepath.Join(kube, "khealth-lab-2.yaml") {
+		t.Errorf("path %q: the other cluster's file must not be replaced", res.Path)
+	}
+	after, _ := os.ReadFile(other)
+	if string(before) != string(after) {
+		t.Error("the other cluster's file was rewritten")
+	}
+	if _, err := os.Stat(other + ".bak"); err == nil {
+		t.Error("the other cluster's file was moved to .bak")
+	}
+	if !strings.Contains(strings.Join(res.Notes, "\n"), "belongs to another cluster") {
+		t.Errorf("notes: %v", res.Notes)
 	}
 }
