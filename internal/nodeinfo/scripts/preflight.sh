@@ -87,7 +87,9 @@ sec CLOUDINIT
 # (the cloud-init units' state/Result come from the UNITS section of base.sh)
 if command -v cloud-init >/dev/null 2>&1; then
   [ -f /run/cloud-init/result.json ] && echo "result=$(tr -d '\n' < /run/cloud-init/result.json 2>/dev/null | head -c 1000)"
-  [ -f /var/log/cloud-init.log ] && grep -hE '\[(ERROR|CRITICAL)\]|Traceback' /var/log/cloud-init.log 2>/dev/null | tail -5 | cut -c1-300 | sed 's/^/log=/'
+  # only the ERROR/CRITICAL levels: cloud-init logs tracebacks for handled
+  # failures (datasource probing) at WARNING, which are not a node problem
+  [ -f /var/log/cloud-init.log ] && grep -hE '\[(ERROR|CRITICAL)\]' /var/log/cloud-init.log 2>/dev/null | tail -5 | cut -c1-300 | sed 's/^/log=/'
 fi
 sec VCENTER
 # vCenter hosts from the vSphere CPI config (kube-system vsphere-cloud-config):

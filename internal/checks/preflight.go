@@ -413,7 +413,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		} else if len(ci.ResultErrors) > 0 {
 			add(SevWarn, "node", name, "cloud-init result.json lists errors: "+strutil.TruncList(ci.ResultErrors, 2), "cloud-init status --long; /var/log/cloud-init.log")
 		} else if len(ci.LogErrors) > 0 {
-			add(SevWarn, "node", name, "cloud-init.log has errors: "+strutil.TruncStr(ci.LogErrors[len(ci.LogErrors)-1], 200), "grep -E 'ERROR|CRITICAL' /var/log/cloud-init.log")
+			add(SevWarn, "node", name, "cloud-init.log has errors: "+strutil.TruncStr(ci.LogErrors[len(ci.LogErrors)-1], 200), `grep -E '\[(ERROR|CRITICAL)\]' /var/log/cloud-init.log`)
 		}
 		if fu := ci.FailedUnits(); len(fu) > 0 {
 			add(SevWarn, "node", name, "cloud-init units failed on the last boot: "+strings.Join(fu, ", ")+" - the Rancher user-data (users, ssh keys, rke2 registration) may be half-applied", "journalctl -u "+strings.Fields(fu[0])[0]+"; cloud-init status --long")
