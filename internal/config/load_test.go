@@ -43,6 +43,19 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.SSH.User != "" || cfg.Diag || cfg.Bootstrap.Hosts != nil {
 		t.Errorf("unexpected values: user=%q diag=%v bootstrap=%+v", cfg.SSH.User, cfg.Diag, cfg.Bootstrap)
 	}
+	// host keys: verified by default, unknown hosts recorded on first
+	// contact (a changed key still fails). --accept-new-host-keys=false
+	// is the only way back to refusing first contact.
+	if !cfg.SSH.StrictHostKey || !cfg.SSH.AcceptNewHostKeys {
+		t.Errorf("host key defaults: strict=%v accept_new=%v", cfg.SSH.StrictHostKey, cfg.SSH.AcceptNewHostKeys)
+	}
+	off, err := Load([]string{"--accept-new-host-keys=false"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !off.SSH.StrictHostKey || off.SSH.AcceptNewHostKeys {
+		t.Errorf("--accept-new-host-keys=false: strict=%v accept_new=%v", off.SSH.StrictHostKey, off.SSH.AcceptNewHostKeys)
+	}
 }
 
 func TestLoadFlags(t *testing.T) {

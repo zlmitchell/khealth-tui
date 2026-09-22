@@ -135,16 +135,23 @@ type SSH struct {
 	Become string `yaml:"become"`
 	// BecomePassword is the escalation password when it differs from the SSH
 	// password (KHT_BECOME_PASSWORD).
-	BecomePassword    string            `yaml:"become_password"`
-	Timeout           time.Duration     `yaml:"timeout"`
-	Address           string            `yaml:"address"` // InternalIP | ExternalIP | Hostname
-	Hosts             map[string]string `yaml:"hosts"`   // node name -> address override
-	Nodes             []string          `yaml:"nodes"`   // only collect from these node names (empty = all)
-	Bastion           string            `yaml:"bastion"` // user@host:port
-	StrictHostKey     bool              `yaml:"strict_host_key"`
-	AcceptNewHostKeys bool              `yaml:"accept_new_host_keys"` // record an unknown host's key in known_hosts on first contact (a changed key still fails)
-	KnownHosts        string            `yaml:"known_hosts"`
-	Concurrency       int               `yaml:"concurrency"`
+	BecomePassword string            `yaml:"become_password"`
+	Timeout        time.Duration     `yaml:"timeout"`
+	Address        string            `yaml:"address"` // InternalIP | ExternalIP | Hostname
+	Hosts          map[string]string `yaml:"hosts"`   // node name -> address override
+	Nodes          []string          `yaml:"nodes"`   // only collect from these node names (empty = all)
+	Bastion        string            `yaml:"bastion"` // user@host:port
+	StrictHostKey  bool              `yaml:"strict_host_key"`
+	// AcceptNewHostKeys records an unknown host's key in known_hosts on
+	// first contact (StrictHostKeyChecking=accept-new). On by default: a
+	// cluster is reached by node addresses nobody has ssh'd to by hand, and
+	// refusing every first contact only teaches people to reach for
+	// --insecure-host-key, which checks nothing ever again. A *changed*
+	// key is still refused either way - that is the check that catches
+	// something, and it is the one --insecure-host-key throws away.
+	AcceptNewHostKeys bool   `yaml:"accept_new_host_keys"`
+	KnownHosts        string `yaml:"known_hosts"`
+	Concurrency       int    `yaml:"concurrency"`
 	// Nice runs the probe scripts under renice 19 / ionice best-effort-lowest
 	// so they yield to the node's workloads (see docs/PERFORMANCE.md).
 	Nice bool `yaml:"nice"`
@@ -237,15 +244,16 @@ func Default() Config {
 		HeavyEvery: 6,
 		Collect:    Collect{JournalBackground: time.Hour},
 		SSH: SSH{
-			Enabled:       true,
-			Port:          22,
-			Sudo:          true,
-			Timeout:       20 * time.Second,
-			Address:       "InternalIP",
-			StrictHostKey: true,
-			Concurrency:   8,
-			Nice:          true,
-			Backoff:       true,
+			Enabled:           true,
+			Port:              22,
+			Sudo:              true,
+			Timeout:           20 * time.Second,
+			Address:           "InternalIP",
+			StrictHostKey:     true,
+			AcceptNewHostKeys: true,
+			Concurrency:       8,
+			Nice:              true,
+			Backoff:           true,
 		},
 		Perf:    Perf{WatchCache: true, Protobuf: true, DiscoveryTTL: 5 * time.Minute, ConfigzTTL: 10 * time.Minute, DeniedTTL: 10 * time.Minute},
 		Etcd:    Etcd{MaxBackupAge: 24 * time.Hour},
@@ -298,7 +306,7 @@ func Load(args []string) (Config, error) {
 		noSudo       = fs.Bool("no-sudo", false, "do not escalate privileges on nodes (same as --become none)")
 		become       = fs.String("become", "", "privilege escalation on nodes: auto (sudo, dzdo, doas), sudo, dzdo, doas or none")
 		insecureHK   = fs.Bool("insecure-host-key", false, "skip SSH host key verification")
-		acceptNewHK  = fs.Bool("accept-new-host-keys", false, "record a node's host key in known_hosts on first contact instead of refusing it (like StrictHostKeyChecking=accept-new; a changed key still fails)")
+		acceptNewHK  = fs.Bool("accept-new-host-keys", true, "record a node's host key in known_hosts on first contact instead of refusing it (like StrictHostKeyChecking=accept-new; a changed key still fails). --accept-new-host-keys=false refuses hosts the file does not already hold")
 		helmUpdates  = fs.Bool("helm-updates", true, "check your helm repos / helm.repos for newer chart versions (--helm-updates=false to disable)")
 		readOnly     = fs.Bool("read-only", false, "disable mutating actions (helm rollback/upgrade)")
 		diag         = fs.Bool("diag", false, "run API/permission diagnostics (nodes/proxy, stats/summary, pods/exec, ...) and exit")
@@ -319,7 +327,21 @@ func Load(args []string) (Config, error) {
 		showVersion  = fs.Bool("version", false, "print version and exit")
 		initConfig   = fs.Bool("init-config", false, "write the annotated example config to --config (default: the user config path) and exit; never overwrites")
 		printConfig  = fs.Bool("print-config", false, "print the annotated example config to stdout and exit")
+		completions  = &optionalString{}
+		instCompl    = fs.Bool("install-completions", false, "write the completion stub where the shell looks for it and exit; --completions <shell> picks the shell")
 	)
+	fs.Var(completions, "completions", "print the shell completion stub and exit (bash, zsh or fish; default bash): eval \"$(khealth --completions)\"")
+	loadedFlagSet = fs // for the completion tests; the completer is handed fs directly
+	// The shell asks for candidates with `khealth __complete <cword> <words...>`.
+	// Answered here, before parsing, because the words being completed are
+	// not this program's own arguments - but fs is already fully registered,
+	// so the flag list the completer sees is the real one.
+	if len(args) > 0 && args[0] == completeCommand {
+		for _, c := range completeArgs(fs, args[1:]) {
+			fmt.Println(c)
+		}
+		os.Exit(0)
+	}
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "khealth - Kubernetes / RKE2 cluster health TUI\n\nUsage: khealth [flags] [[user@]server-node ...]\n\n  With no kubeconfig, name a server node (e.g. khealth root@10.0.0.143): the admin kubeconfig is fetched over SSH,\n  written under ~/.kube and used. Same as --bootstrap-kubeconfig user@host.\n\n")
 		fs.PrintDefaults()
@@ -352,6 +374,35 @@ func Load(args []string) (Config, error) {
 	}
 	if *printConfig {
 		fmt.Print(ExampleConfig)
+		os.Exit(0)
+	}
+	if completions.set || *instCompl {
+		// `--completions zsh` leaves zsh as a positional argument (the flag
+		// takes its value with =), so claim it rather than treat a shell
+		// name as a node to bootstrap from
+		shell := completions.value
+		if shell == "" && len(positional) > 0 {
+			// with --completions a positional can only be the shell, so a
+			// name we do not know is a mistake, not a node to bootstrap from
+			if !isShell(positional[0]) {
+				return cfg, fmt.Errorf("no completion for %q (have %s)", positional[0], strings.Join(CompletionShells(), ", "))
+			}
+			shell, positional = positional[0], positional[1:]
+		}
+		if *instCompl {
+			path, err := InstallCompletion(shell)
+			if err != nil {
+				return cfg, err
+			}
+			fmt.Println("wrote", path)
+			fmt.Println("open a new shell to pick it up")
+			os.Exit(0)
+		}
+		script, err := CompletionScript(shell)
+		if err != nil {
+			return cfg, err
+		}
+		fmt.Print(script)
 		os.Exit(0)
 	}
 	if *initConfig {

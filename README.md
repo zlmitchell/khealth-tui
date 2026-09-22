@@ -58,6 +58,7 @@ Every column and keypress: [docs/TABS.md](docs/TABS.md).
   ```
 - **no Go**: `./build.sh` (Docker) -> `dist/khealth-linux-amd64`; `./build.sh windows amd64`; `./build.sh all` builds every target and writes `dist/checksums.txt`
 - **Go 1.26+**: `make build` -> `./khealth`; `make dist` = `build.sh all` with the local toolchain; `make test`
+- **shell completion** (optional): `khealth --install-completions` (bash, zsh or fish), or `eval "$(khealth --completions)"` for the current shell. The binary computes the candidates, so flags, `--become` / `--ssh-address` values, kubeconfig contexts and `[user@]host` from `known_hosts` all complete and stay current with the build
 
 ## Run
 
@@ -66,7 +67,7 @@ khealth                                   # current kubeconfig context, SSH as $
 khealth --context prod --ssh-user ubuntu --ssh-key ~/.ssh/prod.pem
 khealth --no-ssh                          # API-only view
 khealth --bastion jump@bastion.example.com --insecure-host-key
-khealth root@api.prod.corp --accept-new-host-keys   # VIP in front of the servers: record each server's key on first contact, refuse changed ones
+khealth root@api.prod.corp --accept-new-host-keys=false  # refuse any node whose key is not already in known_hosts (recording it is the default)
 khealth --ssh-user admin --ask-pass       # prompt for a password used when keys fail (and for sudo)
 khealth root@10.0.0.11                    # no kubeconfig yet: fetch the admin kubeconfig over SSH from a server node
 khealth --export ./reports --export-scan  # no TUI: one cycle + the security scan, JSON + XLSX, exit

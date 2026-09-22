@@ -122,7 +122,9 @@ func New(cfg config.SSH) (*Runner, error) {
 						// different key for this address is a mismatch
 						return r.recordNewHostKey(path, hostname, key)
 					}
-					return fmt.Errorf("host key for %s not in known_hosts (ssh to it once, ssh-keyscan it, --accept-new-host-keys, or --insecure-host-key)", h)
+					// only reachable with accept_new_host_keys turned off:
+					// it defaults to true
+					return fmt.Errorf("host key for %s not in known_hosts and accept_new_host_keys is off (ssh to it once, ssh-keyscan it, drop --accept-new-host-keys=false, or --insecure-host-key)", h)
 				}
 				if r.hasKnownKey(key) {
 					// recorded with one node's key, answering with another
