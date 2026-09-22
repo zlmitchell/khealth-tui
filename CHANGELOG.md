@@ -1,3 +1,11 @@
+## [1.1.2](https://github.com/zlmitchell/khealth-tui/compare/v1.1.1...v1.1.2) (2026-09-22)
+
+
+### Bug Fixes
+
+* read containerd's effective config so the sandbox image shows on containerd 2.x ([e261813](https://github.com/zlmitchell/khealth-tui/commit/e261813e333beb21b492d481321027862f79200e))
+* stop cloud-init tracebacks at WARNING from reading as log errors ([94bc7eb](https://github.com/zlmitchell/khealth-tui/commit/94bc7eb57478f5f42e0522b828fec05a22f02928))
+
 ## [1.1.1](https://github.com/zlmitchell/khealth-tui/compare/v1.1.0...v1.1.1) (2026-09-22)
 
 
