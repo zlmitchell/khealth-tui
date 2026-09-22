@@ -614,3 +614,26 @@ func TestBastion(t *testing.T) {
 		t.Errorf("bastion down: %v", res.Err)
 	}
 }
+
+// A refused login says who was offered with what, since the default user
+// (the local login) is rarely the node's.
+func TestAuthRefusedMessage(t *testing.T) {
+	srv := sshtest.New(t, hostHandler{uid: "0"}.handle)
+	other := sshtest.New(t, nil) // a key the first server does not accept
+	cfg := testCfg(srv)
+	cfg.User, cfg.Key = "zach", other.KeyPath
+	r := newRunner(t, cfg)
+	res := r.Run(context.Background(), srv.Addr, "s\n")
+	if res.Err == nil {
+		t.Fatal("wrong key accepted")
+	}
+	msg := res.Err.Error()
+	for _, want := range []string{"authentication refused for user zach", "offered: key " + other.KeyPath, "--ssh-user"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("missing %q in %q", want, msg)
+		}
+	}
+	if strings.Contains(msg, "handshake failed") {
+		t.Errorf("library wording left in: %q", msg)
+	}
+}

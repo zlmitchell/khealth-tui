@@ -233,8 +233,12 @@ func bootstrapKubeconfig(cfg *config.Config) error {
 				cfg.SSH.User = readLine()
 				cfg.Flags["ssh-user"] = true
 			}
-			if _, err := os.Stat(cfg.SSH.Key); err != nil && cfg.SSH.Password == "" && os.Getenv("SSH_AUTH_SOCK") == "" {
-				fmt.Fprintf(os.Stderr, "  no key at %s and no agent; password for %s@%s: ", cfg.SSH.Key, cfg.SSH.User, h)
+			if !sshKeyAvailable(cfg.SSH.Key) && cfg.SSH.Password == "" && os.Getenv("SSH_AUTH_SOCK") == "" {
+				where := cfg.SSH.Key
+				if where == "" {
+					where = "~/.ssh/id_ed25519, id_ecdsa or id_rsa"
+				}
+				fmt.Fprintf(os.Stderr, "  no key at %s and no agent; password for %s@%s: ", where, cfg.SSH.User, h)
 				pw, _ := term.ReadPassword(int(os.Stdin.Fd()))
 				fmt.Fprintln(os.Stderr)
 				cfg.SSH.Password = string(pw)
@@ -272,6 +276,26 @@ func bootstrapKubeconfig(cfg *config.Config) error {
 	// names a new one, so the context is updated to it
 	rememberSSH(cfg, res.Path, res.Name, res.SSH)
 	return nil
+}
+
+// sshKeyAvailable reports whether a private key will be offered: the one
+// configured, else any of the default ones under ~/.ssh (what
+// sshrun.New loads when ssh.key is empty).
+func sshKeyAvailable(key string) bool {
+	if key != "" {
+		_, err := os.Stat(key)
+		return err == nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	for _, n := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
+		if _, err := os.Stat(filepath.Join(home, ".ssh", n)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // rememberSSH stores the SSH user given on the command line (--ssh-user or
