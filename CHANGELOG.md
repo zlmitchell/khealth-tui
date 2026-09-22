@@ -1,3 +1,11 @@
+## [1.0.4](https://github.com/zlmitchell/khealth-tui/compare/v1.0.3...v1.0.4) (2026-09-22)
+
+
+### Bug Fixes
+
+* etcd rejoin of a server that changed address ([155f443](https://github.com/zlmitchell/khealth-tui/commit/155f443ac3ba546be871ff7d67452d2df7cad46d))
+* read the YAML shape of vsphere.conf, not only the INI one ([56165d8](https://github.com/zlmitchell/khealth-tui/commit/56165d829f52cd17af1c0b57da345b2c269466e3))
+
 ## [1.0.3](https://github.com/zlmitchell/khealth-tui/compare/v1.0.2...v1.0.3) (2026-09-22)
 
 
