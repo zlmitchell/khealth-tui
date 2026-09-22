@@ -11,6 +11,10 @@ khealth root@10.0.0.11                   # no kubeconfig yet: fetch the admin ku
 khealth --export ./reports --export-scan  # no TUI: one collection cycle + the security scan, JSON + XLSX written, exit
 ```
 
+Shell completion: `khealth --install-completions` writes the stub where bash (or `zsh` / `fish`) looks for it;
+`eval "$(khealth --completions)"` enables it for the current shell only. The stub just calls the binary back, so
+flags, `--become` / `--ssh-address` values, kubeconfig contexts and `[user@]host` arguments are all computed by
+khealth itself and never go stale against the build.
 
 ### No kubeconfig, but SSH to the nodes
 

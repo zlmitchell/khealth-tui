@@ -327,7 +327,21 @@ func Load(args []string) (Config, error) {
 		showVersion  = fs.Bool("version", false, "print version and exit")
 		initConfig   = fs.Bool("init-config", false, "write the annotated example config to --config (default: the user config path) and exit; never overwrites")
 		printConfig  = fs.Bool("print-config", false, "print the annotated example config to stdout and exit")
+		completions  = &optionalString{}
+		instCompl    = fs.Bool("install-completions", false, "write the completion stub where the shell looks for it and exit; --completions <shell> picks the shell")
 	)
+	fs.Var(completions, "completions", "print the shell completion stub and exit (bash, zsh or fish; default bash): eval \"$(khealth --completions)\"")
+	loadedFlagSet = fs // for the completion tests; the completer is handed fs directly
+	// The shell asks for candidates with `khealth __complete <cword> <words...>`.
+	// Answered here, before parsing, because the words being completed are
+	// not this program's own arguments - but fs is already fully registered,
+	// so the flag list the completer sees is the real one.
+	if len(args) > 0 && args[0] == completeCommand {
+		for _, c := range completeArgs(fs, args[1:]) {
+			fmt.Println(c)
+		}
+		os.Exit(0)
+	}
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "khealth - Kubernetes / RKE2 cluster health TUI\n\nUsage: khealth [flags] [[user@]server-node ...]\n\n  With no kubeconfig, name a server node (e.g. khealth root@10.0.0.143): the admin kubeconfig is fetched over SSH,\n  written under ~/.kube and used. Same as --bootstrap-kubeconfig user@host.\n\n")
 		fs.PrintDefaults()
@@ -360,6 +374,35 @@ func Load(args []string) (Config, error) {
 	}
 	if *printConfig {
 		fmt.Print(ExampleConfig)
+		os.Exit(0)
+	}
+	if completions.set || *instCompl {
+		// `--completions zsh` leaves zsh as a positional argument (the flag
+		// takes its value with =), so claim it rather than treat a shell
+		// name as a node to bootstrap from
+		shell := completions.value
+		if shell == "" && len(positional) > 0 {
+			// with --completions a positional can only be the shell, so a
+			// name we do not know is a mistake, not a node to bootstrap from
+			if !isShell(positional[0]) {
+				return cfg, fmt.Errorf("no completion for %q (have %s)", positional[0], strings.Join(CompletionShells(), ", "))
+			}
+			shell, positional = positional[0], positional[1:]
+		}
+		if *instCompl {
+			path, err := InstallCompletion(shell)
+			if err != nil {
+				return cfg, err
+			}
+			fmt.Println("wrote", path)
+			fmt.Println("open a new shell to pick it up")
+			os.Exit(0)
+		}
+		script, err := CompletionScript(shell)
+		if err != nil {
+			return cfg, err
+		}
+		fmt.Print(script)
 		os.Exit(0)
 	}
 	if *initConfig {
