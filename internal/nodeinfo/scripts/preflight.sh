@@ -164,7 +164,9 @@ done
 sec IPTABLES
 echo "iptables=$(iptables --version 2>/dev/null)"
 sec SEPKG
-command -v rpm >/dev/null 2>&1 && rpm -q rke2-selinux k3s-selinux container-selinux 2>/dev/null
+# rke2-selinux / k3s-selinux label the runtime; rancher-selinux labels
+# rancher-system-agent on a Rancher-provisioned node
+command -v rpm >/dev/null 2>&1 && rpm -q rke2-selinux k3s-selinux container-selinux rancher-selinux 2>/dev/null
 sec NMCONF
 grep -hsE '^[[:space:]]*unmanaged-devices' /etc/NetworkManager/conf.d/*.conf /etc/NetworkManager/NetworkManager.conf /usr/lib/NetworkManager/conf.d/*.conf 2>/dev/null
 sec REGPROBE

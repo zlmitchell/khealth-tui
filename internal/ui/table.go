@@ -107,6 +107,39 @@ func wrap(s string, width int) []string {
 // kv renders "key: value" with a dim key.
 func kv(k, v string) string { return styleDim.Render(k+": ") + v }
 
+// flow lays styled items out on lines of at most width visible columns,
+// two spaces apart, continuing on an indented line when the next item does
+// not fit (wrap counts bytes, which styled text defeats). The first item
+// always starts the first line; an item wider than the line stands alone.
+func flow(width, indent int, items ...string) []string {
+	if width < 20 {
+		width = 20
+	}
+	var out []string
+	line, w := "", 0
+	pad := strings.Repeat(" ", indent)
+	for _, it := range items {
+		if it == "" {
+			continue
+		}
+		iw := ansi.StringWidth(it)
+		switch {
+		case line == "":
+			line, w = it, iw
+		case w+2+iw <= width:
+			line += "  " + it
+			w += 2 + iw
+		default:
+			out = append(out, line)
+			line, w = pad+it, indent+iw
+		}
+	}
+	if line != "" {
+		out = append(out, line)
+	}
+	return out
+}
+
 // wrapTable is renderTable for reference text: every column but the last is
 // sized to its content (capped by max), the last one takes what is left of
 // the width and wraps, with the other cells blank on continuation lines. The

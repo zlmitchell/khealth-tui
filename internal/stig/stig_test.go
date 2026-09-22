@@ -42,7 +42,9 @@ func TestEvaluate(t *testing.T) {
 	expect := map[string]Status{
 		"V-242390": Pass, "V-242382": Pass, "V-242464": Fail, "V-242378": Fail, "CIS-1.2.15": Pass,
 		"V-242391": Pass, "V-242392": Pass, "V-242387": Pass, "V-245541": Fail, "V-242434": Pass, "V-242404": NA,
-		"V-254555": Pass, "CIS-sysctl": Fail, "V-242445": Pass, "RKE2-etcd-user": Pass, "V-254564": Fail,
+		"RKE2-profile": Pass, "V-254555": Fail, "CIS-sysctl": Fail, "V-242445": Pass, "RKE2-etcd-user": Pass, "V-254564": Fail,
+		// RKE2 STIG rows aliasing the Kubernetes STIG evidence above
+		"V-254562": Pass, "V-254572": Pass, "V-254557": Pass, "V-254559": Pass, "V-254561": Pass, "V-254569": Pass, "V-254568": Fail, "V-254563": Fail,
 		"V-242383": Fail, "V-254800-ns": Fail, "V-242395": Pass,
 	}
 	for id, want := range expect {
@@ -364,5 +366,77 @@ func TestPSAConfigRules(t *testing.T) {
 	}
 	if find(rs, "V-254800-exempt") != nil {
 		t.Error("exemption rule without the file")
+	}
+}
+
+// Every rule of the RKE2 STIG V2R7 has a row, aliases carry their source's
+// evidence, and the rules evaluated here judge what they can from the API.
+func TestRKE2STIGRows(t *testing.T) {
+	pod := func(ns, name, image string, env ...corev1.EnvVar) corev1.Pod {
+		return corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}, Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: image, Env: env}}}}
+	}
+	snap := &k8s.Snapshot{
+		Distribution: "rke2", Version: "v1.35.8+rke2r1",
+		Pods: []corev1.Pod{
+			{ObjectMeta: metav1.ObjectMeta{Name: "kube-apiserver-cp-1", Namespace: "kube-system", Labels: map[string]string{"component": "kube-apiserver"}},
+				Spec: corev1.PodSpec{NodeName: "cp-1", Containers: []corev1.Container{{Name: "kube-apiserver", Args: []string{"kube-apiserver", "--anonymous-auth=false", "--authorization-mode=Node,RBAC", "--audit-policy-file=/etc/rancher/rke2/audit-policy.yaml", "--audit-log-mode=blocking-strict", "--audit-log-maxage=30", "--tls-min-version=VersionTLS12", "--tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", "--admission-control-config-file=/etc/rancher/rke2/rke2-pss.yaml"}}}}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "kube-controller-manager-cp-1", Namespace: "kube-system", Labels: map[string]string{"component": "kube-controller-manager"}},
+				Spec: corev1.PodSpec{NodeName: "cp-1", Containers: []corev1.Container{{Name: "kube-controller-manager", Args: []string{"kube-controller-manager", "--use-service-account-credentials=true", "--bind-address=127.0.0.1", "--tls-min-version=VersionTLS12"}}}}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "kube-scheduler-cp-1", Namespace: "kube-system", Labels: map[string]string{"component": "kube-scheduler"}},
+				Spec: corev1.PodSpec{NodeName: "cp-1", Containers: []corev1.Container{{Name: "kube-scheduler", Args: []string{"kube-scheduler", "--bind-address=127.0.0.1", "--tls-min-version=VersionTLS12", "--tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"}}}}},
+			pod("app", "web-1", "registry.example.com/web:1.2"),
+			pod("app", "web-2", "registry.example.com/web:1.3"),
+			pod("app", "db", "docker.io/library/postgres:16", corev1.EnvVar{Name: "POSTGRES_PASSWORD", Value: "hunter2"}),
+			pod("default", "debug", "busybox:latest"),
+		},
+		KubeletConfigs: map[string]map[string]any{"cp-1": {"authentication": map[string]any{"anonymous": map[string]any{"enabled": false}}, "authorization": map[string]any{"mode": "Webhook"}, "readOnlyPort": float64(0), "protectKernelDefaults": true, "streamingConnectionIdleTimeout": "5m0s"}},
+	}
+	nodes := map[string]*nodeinfo.Info{"cp-1": {Node: "cp-1", Dist: "rke2", ControlPlane: true, EtcdUser: true, SELinux: "Enforcing", Settings: map[string]string{"profile": "cis", "disable": ""},
+		ConfigFiles: []nodeinfo.ConfigFile{{Path: "/etc/rancher/rke2/config.yaml", Content: "profile: cis\ndisable:\n  - rke2-ingress-nginx\n"}},
+		PSA:         []*nodeinfo.PSAConfig{{Path: "/etc/rancher/rke2/rke2-pss.yaml", Enforce: "restricted", Audit: "restricted", Warn: "restricted"}},
+		Sysctl:      map[string]string{}, Perms: []nodeinfo.Perm{{Path: "/etc/rancher/rke2/config.yaml", Mode: "600", User: "root", Group: "root", Type: "regular file"}}, KubeletFlags: map[string]string{}}}
+	rs := Evaluate(Input{Snap: snap, Nodes: nodes})
+	want := map[string]Status{
+		"V-254553": Fail, // the controller manager has no cipher list
+		"V-254554": Pass, "V-254555": Pass, "V-254556": Pass, "V-254557": Pass, "V-254559": Pass, "V-254561": Pass, "V-254562": Pass,
+		"V-254563": Pass, "V-254564": Pass, "V-254565": Manual, "V-254566": Manual, "V-254567": Fail, "V-254568": Pass, "V-254569": Pass,
+		"V-254570": Fail, "V-254571": Pass, "V-254572": Pass, "V-254574": Fail, "V-254575": Manual, "V-268321": Manual,
+	}
+	if len(want) != 21 {
+		t.Fatalf("the RKE2 STIG V2R7 has 21 rules, the test lists %d", len(want))
+	}
+	for id, st := range want {
+		r := find(rs, id)
+		if r == nil {
+			t.Errorf("missing RKE2 STIG rule %s", id)
+			continue
+		}
+		if r.Status != st {
+			t.Errorf("%s: got %s (%s) want %s", id, r.Status, r.Detail, st)
+		}
+		if r.RuleID == "" || !strings.HasPrefix(r.RuleID, "CNTR-R2-") {
+			t.Errorf("%s: no CNTR-R2 rule id (%q)", id, r.RuleID)
+		}
+	}
+	for id, sub := range map[string]string{
+		"V-254553": "RKE2-cm-ciphers: cp-1: --tls-cipher-suites not set",
+		"V-254567": "app/pod/db (POSTGRES_PASSWORD)",
+		"V-254570": "default/debug",
+		"V-254574": "registry.example.com/web (1.2, 1.3)",
+		"V-254571": "rke2-pss.yaml: defaults enforce/audit/warn restricted",
+		"V-254565": "disabled: rke2-ingress-nginx; still enabled: rke2-canal, rke2-coredns, rke2-metrics-server",
+	} {
+		if r := find(rs, id); r == nil || !strings.Contains(r.Detail, sub) {
+			t.Errorf("%s detail: %+v (want %q)", id, r, sub)
+		}
+	}
+	// the STIG applies to rke2/k3s only (an upstream cluster with upstream nodes)
+	snap.Distribution = "kubeadm"
+	nodes["cp-1"].Dist = "kubeadm"
+	for _, r := range Evaluate(Input{Snap: snap, Nodes: nodes}) {
+		if strings.HasPrefix(r.ID, "V-2545") || strings.HasPrefix(r.ID, "V-268") {
+			t.Errorf("RKE2 STIG row on kubeadm: %s", r.ID)
+		}
 	}
 }

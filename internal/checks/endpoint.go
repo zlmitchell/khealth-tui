@@ -18,7 +18,15 @@ import (
 type EndpointReport struct {
 	Host    string // kubeconfig server host ("" when unknown)
 	IsNode  string // node whose address the host is ("" = not a node address: VIP / LB / external name)
+	Proxied bool   // the server URL goes through Rancher (/k8s/clusters/<id>): TLS ends at Rancher, the apiserver certificate is not what the client sees
 	Servers []EndpointServer
+}
+
+// RancherProxied reports whether a kubeconfig server URL is Rancher's
+// cluster proxy (the kubeconfig Rancher hands out without ACE).
+func RancherProxied(server string) bool {
+	u, err := url.Parse(server)
+	return err == nil && strings.Contains(u.Path, "/k8s/clusters/")
 }
 
 // EndpointServer is one control-plane node's view.
@@ -46,7 +54,7 @@ func APIHost(server string) string {
 // upstream (kubeadm) clusters the configured SANs come from the cluster's
 // kubeadm-config ClusterConfiguration instead of a file on the node.
 func Endpoint(apiServer string, nodes []corev1.Node, infos map[string]*nodeinfo.Info, kubeadm *k8s.KubeadmConfig) EndpointReport {
-	rep := EndpointReport{Host: APIHost(apiServer)}
+	rep := EndpointReport{Host: APIHost(apiServer), Proxied: RancherProxied(apiServer)}
 	var kubeadmSANs, kubeadmCIDRs []string
 	if kubeadm != nil {
 		kubeadmSANs = append(kubeadmSANs, kubeadm.CertSANs...)
@@ -92,6 +100,9 @@ func Endpoint(apiServer string, nodes []corev1.Node, infos map[string]*nodeinfo.
 					s.HostOK = true
 				}
 			}
+			if rep.Proxied {
+				s.HostOK = true // Rancher's certificate answers, not this one
+			}
 		}
 		rep.Servers = append(rep.Servers, s)
 	}
@@ -114,6 +125,9 @@ func evalEndpoint(in Input, add func(Severity, string, string, string, string)) 
 		if rep.Host != "" && s.HasCert && !s.HostOK {
 			add(SevWarn, "node", s.Node, fmt.Sprintf("kubeconfig endpoint %s is not in this server's apiserver certificate", rep.Host), "add it to "+SANKey(s.Dist)+" and reissue the certificate ("+ReissueHint(s.Dist)+"), or point the kubeconfig at a name/VIP the cert covers (--bootstrap-kubeconfig does that)")
 		}
+	}
+	if rep.Host != "" && rep.Proxied {
+		add(SevInfo, "cluster", "endpoint", "kubeconfig goes through the Rancher proxy ("+rep.Host+"): every request depends on Rancher being up and on the cluster-agent's tunnel", "with the Authorized Cluster Endpoint enabled, the kubeconfig Rancher hands out carries a direct context (see the Addons tab, Rancher management)")
 	}
 	if rep.Host != "" && rep.IsNode != "" && servers > 1 {
 		dist := "rke2"

@@ -43,7 +43,9 @@ func (a *App) overviewContent() content {
 			unhealthy++
 		}
 	}
-	hdr = append(hdr, styleTitle.Render("Cluster")+"  "+kv("context", a.client.Context)+"  "+kv("server", a.client.Host)+"  "+kv("version", s.Version)+"  "+kv("distribution", s.Distribution)+"  "+kv("namespaces", fmt.Sprint(len(s.Namespaces)))+"  "+kv("control-plane", fmt.Sprint(cp)))
+	// a Rancher-proxied server URL alone can be most of the width: flow the
+	// facts across lines instead of running off the screen
+	hdr = append(hdr, flow(a.width-2, 2, styleTitle.Render("Cluster"), kv("context", a.client.Context), kv("server", a.client.Host), kv("version", s.Version), kv("distribution", s.Distribution), kv("namespaces", fmt.Sprint(len(s.Namespaces))), kv("control-plane", fmt.Sprint(cp)))...)
 
 	// ---- tiles ----
 	cpu, mem, disk := a.clusterUsage()
@@ -112,13 +114,24 @@ func (a *App) overviewContent() content {
 			liveFail++
 		}
 	}
-	api := kv("readyz", okText(readyFail == 0 && len(s.Readyz) > 0, fmt.Sprintf("ok (%d checks)", len(s.Readyz)), fmt.Sprintf("%d failing", readyFail))) + "  " + kv("livez", okText(liveFail == 0 && len(s.Livez) > 0, "ok", fmt.Sprintf("%d failing", liveFail)))
-	api += "  " + kv("metrics-server", okText(s.MetricsAvailable, "yes", "no"))
-	if s.Rancher != nil && s.Rancher.Managed {
-		api += "  " + kv("rancher", okText(s.Rancher.ClusterAgentOK, "connected "+s.Rancher.Server, "disconnected "+s.Rancher.Server))
+	// an empty check list is a probe that could not be read (a Rancher
+	// proxy does not serve /readyz?verbose; RBAC), not zero failures
+	healthz := func(name string, checks int, failing int) string {
+		switch {
+		case checks == 0:
+			return kv(name, styleDim.Render("not readable"))
+		case failing == 0:
+			return kv(name, styleOK.Render(fmt.Sprintf("ok (%d checks)", checks)))
+		}
+		return kv(name, styleCrit.Render(fmt.Sprintf("%d failing", failing)))
 	}
-	api += "  " + kv("warning events", fmt.Sprint(len(s.WarningEvents()))) + " " + styleInfo.Render(sparkline(a.values("events.warn"), 12, 0))
-	hdr = append(hdr, api)
+	api := []string{healthz("readyz", len(s.Readyz), readyFail), healthz("livez", len(s.Livez), liveFail)}
+	api = append(api, kv("metrics-server", okText(s.MetricsAvailable, "yes", "no")))
+	if s.Rancher != nil && s.Rancher.Managed {
+		api = append(api, kv("rancher", okText(s.Rancher.ClusterAgentOK, "connected "+s.Rancher.Server, "disconnected "+s.Rancher.Server)))
+	}
+	api = append(api, kv("warning events", fmt.Sprint(len(s.WarningEvents())))+" "+styleInfo.Render(sparkline(a.values("events.warn"), 12, 0)))
+	hdr = append(hdr, flow(a.width-2, 2, api...)...)
 
 	fsegs := []seg{{float64(crit), styleCrit, "critical"}, {float64(warn), styleWarn, "warning"}, {float64(info), styleInfo, "info"}}
 	trend := sparkStyled(a.values("findings.crit"), 12, 0, 1, 1)
@@ -250,7 +263,7 @@ func (a *App) nodesContent() content {
 		roles := strings.Join(k8s.NodeRoles(n), ",")
 		status := okText(k8s.NodeReady(n), "Ready", "NotReady")
 		if n.Spec.Unschedulable {
-			status += styleDim.Render(",Sched✗")
+			status += styleWarn.Render(",cordoned")
 		}
 		for _, ct := range []corev1.NodeConditionType{corev1.NodeMemoryPressure, corev1.NodeDiskPressure, corev1.NodePIDPressure} {
 			if st, _ := k8s.NodeCondition(n, ct); st == corev1.ConditionTrue {

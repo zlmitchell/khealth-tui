@@ -387,3 +387,71 @@ func TestTriageSystemdEtcd(t *testing.T) {
 		}
 	}
 }
+
+// KUBECONFIG only, single server: the exec probe answers member list and
+// endpoint status but its /health line is for 127.0.0.1 (no match with
+// the member's client URL) and SSH fails to authenticate. The member is
+// serving - the status says so - and an unknown member is not a lost one.
+func TestTriageUnknownIsNotLost(t *testing.T) {
+	in := baseInput()
+	in.Snap.Nodes = []corev1.Node{node("cp-1", true, "10.0.0.158")}
+	in.Nodes["cp-1"] = &nodeinfo.Info{Node: "cp-1", Err: fmt.Errorf("ssh: handshake failed: ssh: unable to authenticate")}
+	in.EtcdExec = &etcd.Probe{
+		EtcdctlVia:     "kubectl exec etcd-cp-1",
+		Members:        []etcd.Member{member("a1", "cp-1", "10.0.0.158")},
+		Statuses:       []etcd.EndpointStatus{status("a1", "a1", 3, 9000)},
+		EndpointHealth: []etcd.EndpointHealth{{Endpoint: "https://127.0.0.1:2379", Healthy: true}},
+	}
+	for _, f := range Evaluate(in) {
+		if strings.Contains(f.Message, "quorum lost") {
+			t.Fatalf("serving member reported lost: %s", f.Message)
+		}
+	}
+	// no exec probe at all and no SSH: nothing is known, nothing is lost
+	in.EtcdExec = nil
+	for _, f := range Evaluate(in) {
+		if strings.Contains(f.Message, "quorum lost") {
+			t.Fatalf("unknown member reported lost: %s", f.Message)
+		}
+	}
+	// but a member whose status carries an error is down
+	in.EtcdExec = &etcd.Probe{EtcdctlVia: "kubectl exec etcd-cp-1", Members: []etcd.Member{member("a1", "cp-1", "10.0.0.158")},
+		Statuses: []etcd.EndpointStatus{{Endpoint: "https://10.0.0.158:2379", MemberID: "a1", Errors: []string{"context deadline exceeded"}}}}
+	lost := false
+	for _, f := range Evaluate(in) {
+		if strings.Contains(f.Message, "quorum lost") {
+			lost = true
+		}
+	}
+	if !lost {
+		t.Error("member with a status error not reported lost")
+	}
+}
+
+// A container that restarted within the hour but serves now (healthy
+// member, Running, not backing off) is a WARN to look into, not an outage.
+func TestTriageRecoveredRestarts(t *testing.T) {
+	in := baseInput()
+	in.EtcdExec = healthyExec()
+	in.Nodes["cp-2"] = &nodeinfo.Info{Node: "cp-2", Services: []nodeinfo.Service{{Name: "rke2-server", Active: "active", Sub: "running"}}}
+	in.Snap.Pods = []corev1.Pod{{
+		ObjectMeta: metav1.ObjectMeta{Name: "etcd-cp-2", Namespace: "kube-system", Labels: map[string]string{"component": "etcd"}},
+		Spec:       corev1.PodSpec{NodeName: "cp-2", Containers: []corev1.Container{{Name: "etcd"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "etcd", RestartCount: 5, Ready: true,
+			State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(now.Add(-20 * time.Minute))}},
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, FinishedAt: metav1.NewTime(now.Add(-21 * time.Minute))}},
+		}}},
+	}}
+	f := findObj(etcdFindings(in), "cp-2")
+	if f == nil || f.Severity != SevWarn || !strings.Contains(f.Message, "etcd container restarted 5 time(s) in the last hour") || !strings.Contains(f.Message, "member cp-2-abcd1234 is healthy now") {
+		t.Fatalf("want a WARN recovered finding, got %+v", f)
+	}
+	// the same restarts with the member unhealthy stay critical
+	x := healthyExec()
+	x.EndpointHealth[1] = etcd.EndpointHealth{Endpoint: "https://10.0.0.2:2379", Healthy: false, Error: "connection refused"}
+	in.EtcdExec = x
+	if f := findObj(etcdFindings(in), "cp-2"); f == nil || f.Severity != SevCrit {
+		t.Fatalf("unhealthy member must stay CRIT, got %+v", f)
+	}
+}

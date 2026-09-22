@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/zlmitchell/khealth-tui/internal/config"
@@ -25,20 +26,57 @@ func (a *App) exportInput() export.Input {
 	return in
 }
 
-// exportReport writes the JSON + XLSX report (key e) and says where.
-func (a *App) exportReport() {
+// exportPrompt opens the format chooser (key e): a stray keypress must not
+// write files.
+func (a *App) exportPrompt() {
 	if a.snap == nil {
 		a.setStatus("nothing to export yet: waiting for the first snapshot")
 		return
 	}
-	jsonPath, xlsxPath, err := export.WriteFiles(a.cfg.Export.Dir, export.Build(a.exportInput()))
+	a.overlay = ovExport
+}
+
+// exportDir is where the report goes, absolute for the message.
+func (a *App) exportDir() string {
+	dir := a.cfg.Export.Dir
+	if dir == "" {
+		dir = "."
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
+}
+
+// exportReport writes the report in the chosen format(s) and says where.
+func (a *App) exportReport(json, xlsx bool) {
+	if a.snap == nil {
+		a.setStatus("nothing to export yet: waiting for the first snapshot")
+		return
+	}
+	paths, err := export.WriteFormats(a.cfg.Export.Dir, export.Build(a.exportInput()), json, xlsx)
 	if err != nil {
 		a.setStatus("export failed: " + err.Error())
 		return
 	}
-	dir := filepath.Dir(jsonPath)
-	if abs, err := filepath.Abs(dir); err == nil {
-		dir = abs
+	var names []string
+	for _, p := range paths {
+		names = append(names, filepath.Base(p))
 	}
-	a.setStatus(fmt.Sprintf("exported %s and %s in %s", filepath.Base(jsonPath), filepath.Base(xlsxPath), dir))
+	a.setStatus(fmt.Sprintf("exported %s in %s", strings.Join(names, " and "), a.exportDir()))
+}
+
+// renderExportPrompt is the e overlay.
+func (a *App) renderExportPrompt() (string, []string) {
+	r := export.Build(a.exportInput())
+	lines := []string{
+		styleBold.Render("Write the findings report to " + a.exportDir()),
+		"",
+		"  " + styleKey.Render("j") + "  " + export.FileBase(r) + ".json  " + styleDim.Render("(findings, resolved, security benchmarks, nodes - for diffing and alerting)"),
+		"  " + styleKey.Render("x") + "  " + export.FileBase(r) + ".xlsx  " + styleDim.Render("(Summary, Findings, one sheet per benchmark, Nodes)"),
+		"  " + styleKey.Render("b") + "  both",
+		"",
+		styleDim.Render("Nothing is re-collected: the report is what the screen shows. ") + styleKey.Render("esc") + styleDim.Render(" cancels."),
+	}
+	return "Export report", lines
 }

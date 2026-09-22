@@ -533,3 +533,22 @@ func TestRegProbeParseImplicitAndSkipped(t *testing.T) {
 		t.Fatalf("skipped: %+v", byHost["quay.io"])
 	}
 }
+
+// A worker that used to be a server (or was reinstalled as an agent) keeps
+// /var/lib/rancher/rke2/server on disk; the active unit decides the role.
+// A server whose unit is down stays a server.
+func TestRoleFollowsTheActiveUnit(t *testing.T) {
+	dist := "===DIST\n/etc/rancher/rke2\n/var/lib/rancher/rke2\n/var/lib/rancher/rke2/server\n"
+	worker := Parse("w-1", "h", dist+"===SVC\nrke2-server loaded inactive dead\nrke2-agent loaded active running\n===END\n", time.Now())
+	if worker.ControlPlane || worker.SupervisorUnit() != "rke2-agent" {
+		t.Errorf("agent node with a leftover server dir: cp=%v unit=%s", worker.ControlPlane, worker.SupervisorUnit())
+	}
+	down := Parse("cp-1", "h", dist+"===SVC\nrke2-server loaded inactive dead\nrke2-agent loaded inactive dead\n===END\n", time.Now())
+	if !down.ControlPlane || down.SupervisorUnit() != "rke2-server" {
+		t.Errorf("server with its unit down: cp=%v unit=%s", down.ControlPlane, down.SupervisorUnit())
+	}
+	server := Parse("cp-2", "h", dist+"===SVC\nrke2-server loaded active running\n===END\n", time.Now())
+	if !server.ControlPlane {
+		t.Error("running server not a control plane")
+	}
+}

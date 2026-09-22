@@ -259,7 +259,7 @@ func Script(cfg config.Etcd, full, etcdctl bool) string {
 			dirs = append(dirs, c)
 		}
 	}
-	s := script
+	s := nodeinfo.AsYAMLShell + script
 	s = strings.ReplaceAll(s, "__EXTRA_DIRS__", strings.Join(dirs, " "))
 	s = strings.ReplaceAll(s, "__EP__", Clean(cfg.Endpoint))
 	s = strings.ReplaceAll(s, "__CA__", Clean(cfg.CACert))
@@ -313,7 +313,8 @@ func Parse(node, out string) *Probe {
 		if !ok {
 			continue
 		}
-		p.RKE2Config[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		// values from a JSON config.yaml.d file keep their quotes
+		p.RKE2Config[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
 	}
 	p.ConfigDump = nodeinfo.ParseDumps(secs["CONFIGDUMP"])
 	if h := strings.TrimSpace(secs["HEALTH"]); h != "" {

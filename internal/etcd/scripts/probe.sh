@@ -16,16 +16,14 @@ DIST=unknown; CA=; CERT=; KEY=; EP=https://127.0.0.1:2379; CRICTL=; CRI_EP=; DAT
 H=$(hostname)
 # rke2/k3s data-dir may be customized in config.yaml
 RKE2_DD=/var/lib/rancher/rke2; K3S_DD=/var/lib/rancher/k3s
-for f in /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.d/*.yaml; do
-  [ -f "$f" ] || continue
-  v=$(sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' "$f" | tail -1 | sed 's/[[:space:]]*$//')
-  [ -n "$v" ] && RKE2_DD=$v
-done
-for f in /etc/rancher/k3s/config.yaml /etc/rancher/k3s/config.yaml.d/*.yaml; do
-  [ -f "$f" ] || continue
-  v=$(sed -nE 's/^[[:space:]]*data-dir:[[:space:]]*"?([^"#]+)"?.*/\1/p' "$f" | tail -1 | sed 's/[[:space:]]*$//')
-  [ -n "$v" ] && K3S_DD=$v
-done
+# (asyaml.sh is prepended: Rancher-delivered config.yaml.d files are JSON)
+cfgkey() { # last value of a top-level key across the distro's config files
+  for f in /etc/rancher/$1/config.yaml /etc/rancher/$1/config.yaml.d/*.yaml; do
+    [ -f "$f" ] && asyaml "$f"
+  done | sed -nE "s/^[[:space:]]*$2:[[:space:]]*\"?([^\"#]+)\"?.*/\1/p" | tail -1 | sed 's/[[:space:]]*$//'
+}
+v=$(cfgkey rke2 data-dir); [ -n "$v" ] && RKE2_DD=$v
+v=$(cfgkey k3s data-dir); [ -n "$v" ] && K3S_DD=$v
 if [ -d "$RKE2_DD/server/tls/etcd" ]; then
   DIST=rke2
   CA=$RKE2_DD/server/tls/etcd/server-ca.crt
@@ -35,6 +33,7 @@ if [ -d "$RKE2_DD/server/tls/etcd" ]; then
   CRI_EP=unix:///run/k3s/containerd/containerd.sock
   DATADIR=$RKE2_DD/server/db/etcd
   SNAPDIR=$RKE2_DD/server/db/snapshots
+  v=$(cfgkey rke2 etcd-snapshot-dir); [ -n "$v" ] && SNAPDIR=$v
 elif [ -d "$K3S_DD/server/tls/etcd" ]; then
   DIST=k3s
   CA=$K3S_DD/server/tls/etcd/server-ca.crt
@@ -42,6 +41,7 @@ elif [ -d "$K3S_DD/server/tls/etcd" ]; then
   KEY=$K3S_DD/server/tls/etcd/server-client.key
   DATADIR=$K3S_DD/server/db/etcd
   SNAPDIR=$K3S_DD/server/db/snapshots
+  v=$(cfgkey k3s etcd-snapshot-dir); [ -n "$v" ] && SNAPDIR=$v
 elif [ -d /etc/kubernetes/pki/etcd ]; then
   DIST=kubeadm
   CA=/etc/kubernetes/pki/etcd/ca.crt
@@ -95,7 +95,7 @@ sec RKE2CONFIG
 if [ "$DIST" = rke2 ] || [ "$DIST" = k3s ]; then
   for f in /etc/rancher/$DIST/config.yaml /etc/rancher/$DIST/config.yaml.d/*.yaml; do
     [ -f "$f" ] || continue
-    grep -E '^[[:space:]]*(etcd-|cluster-init|disable-etcd|server:|profile:|secrets-encryption)' "$f" 2>/dev/null | grep -viE 'token' | sed -E -e "s/^([[:space:]]*[^:]*(access-key|secret-key)[^:]*:)[[:space:]]*(\"\"|'')[[:space:]]*$/\1/" -e 's/^([[:space:]]*[^:]*(access-key|secret-key)[^:]*:)[[:space:]]*[^[:space:]#].*/\1 <set>/' | sed "s|^|$f: |"
+    asyaml "$f" | grep -E '^[[:space:]]*(etcd-|cluster-init|disable-etcd|server:|profile:|secrets-encryption)' 2>/dev/null | grep -viE 'token' | sed -E -e "s/^([[:space:]]*[^:]*(access-key|secret-key)[^:]*:)[[:space:]]*(\"\"|'')[[:space:]]*$/\1/" -e 's/^([[:space:]]*[^:]*(access-key|secret-key)[^:]*:)[[:space:]]*[^[:space:]#].*/\1 <set>/' | sed "s|^|$f: |"
   done
 fi
 sec CONFIGDUMP
