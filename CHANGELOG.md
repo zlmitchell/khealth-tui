@@ -1,3 +1,11 @@
+## [1.0.2](https://github.com/zlmitchell/khealth-tui/compare/v1.0.1...v1.0.2) (2026-09-22)
+
+
+### Bug Fixes
+
+* dump the ACE authn webhook file, list Rancher's delivered config-files ([5139897](https://github.com/zlmitchell/khealth-tui/commit/513989798ed69026fb304166d4039cdf6da93089))
+* system namespaces per deployment, Rancher System project, Trident hints ([de4188d](https://github.com/zlmitchell/khealth-tui/commit/de4188d9aefceed189031734d581d54453878692))
+
 ## [1.0.1](https://github.com/zlmitchell/khealth-tui/compare/v1.0.0...v1.0.1) (2026-09-21)
 
 
