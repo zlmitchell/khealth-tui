@@ -92,6 +92,11 @@ func TestCompleteContextsAndHosts(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	t.Setenv("KUBECONFIG", "")
+	// HOME does not hide the machine-wide known_hosts, and CI runners ship
+	// one; point it at nothing so the assertions below are about the
+	// fixtures only
+	defer func(p string) { systemKnownHosts = p }(systemKnownHosts)
+	systemKnownHosts = filepath.Join(home, "no-such-system-known-hosts")
 
 	// a kubeconfig whose cluster and user names must NOT be offered
 	kube := filepath.Join(home, ".kube")

@@ -16,3 +16,6 @@ node_modules/
 # findings reports written by e / --export into the working directory
 khealth-*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].json
 khealth-*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].xlsx
+
+# coverage profile written by `go test -coverprofile` (CI does this too)
+coverage.out

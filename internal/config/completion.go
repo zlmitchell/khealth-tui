@@ -386,6 +386,11 @@ func kubeContexts() []string {
 	return out
 }
 
+// systemKnownHosts is the machine-wide known_hosts. A variable so the
+// tests can point it somewhere empty: setting HOME does not hide it, and a
+// CI runner ships one (github.com, ssh.dev.azure.com).
+var systemKnownHosts = "/etc/ssh/ssh_known_hosts"
+
 // knownHosts lists the hosts worth completing a [user@]server-node with:
 // known_hosts (one line names every alias, and a host appears once per key
 // type, so they are deduplicated) and the Host entries of ~/.ssh/config.
@@ -409,7 +414,7 @@ func knownHosts() []string {
 	if err != nil {
 		return nil
 	}
-	for _, p := range []string{filepath.Join(home, ".ssh", "known_hosts"), "/etc/ssh/ssh_known_hosts"} {
+	for _, p := range []string{filepath.Join(home, ".ssh", "known_hosts"), systemKnownHosts} {
 		f, err := os.Open(p)
 		if err != nil {
 			continue
