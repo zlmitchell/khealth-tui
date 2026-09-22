@@ -1,3 +1,10 @@
+## [1.0.5](https://github.com/zlmitchell/khealth-tui/compare/v1.0.4...v1.0.5) (2026-09-22)
+
+
+### Bug Fixes
+
+* reach a server that changed address for the etcd rejoin ([b60c9c3](https://github.com/zlmitchell/khealth-tui/commit/b60c9c3ab46731161b0a6469b5bf1506c3138227))
+
 ## [1.0.4](https://github.com/zlmitchell/khealth-tui/compare/v1.0.3...v1.0.4) (2026-09-22)
 
 
