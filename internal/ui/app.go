@@ -78,6 +78,7 @@ const (
 	ovPodLogs
 	ovContext
 	ovRescue
+	ovSSH // s when SSH is unusable: edit user/become/key/host-key policy
 )
 
 // row is one selectable/scrollable line of a tab.
@@ -195,6 +196,7 @@ type App struct {
 	revCursor     int
 	actionRunning bool
 	actionLabel   string      // what the running action is called in the header
+	sshEdit       *sshEditor  // the SSH settings dialog (ovSSH)
 	rescue        *rescueView // etcd snapshot restore in progress (X on the etcd tab)
 
 	// apiserver failover: the kubeconfig's server is down, another control
@@ -1578,7 +1580,10 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "s":
 		if a.runner == nil {
-			a.setStatus("SSH unavailable: " + a.sshErr)
+			// no runner means no login worked at all, so there is nothing to
+			// toggle: offer the settings instead of a status line, which was
+			// a dead end that needed a restart to leave
+			a.openSSHConfig()
 		} else {
 			a.sshEnabled = !a.sshEnabled
 			if a.sshEnabled {
@@ -1787,7 +1792,8 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := m.String()
 	// tab switching is disabled while a modal view is open: say so instead
 	// of silently swallowing the key (pod logs use tab/[ ] for containers)
-	if a.overlay != ovPodLogs && a.overlay != ovNamespace && a.overlay != ovRescue && !(a.overlay == ovDetail && a.detailFind.typing) {
+	// ovSSH is here because left/right cycle its become and host key rows
+	if a.overlay != ovPodLogs && a.overlay != ovNamespace && a.overlay != ovRescue && a.overlay != ovSSH && !(a.overlay == ovDetail && a.detailFind.typing) {
 		switch key {
 		case "tab", "shift+tab", "[", "]", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "left", "right", "h", "l":
 			if a.overlay != ovInspect || key == "tab" || key == "shift+tab" {
@@ -1825,6 +1831,8 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleLogKey(key)
 	case ovRescue:
 		return a.handleRescueKey(m)
+	case ovSSH:
+		return a.handleSSHKey(m)
 	case ovContext:
 		switch key {
 		case "esc", "q", "C":
@@ -2593,6 +2601,8 @@ func (a *App) renderFooter() string {
 		keys = []string{"esc back", "enter drill down", "j/k move", "/ find", "n/N next/prev hit", "q close", "(tabs resume after esc)"}
 	case ovPodLogs:
 		keys = []string{"esc close", "[ ]/tab container", "{ } pod", "p previous", "f follow", "w wrap", "/ find", "n/N hit", "& only hits", "T timestamps", "H highlight", "r reload"}
+	case ovSSH:
+		keys = []string{"esc close", "j/k choose", "enter edit/run", "←/→ cycle"}
 	case ovRescue:
 		keys = []string{"esc cancel/back", "j/k choose", "enter next"}
 		if r := a.rescue; r != nil {
@@ -2670,6 +2680,8 @@ func (a *App) renderOverlay() string {
 		title, lines = a.renderPodLogs()
 	case ovRescue:
 		title, lines = a.renderRescue()
+	case ovSSH:
+		title, lines = a.renderSSHConfig()
 	case ovContext:
 		title = "Switch cluster context"
 		lines = append(lines, styleDim.Render("contexts of the kubeconfig in use plus every ~/.kube/khealth-*.yaml written by `khealth user@host`; enter switches and starts a fresh first-contact cycle"), "")
@@ -2785,7 +2797,7 @@ func helpLines(width int) []string {
 		{key("a"), "toggle problems-only view (Overview, Inspect, Events, Security, Resources)"},
 		{key("r"), "refresh now (API + light SSH collection)"},
 		{key("R"), "full refresh: journal logs, images, tarballs, PV du (not the OS STIG)"},
-		{key("s"), "toggle SSH collection on/off"},
+		{key("s"), "toggle SSH collection on/off; when no login works it opens the SSH settings instead (user, key, password, become, host key policy) and reconnects without restarting"},
 		{key("P"), "footprint: what khealth itself costs the API server, the nodes (remote CPU per probe) and this host"},
 		{key("e"), "export the findings, the security scan (one sheet per benchmark) and the node hardening table: asks for JSON, XLSX or both (--export-dir / export.dir, default: current directory)"},
 		{key("?"), "this help"},
