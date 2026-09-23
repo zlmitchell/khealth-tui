@@ -70,7 +70,7 @@ mirrors:
 ===CRICTL
 crictl=/x
 ===IMAGES
-{"images":[{"id":"sha256:a","repoTags":["nginx:1"],"size":"10"},{"id":"sha256:b","repoTags":["old:1"],"size":"6000000000"}]}
+{"images":[{"id":"sha256:a","repoTags":["nginx:1"],"size":"10"},{"id":"sha256:b","repoTags":[],"size":"6000000000"},{"id":"sha256:c","repoTags":["airgap:preload"],"size":"2000000000"}]}
 ===CONTAINERS
 {"containers":[{"id":"c","metadata":{"name":"c"},"image":{"image":"sha256:a"},"imageRef":"sha256:a","labels":{"io.kubernetes.pod.namespace":"default","io.kubernetes.pod.name":"app-1"}}]}
 ===TARBALLS
@@ -258,7 +258,10 @@ func TestEvaluateRichCluster(t *testing.T) {
 		{"etcd", "cp-1", "S3 endpoint"},
 		{"cluster", "endpoint", "single server node"},
 		{"logs", "cp-1", "30 error log lines"},
-		{"images", "cp-1", "unused images"},
+		// the untagged 6 GB image is what a prune reclaims; the tagged idle
+		// one (airgap:preload) is counted as not running but never as
+		// dangling, so the advice cannot point at it
+		{"images", "cp-1", "dangling images"},
 		{"workload", "default/app-1", "CrashLoopBackOff"},
 		{"workload", "default/app-1", "OOMKilled"},
 		{"workload", "default/pull", "ImagePullBackOff"},

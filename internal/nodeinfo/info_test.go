@@ -566,3 +566,43 @@ func TestContainerdSandboxImageKeys(t *testing.T) {
 		}
 	}
 }
+
+// The images tab and the prune advice separate "nothing runs it" from
+// "nothing can name it": on an airgapped node the first is mostly the
+// preloaded images and the previous release, which must not be pruned.
+func TestDanglingVsUnusedImages(t *testing.T) {
+	i := &Info{
+		Images: []Image{
+			{ID: "sha256:running", Tags: []string{"nginx:1.25"}, Size: 100},
+			{ID: "sha256:idle", Tags: []string{"nginx:1.24"}, Size: 200}, // airgap preload / previous release
+			{ID: "sha256:orphan", Size: 400},                             // retagged away: no name left
+			{ID: "sha256:orphan2", Tags: []string{}, Size: 50},           // same, empty rather than nil
+		},
+		Containers: []Container{{Image: "nginx:1.25", ImageRef: "sha256:running"}},
+	}
+
+	unused, ub := i.UnusedImages()
+	if len(unused) != 3 || ub != 650 {
+		t.Errorf("not running: %d images %d bytes, want 3 / 650", len(unused), ub)
+	}
+	dangling, db := i.DanglingImages()
+	if len(dangling) != 2 || db != 450 {
+		t.Errorf("dangling: %d images %d bytes, want 2 / 450", len(dangling), db)
+	}
+	for _, im := range dangling {
+		if len(im.Tags) != 0 {
+			t.Errorf("a tagged image is not dangling: %+v", im)
+		}
+		if im.ID == "sha256:idle" {
+			t.Errorf("the previous release's image must not count as dangling")
+		}
+	}
+	// the running one is in neither
+	for _, set := range [][]Image{unused, dangling} {
+		for _, im := range set {
+			if im.ID == "sha256:running" {
+				t.Errorf("a running image was counted as reclaimable")
+			}
+		}
+	}
+}

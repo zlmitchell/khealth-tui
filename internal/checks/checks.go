@@ -332,9 +332,14 @@ func Evaluate(in Input) []Finding {
 			add(SevWarn, "addons", name, fmt.Sprintf("containerd certs.d has hosts.toml for %s but config.toml sets no config_path: the mirrors are not applied", strings.Join(ni.ContainerdHosts, ", ")), `[plugins."io.containerd.cri.v1.images".registry] config_path = "/etc/containerd/certs.d" (containerd 2.x; io.containerd.grpc.v1.cri on 1.x), then `+nv.RegistryReload)
 		}
 		if ni.Heavy {
-			unused, bytes := ni.UnusedImages()
+			// only the untagged ones: an image no container runs is often
+			// meant to be there (airgap preloads, the release before this
+			// one), and telling an airgapped operator to prune those is how
+			// a node ends up unable to start a pod it used to run
+			dangling, bytes := ni.DanglingImages()
 			if float64(bytes)/1e9 >= thr.UnusedImagesGB {
-				add(SevInfo, "images", name, fmt.Sprintf("%d unused images (%.1f GB)", len(unused), float64(bytes)/1e9), "crictl rmi --prune (keep airgap images if you rely on them)")
+				unused, ub := ni.UnusedImages()
+				add(SevInfo, "images", name, fmt.Sprintf("%d dangling images (%.1f GB): no tag and no container, left by a rebuild or retag; %d images in total are not running (%.1f GB), which on an airgapped node is usually deliberate", len(dangling), float64(bytes)/1e9, len(unused), float64(ub)/1e9), "crictl rmi --prune removes the untagged ones; check the tagged-but-idle images against your airgap tarballs before touching them")
 			}
 		}
 	}

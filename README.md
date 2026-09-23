@@ -40,7 +40,7 @@ https://github.com/user-attachments/assets/ec4e8438-a6a4-43bc-9202-92bfdc07e1b2
 - `6` **Events** - warning events, newest first
 - `7` **Addons** - CNI + MTU + node-side network probes, CoreDNS/ingress/metrics-server, Rancher agents, `registries.yaml` vs containerd, upgrade plans, provisioned clusters
 - `8` **Helm** - releases from `sh.helm.release.v1` secrets, values, history, update check; `u` upgrade (helm, or your HelmChart CR's `spec.version`), `b` rollback, `B` roll a failed release back to the last deployed revision
-- `9` **Images** - per node: images, unused images, airgap tarballs vs what is running
+- `9` **Images** - per node: images, what is not running, dangling (untagged) images, airgap tarballs vs what is running
 - `0` **Security** - opt-in scan (`Shift+S`): Kubernetes / RKE2 / Rancher MCM STIG, CIS, node hardening, full OS STIG per node
 - `=` **RKE2** - control-plane isolation, `config.yaml(.d)` per node, manifests, config drift between servers
 - `-` **Logs** - rke2/kubelet/containerd journal classified into noise / warnings / errors with explanations
