@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/zlmitchell/khealth-tui/compare/v1.1.2...v1.2.0) (2026-09-23)
+
+
+### Features
+
+* rescue and SSH dead ends, kubeadm backup discovery, image and secret clarity ([#4](https://github.com/zlmitchell/khealth-tui/issues/4)) ([f3935f6](https://github.com/zlmitchell/khealth-tui/commit/f3935f6ddb294e1439f99837c8a0c84ecaca5434))
+
 ## [1.1.2](https://github.com/zlmitchell/khealth-tui/compare/v1.1.1...v1.1.2) (2026-09-22)
 
 
