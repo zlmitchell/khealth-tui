@@ -27,9 +27,9 @@ type Config struct {
 	Context    string        `yaml:"context"`
 	Namespace  string        `yaml:"namespace"`
 	Refresh    time.Duration `yaml:"refresh"`
-	// Theme picks the light or dark palette: auto (ask the terminal), light or
-	// dark. Windows consoles cannot be asked and always read as dark, so a
-	// light terminal there needs light (--theme, KHT_THEME).
+	// Theme picks the light or dark palette: auto (ask the terminal for its
+	// background, internal/termtheme), light or dark for a terminal that does
+	// not answer and reads as dark (--theme, KHT_THEME).
 	Theme string `yaml:"theme"`
 	// HeavyEvery is the cadence (in refresh cycles) of a demand tier while
 	// a tab shows it or collect.always pins it: journal, image inventories,
@@ -298,7 +298,7 @@ func Load(args []string) (Config, error) {
 		kctx         = fs.String("context", "", "kubeconfig context to use")
 		ns           = fs.String("n", "", "initial namespace filter (empty = all)")
 		refresh      = fs.Duration("refresh", 0, "refresh interval")
-		theme        = fs.String("theme", "", "color palette: auto (ask the terminal for its background), light or dark (also KHT_THEME; Windows cannot be asked and reads as dark)")
+		theme        = fs.String("theme", "", "color palette: auto (ask the terminal for its background), light or dark (also KHT_THEME; for terminals that do not answer, which read as dark)")
 		sshUser      = fs.String("ssh-user", "", "SSH user for nodes")
 		sshKey       = fs.String("ssh-key", "", "SSH private key file")
 		sshPort      = fs.Int("ssh-port", 0, "SSH port")

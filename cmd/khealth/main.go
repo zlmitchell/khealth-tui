@@ -31,6 +31,7 @@ import (
 	"github.com/zlmitchell/khealth-tui/internal/headless"
 	"github.com/zlmitchell/khealth-tui/internal/k8s"
 	"github.com/zlmitchell/khealth-tui/internal/sshrun"
+	"github.com/zlmitchell/khealth-tui/internal/termtheme"
 	"github.com/zlmitchell/khealth-tui/internal/ui"
 )
 
@@ -104,14 +105,14 @@ func main() {
 	}
 	// Settle light/dark before bubbletea owns the terminal. Left to lipgloss,
 	// the background query runs on the first render, while bubbletea reads
-	// stdin, and loses the reply; Windows cannot be asked at all.
+	// stdin, and loses the reply; on Windows termenv never asks at all.
 	switch cfg.Theme {
 	case "light":
 		lipgloss.SetHasDarkBackground(false)
 	case "dark":
 		lipgloss.SetHasDarkBackground(true)
 	default:
-		lipgloss.SetHasDarkBackground(lipgloss.HasDarkBackground())
+		lipgloss.SetHasDarkBackground(termtheme.Dark())
 	}
 	app, err := ui.New(cfg)
 	if err != nil {

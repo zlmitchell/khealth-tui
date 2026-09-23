@@ -34,7 +34,7 @@ Started with no usable kubeconfig and no host, khealth asks instead of failing: 
 
 ## Light and dark terminals
 
-Every color has a light and a dark variant. `theme: auto` (the default) asks the terminal for its background once at startup (OSC 11) and picks the matching set. Windows consoles cannot be asked and always read as dark, and some terminals and multiplexers do not answer, so pin it: `--theme light`, `KHT_THEME=light` in that terminal's profile, or `theme: light` in the config. The flag beats the variable, and the variable beats the config file, since the background belongs to the terminal rather than the cluster.
+Every color has a light and a dark variant. `theme: auto` (the default) asks the terminal for its background once at startup (OSC 11, with the text color from OSC 10 as a fallback) and picks the matching set. On Windows khealth asks itself, since termenv does not; Windows Terminal and the VS Code terminal answer through ConPTY within a few ms. A terminal that does not answer (the legacy console, some multiplexers) reads as dark, so pin it there: `--theme light`, `KHT_THEME=light` in that terminal's profile, or `theme: light` in the config. The flag beats the variable, and the variable beats the config file, since the background belongs to the terminal rather than the cluster.
 
 ## What counts as a system namespace
 
