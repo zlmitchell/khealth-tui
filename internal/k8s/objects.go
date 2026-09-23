@@ -2,12 +2,15 @@ package k8s
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -147,7 +150,15 @@ func ToUnstructured(obj runtime.Object) (*unstructured.Unstructured, error) {
 
 // DumpYAML renders an object for display: managedFields dropped, Secret data
 // replaced by key names and sizes, very long values truncated.
-func DumpYAML(u *unstructured.Unstructured) string {
+func DumpYAML(u *unstructured.Unstructured) string { return dumpYAML(u, false) }
+
+// DumpYAMLReveal is DumpYAML with the base64 decoded: a Secret's data comes
+// back as stringData (the form you would write it in), and a ConfigMap's
+// binaryData as text. Only ever called for an explicit keypress - the
+// values land on someone's screen and in their scrollback.
+func DumpYAMLReveal(u *unstructured.Unstructured) string { return dumpYAML(u, true) }
+
+func dumpYAML(u *unstructured.Unstructured, reveal bool) string {
 	if u == nil {
 		return ""
 	}
@@ -157,14 +168,36 @@ func DumpYAML(u *unstructured.Unstructured) string {
 	}
 	if u.GetKind() == "Secret" {
 		if data, ok := obj["data"].(map[string]any); ok {
-			masked := map[string]any{}
+			out := map[string]any{}
 			for k, v := range data {
 				s, _ := v.(string)
-				masked[k] = fmt.Sprintf("<%d bytes base64, masked>", len(s))
+				if reveal {
+					out[k] = decodeForDisplay(s)
+					continue
+				}
+				out[k] = fmt.Sprintf("<%d bytes base64, masked>", len(s))
 			}
-			obj["data"] = masked
+			if reveal {
+				// as stringData: the same keys, the way they are written back
+				delete(obj, "data")
+				obj["stringData"] = out
+			} else {
+				obj["data"] = out
+			}
 		}
-		delete(obj, "stringData")
+		if !reveal {
+			delete(obj, "stringData")
+		}
+	}
+	if reveal && u.GetKind() == "ConfigMap" {
+		if bin, ok := obj["binaryData"].(map[string]any); ok {
+			out := map[string]any{}
+			for k, v := range bin {
+				s, _ := v.(string)
+				out[k] = decodeForDisplay(s)
+			}
+			obj["binaryData"] = out
+		}
 	}
 	truncateLong(obj, 0)
 	b, err := yaml.Marshal(obj)
@@ -172,6 +205,29 @@ func DumpYAML(u *unstructured.Unstructured) string {
 		return fmt.Sprintf("%v", obj)
 	}
 	return string(b)
+}
+
+// decodeForDisplay turns one base64 value into something safe to print. A
+// key, a certificate or a kubeconfig is text; a keystore or a gzip blob is
+// not, and writing its bytes to a terminal moves the cursor and can leave
+// the screen in a state the operator has to reset.
+func decodeForDisplay(s string) string {
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return s // not base64 after all: whatever it is, it was already text
+	}
+	if !utf8.Valid(raw) {
+		return fmt.Sprintf("<%d bytes binary>", len(raw))
+	}
+	for _, r := range string(raw) {
+		if r == '\n' || r == '\t' || r == '\r' {
+			continue
+		}
+		if !unicode.IsPrint(r) {
+			return fmt.Sprintf("<%d bytes binary>", len(raw))
+		}
+	}
+	return string(raw)
 }
 
 func truncateLong(v any, depth int) {

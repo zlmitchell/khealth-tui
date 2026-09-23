@@ -2598,7 +2598,7 @@ func (a *App) renderFooter() string {
 	case ovContext:
 		keys = []string{"esc cancel", "enter switch", "j/k choose"}
 	case ovInspect:
-		keys = []string{"esc back", "enter drill down", "j/k move", "/ find", "n/N next/prev hit", "q close", "(tabs resume after esc)"}
+		keys = []string{"esc back", "enter drill down", "j/k move", "v reveal secret", "/ find", "n/N next/prev hit", "q close"}
 	case ovPodLogs:
 		keys = []string{"esc close", "[ ]/tab container", "{ } pod", "p previous", "f follow", "w wrap", "/ find", "n/N hit", "& only hits", "T timestamps", "H highlight", "r reload"}
 	case ovSSH:
@@ -2806,6 +2806,7 @@ func helpLines(width int) []string {
 
 	section("Tab-specific keys", tabKeyCols, [][]string{
 		{"Inspect", key("enter"), "open the object (references, YAML)"},
+		{"", key("v"), "inside an object: decode a Secret's base64 into stringData (and a ConfigMap's binaryData); esc masks it again. Binary values are shown as a byte count, never written to the terminal"},
 		{"", key("L"), "tail logs of the selected pod / the controller's pods"},
 		{"", key("p"), "jump to the Pods sub-tab"},
 		{"", key("t"), "rollout restart (Deployment/DaemonSet/StatefulSet, confirmed)"},

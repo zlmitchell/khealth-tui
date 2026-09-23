@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"strings"
 	"testing"
@@ -457,5 +458,60 @@ func TestConditionSummary(t *testing.T) {
 	s, bad = ConditionSummary(map[string]any{"status": map[string]any{"conditions": []any{map[string]any{"type": "Synced", "status": "True"}}}})
 	if s != "Synced" || bad {
 		t.Errorf("healthy: %q %v", s, bad)
+	}
+}
+
+// v in the inspector decodes a Secret so its values can be read and copied.
+// Masked is still the default, and a value that is not text must never be
+// written to the terminal.
+func TestDumpYAMLReveal(t *testing.T) {
+	sec := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "Secret",
+		"metadata": map[string]any{"name": "creds", "namespace": "default"},
+		"data": map[string]any{
+			"username": base64.StdEncoding.EncodeToString([]byte("admin")),
+			"keystore": base64.StdEncoding.EncodeToString([]byte{0x00, 0x01, 0xff, 0xfe, 0x7f}),
+		},
+	}}
+
+	masked := DumpYAML(sec)
+	if strings.Contains(masked, "admin") {
+		t.Errorf("the default dump must not decode anything:\n%s", masked)
+	}
+	if !strings.Contains(masked, "masked") {
+		t.Errorf("the default dump should say the values are masked:\n%s", masked)
+	}
+
+	shown := DumpYAMLReveal(sec)
+	if !strings.Contains(shown, "admin") {
+		t.Errorf("reveal should decode the value:\n%s", shown)
+	}
+	// written back the way it would be applied
+	if !strings.Contains(shown, "stringData") || strings.Contains(shown, "\ndata:") {
+		t.Errorf("reveal should render data as stringData:\n%s", shown)
+	}
+	// the binary value is described, not emitted
+	if strings.ContainsRune(shown, 0x00) || strings.ContainsRune(shown, 0xfe) {
+		t.Errorf("raw bytes reached the dump:\n%q", shown)
+	}
+	if !strings.Contains(shown, "bytes binary") {
+		t.Errorf("a binary value should be reported as such:\n%s", shown)
+	}
+}
+
+// A ConfigMap's binaryData is base64 too; its data is already plain.
+func TestDumpYAMLRevealConfigMap(t *testing.T) {
+	cm := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata":   map[string]any{"name": "c"},
+		"data":       map[string]any{"plain": "already text"},
+		"binaryData": map[string]any{"cert": base64.StdEncoding.EncodeToString([]byte("-----BEGIN CERTIFICATE-----"))},
+	}}
+	shown := DumpYAMLReveal(cm)
+	if !strings.Contains(shown, "BEGIN CERTIFICATE") {
+		t.Errorf("binaryData should decode:\n%s", shown)
+	}
+	if !strings.Contains(shown, "already text") {
+		t.Errorf("plain data should survive:\n%s", shown)
 	}
 }
