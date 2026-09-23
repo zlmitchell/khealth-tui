@@ -36,7 +36,7 @@ func (a *App) etcdContent() content {
 			etcdNodes++
 		}
 	}
-	add(styleTitle.Render("etcd") + "  " + kv("distribution", s.Distribution) + "  " + kv("etcd nodes", fmt.Sprint(etcdNodes)) + "  " + kv("probes", fmt.Sprintf("%d done, %d pending", len(a.etcd), len(a.etcdPend))) + styleDim.Render("   enter = full config dumps   X = rescue (restore a snapshot)   D = defrag all members, one at a time"))
+	add(styleTitle.Render("etcd") + "  " + kv("distribution", s.Distribution) + "  " + kv("etcd nodes", fmt.Sprint(etcdNodes)) + "  " + kv("probes", fmt.Sprintf("%d done, %d pending", len(a.etcd), len(a.etcdPend))) + "  " + hint("§enter§ = full config dumps   §X§ = rescue (restore a snapshot)   §D§ = defrag all members, one at a time"))
 	add(a.etcdTiles()...)
 	if !a.sshEnabled {
 		add(styleWarn.Render("SSH collection is off - etcd internals need SSH to the control-plane nodes. API-side view only."))
@@ -1180,7 +1180,7 @@ func (a *App) helmContent() content {
 			hsegs[3].n++
 		}
 	}
-	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope; enter = values, ", len(rows))) + styleKey.Render("u") + styleDim.Render(" upgrade to latest, ") + styleKey.Render("b") + styleDim.Render(" rollback, ") + styleKey.Render("B") + styleDim.Render(" roll a failed release back to the last good revision. Update check: ")}
+	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope", len(rows))) + "  " + hint("§enter§ = values, §u§ upgrade to latest, §b§ rollback, §B§ roll a failed release back to the last good revision") + styleDim.Render("  Update check: ")}
 	if a.helm != nil {
 		hdr[0] += styleOK.Render("on")
 		status := map[string]helmcheck.RepoStatus{}
@@ -2007,7 +2007,7 @@ func errorsPerHour(ls *logs.Summary, n int) []float64 {
 func (a *App) logLinesContent(node string) content {
 	ls := a.logSum[node]
 	ni := a.nodes[node]
-	hdr := []string{styleTitle.Render("Logs: "+node) + styleDim.Render("  esc back to nodes · enter full line + explanation (w wraps) · a toggles info lines · / filters")}
+	hdr := []string{styleTitle.Render("Logs: "+node) + "  " + hint("§esc§ back to nodes · §enter§ full line + explanation (§w§ wraps) · §a§ toggles info lines · §/§ filters")}
 	if ls == nil || ni == nil {
 		return content{header: hdr, empty: "no log data for this node yet (R for a full collection)"}
 	}
