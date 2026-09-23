@@ -1578,6 +1578,11 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			return a, a.startScan()
 		}
+	case "ctrl+s":
+		// the settings whatever the state: s only reaches them when nothing
+		// connects, and a login that works is still the wrong one when the
+		// probes come back "permission denied" from sudo on one node
+		a.openSSHConfig()
 	case "s":
 		if a.runner == nil {
 			// no runner means no login worked at all, so there is nothing to
@@ -1983,6 +1988,7 @@ func (a *App) switchContext(c k8s.ContextInfo) tea.Cmd {
 		if h := c.SSH; !h.Empty() {
 			if h.User != "" && !a.cfg.Flags["ssh-user"] {
 				a.cfg.SSH.User = h.User
+				a.cfg.SSH.NormalizeUser() // a context written before this was split
 			}
 			if h.Key != "" && !a.cfg.Flags["ssh-key"] {
 				a.cfg.SSH.Key = h.Key
@@ -2797,7 +2803,8 @@ func helpLines(width int) []string {
 		{key("a"), "toggle problems-only view (Overview, Inspect, Events, Security, Resources)"},
 		{key("r"), "refresh now (API + light SSH collection)"},
 		{key("R"), "full refresh: journal logs, images, tarballs, PV du (not the OS STIG)"},
-		{key("s"), "toggle SSH collection on/off; when no login works it opens the SSH settings instead (user, key, password, become, host key policy) and reconnects without restarting"},
+		{key("s"), "toggle SSH collection on/off; when no login works at all it opens the SSH settings instead of refusing"},
+		{key("ctrl+s"), "SSH settings: user, key, password, become, host key policy. Applies to every node and reconnects without restarting - the settings a node refused the login with are usually only visible once you are running"},
 		{key("P"), "footprint: what khealth itself costs the API server, the nodes (remote CPU per probe) and this host"},
 		{key("e"), "export the findings, the security scan (one sheet per benchmark) and the node hardening table: asks for JSON, XLSX or both (--export-dir / export.dir, default: current directory)"},
 		{key("?"), "this help"},
@@ -2816,7 +2823,7 @@ func helpLines(width int) []string {
 		{"", key("B"), "rollback a failed / pending-* release straight to the last revision that deployed (confirmed)"},
 		{"Nodes", key("enter"), "node dashboard: gauges, security runtime-vs-boot, services, filesystems, certs"},
 		{"etcd", key("enter"), "raw probe output and config dumps"},
-		{"", key("X"), "rescue: rejoin one broken server (quorum fine) or restore a snapshot onto the whole control plane (SSH + actions enabled; preflight, warnings and a typed confirmation first)"},
+		{"", key("X"), "rescue: rejoin one broken server (quorum fine) or restore a snapshot onto the whole control plane (SSH + actions enabled; preflight, warnings and a typed confirmation first). At the snapshot list, p takes the path of a backup khealth did not find - it scans the distribution's directory, etcd.backup_dirs and wherever the node's own timer or cron writes"},
 		{"", key("D"), "defragment every etcd member, one at a time (followers first, leader last, health check between; etcdctl via kubectl exec; confirmed)"},
 		{"Logs", key("enter"), "node lines; enter again = full line + explanation"},
 		{"", key("a"), "include info lines"},

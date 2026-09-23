@@ -51,6 +51,16 @@ func TestSSHConfigKeepsToggleWhenConnected(t *testing.T) {
 	if a.sshEnabled {
 		t.Errorf("s should have disabled collection")
 	}
+
+	// ...but the settings are still reachable: a login that connects can
+	// still be the wrong one (sudo refused on one node, say)
+	a.handleKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if a.overlay != ovSSH || a.sshEdit == nil {
+		t.Errorf("ctrl+s should open the settings even with a working runner: overlay %v", a.overlay)
+	}
+	if a.sshEdit.draft.User != a.cfg.SSH.User {
+		t.Errorf("the dialog should open on the settings in force: %q vs %q", a.sshEdit.draft.User, a.cfg.SSH.User)
+	}
 }
 
 func TestSSHConfigEditing(t *testing.T) {
