@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ const (
 	rescuePickNode
 	rescuePickAddr // an unreachable node: ask where to reach it
 	rescuePickSnap
+	rescuePickSnapPath // a snapshot khealth did not find: ask for its path
 	rescuePreflight
 	rescueConfirm
 	rescueRunning
@@ -59,12 +61,13 @@ type rescueNodeOpt struct {
 
 // rescueSnapOpt is one restore point on the chosen node.
 type rescueSnapOpt struct {
-	path string // local path, or S3 object name
-	name string
-	s3   bool
-	when time.Time
-	size int64
-	dir  string
+	path  string // local path, or S3 object name
+	name  string
+	s3    bool
+	when  time.Time
+	size  int64
+	dir   string
+	typed bool // entered by hand, not found by the probe
 }
 
 type rescueView struct {
@@ -349,6 +352,30 @@ func (a *App) nodeIP(n *corev1.Node) string {
 	return ""
 }
 
+// rescueAskSnapPath switches to the "type a snapshot path" prompt. khealth
+// only scans the directories it knows plus etcd.backup_dirs, so on a
+// cluster whose backups go somewhere else - the normal case for a
+// hand-rolled kubeadm cron - the list is empty and this is the only way to
+// reach a restore. The path is not checked here: the preflight stats it on
+// the target and refuses a path that is not there.
+func (a *App) rescueAskSnapPath() tea.Cmd {
+	r := a.rescue
+	if r == nil {
+		return nil
+	}
+	dir := "/var/lib/etcd-backup"
+	if len(r.snaps) > 0 {
+		dir = r.snaps[0].dir
+	}
+	r.input = textinput.New()
+	r.input.Prompt = "snapshot path on " + r.nodes[r.nodeCur].node.Name + "> "
+	r.input.Placeholder = dir + "/<file>"
+	r.input.CharLimit = 512
+	r.input.Width = 72
+	r.phase = rescuePickSnapPath
+	return r.input.Focus()
+}
+
 // rescueSnapshots lists the restore points on a node, newest first: local
 // files the probe saw, plus S3 records when the node's own config.yaml
 // carries the S3 settings (a config secret is unreadable while the
@@ -490,17 +517,23 @@ func (a *App) handleRescueKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, a.startRescuePreflight()
 			}
 			r.snaps = a.rescueSnapshots(o)
-			if len(r.snaps) == 0 {
-				a.setStatus("no snapshot files known on " + o.node.Name + " (its etcd probe lists none; etcd.backup_dirs adds directories to scan)")
-				return a, nil
-			}
 			r.snapCur = 0
 			r.phase = rescuePickSnap
+			if len(r.snaps) == 0 {
+				// Nothing was found where khealth looks, which is the normal
+				// case on kubeadm: the backups are wherever the operator's own
+				// cron puts them. Ask for the path instead of stopping - with
+				// no way in, the restore is simply unavailable.
+				a.setStatus("no snapshot files found on " + o.node.Name + " (etcd.backup_dirs adds directories to scan) - type the path")
+				return a, a.rescueAskSnapPath()
+			}
 		}
 	case rescuePickSnap:
 		switch key {
 		case "esc", "q", "backspace":
 			r.phase = rescuePickNode
+		case "p":
+			return a, a.rescueAskSnapPath()
 		case "j", "down":
 			if r.snapCur < len(r.snaps)-1 {
 				r.snapCur++
@@ -510,6 +543,31 @@ func (a *App) handleRescueKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				r.snapCur--
 			}
 		case "enter":
+			return a, a.startRescuePreflight()
+		}
+	case rescuePickSnapPath:
+		switch key {
+		case "esc":
+			r.input.Blur()
+			r.phase = rescuePickSnap
+			if len(r.snaps) == 0 {
+				r.phase = rescuePickNode // nothing to go back to
+			}
+		case "enter":
+			path := strings.TrimSpace(r.input.Value())
+			if path == "" {
+				return a, nil
+			}
+			if !strings.HasPrefix(path, "/") {
+				a.setStatus("give an absolute path on the node (the file is read there, not on this machine)")
+				return a, nil
+			}
+			r.input.Blur()
+			// a typed path joins the list as the selected entry, so the
+			// confirmation screen describes it like any other restore point
+			r.snaps = append([]rescueSnapOpt{{path: path, name: filepath.Base(path), dir: filepath.Dir(path), typed: true}}, r.snaps...)
+			r.snapCur = 0
+			r.phase = rescuePickSnap
 			return a, a.startRescuePreflight()
 		}
 	case rescuePreflight:
@@ -889,6 +947,13 @@ func (a *App) renderRescue() (string, []string) {
 			} else {
 				ageTxt = styleOK.Render(ageTxt)
 			}
+			if s.typed {
+				// nothing was stat'ed for a path typed by hand: the preflight
+				// does that, and says so if the file is not there
+				ageTxt, where = styleDim.Render("-"), styleInfo.Render("typed")+" "+s.dir
+				rows = append(rows, []string{s.name, ageTxt, styleDim.Render("checked by the preflight"), styleDim.Render("-"), where})
+				continue
+			}
 			rows = append(rows, []string{s.name, ageTxt, s.when.Local().Format("2006-01-02 15:04"), humanBytes(float64(s.size)), where})
 		}
 		hdr, rl := renderTable(w, []column{{title: "SNAPSHOT", max: 60}, {title: "AGE", right: true}, {title: "TAKEN"}, {title: "SIZE", right: true}, {title: "WHERE", max: 50}}, rows)
@@ -905,8 +970,15 @@ func (a *App) renderRescue() (string, []string) {
 				add("  " + pad(rl[i], w))
 			}
 		}
-		add("", styleDim.Render("j/k choose, enter runs the read-only preflight on every server, esc goes back"))
+		add("", styleDim.Render("j/k choose, enter runs the read-only preflight on every server, ")+styleKey.Render("p")+styleDim.Render(" types a path khealth did not find, esc goes back"))
 		return "etcd rescue: choose the restore point on " + o.node.Name, lines
+	case rescuePickSnapPath:
+		o := r.nodes[r.nodeCur]
+		add(styleDim.Render("khealth scans the distribution's snapshot directory, a few conventional ones and ")+styleBold.Render("etcd.backup_dirs")+styleDim.Render(". A backup written anywhere else - a cron of your own, a copy pulled from off-box - is not in the list above."), "")
+		add("  "+styleBold.Render("Absolute path of the snapshot file on "+o.node.Name)+styleDim.Render("  (it is read there, not on this machine)"), "")
+		add("  " + r.input.View())
+		add("", styleDim.Render("  The preflight stats it and refuses a path that is not there. enter continues, esc goes back."))
+		return "etcd rescue: snapshot path on " + o.node.Name, lines
 	case rescuePreflight:
 		add("", "  "+a.spinner.View()+" checking every server over SSH (binaries, data dirs, free space, manifests, the snapshot file)...", "", styleDim.Render("  nothing is changed by the preflight; esc abandons the rescue"))
 		return "etcd rescue: preflight", lines

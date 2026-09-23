@@ -15,7 +15,7 @@ import (
 // line already has (YAML colors survive), the current hit stands out.
 
 var (
-	styleFind    = lipgloss.NewStyle().Background(lipgloss.AdaptiveColor{Light: "#fff1a8", Dark: "#4d4000"})
+	styleFind    = lipgloss.NewStyle().Background(lipgloss.AdaptiveColor{Light: "#ffe58a", Dark: "#4d4000"})
 	styleFindCur = lipgloss.NewStyle().Background(colorWarn).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Bold(true)
 )
 

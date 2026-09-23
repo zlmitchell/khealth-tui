@@ -462,6 +462,7 @@ func (a *App) startRolloutRestart() {
 	client := a.client
 	a.pendingAct = &action{
 		title: fmt.Sprintf("Rollout restart %s %s/%s", kind, ns, name),
+		short: "rollout restart",
 		desc: []string{
 			"Patches spec.template.metadata.annotations[kubectl.kubernetes.io/restartedAt] with the current time,",
 			"which is exactly what `kubectl rollout restart` does: pods are replaced according to the update strategy.",

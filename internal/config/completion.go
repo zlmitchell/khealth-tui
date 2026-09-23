@@ -223,6 +223,7 @@ func InstallCompletion(shell string) (string, error) {
 // that is then rejected.
 var flagValues = map[string][]string{
 	"become":      {"auto", "sudo", "dzdo", "doas", "none"},
+	"theme":       {"auto", "light", "dark"},
 	"ssh-address": {"InternalIP", "ExternalIP", "Hostname"},
 	"completions": {"bash", "zsh", "fish"},
 	"ssh-port":    {"22"},

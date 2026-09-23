@@ -34,13 +34,13 @@ https://github.com/user-attachments/assets/ec4e8438-a6a4-43bc-9202-92bfdc07e1b2
 
 - `1` **Overview** - API `readyz`/`livez`, cluster summary, ranked findings CRIT/WARN/INFO
 - `2` **Nodes** - conditions, version skew, live CPU/mem/load, disks, unit state; Enter: mounts, certs, sysctls, kubelet args
-- `3` **Inspect** - controllers / pods / every API type incl. CRDs; object inspector that drills through owner, children, secrets, PVCs; `L` tails logs
-- `4` **etcd** - members, leader, health, db size, latency, alarms, config source, snapshots; **Triage** cases; `X` = rescue (rejoin a server / restore a snapshot); `D` = defrag all members one at a time
+- `3` **Inspect** - controllers / pods / every API type incl. CRDs; object inspector that drills through owner, children, secrets, PVCs; `v` decodes a Secret on screen (as `stringData`), `L` tails logs
+- `4` **etcd** - members, leader, health, db size, latency, alarms, config source, snapshots; **Triage** cases; `X` = rescue (rejoin a server / restore a snapshot, or type the path of one khealth did not find); `D` = defrag all members one at a time. On kubeadm the backup job's own timer/cron is read to find where it writes
 - `5` **Storage** - StorageClasses, CSI drivers, PVC used capacity, backend health (Longhorn, Trident, Ceph); Enter: full claim/volume detail
 - `6` **Events** - warning events, newest first
 - `7` **Addons** - CNI + MTU + node-side network probes, CoreDNS/ingress/metrics-server, Rancher agents, `registries.yaml` vs containerd, upgrade plans, provisioned clusters
 - `8` **Helm** - releases from `sh.helm.release.v1` secrets, values, history, update check; `u` upgrade (helm, or your HelmChart CR's `spec.version`), `b` rollback, `B` roll a failed release back to the last deployed revision
-- `9` **Images** - per node: images, unused images, airgap tarballs vs what is running
+- `9` **Images** - per node: images, what is not running, dangling (untagged) images, airgap tarballs vs what is running
 - `0` **Security** - opt-in scan (`Shift+S`): Kubernetes / RKE2 / Rancher MCM STIG, CIS, node hardening, full OS STIG per node
 - `=` **RKE2** - control-plane isolation, `config.yaml(.d)` per node, manifests, config drift between servers
 - `-` **Logs** - rke2/kubelet/containerd journal classified into noise / warnings / errors with explanations
@@ -70,13 +70,14 @@ khealth --bastion jump@bastion.example.com --insecure-host-key
 khealth root@api.prod.corp --accept-new-host-keys=false  # refuse any node whose key is not already in known_hosts (recording it is the default)
 khealth --ssh-user admin --ask-pass       # prompt for a password used when keys fail (and for sudo)
 khealth root@10.0.0.11                    # no kubeconfig yet: fetch the admin kubeconfig over SSH from a server node
+khealth --theme light                     # a light terminal that does not answer the background query (Windows never does)
 khealth --export ./reports --export-scan  # no TUI: one cycle + the security scan, JSON + XLSX, exit
 ```
 
 - **no kubeconfig?** `khealth [user@]server` fetches `rke2.yaml` / `k3s.yaml` / `admin.conf` and rewrites the endpoint to one the apiserver cert is valid for; run with nothing and it lists the clusters it already knows
 - **many clusters**: `C` opens a context picker - the kubeconfig's contexts plus every `~/.kube/khealth-*.yaml` bootstrapped earlier; switching drops the cache and starts a fresh first-contact cycle; each bootstrapped context remembers how its nodes were reached (user, key, port, `become`), never a password
 - **config file**: `khealth --init-config` writes the annotated example; every key is optional, flags override
-- **SSH needs**: a login that can become root (`sudo` / `dzdo` / `doas`, probed), standard tools (`df`, `systemctl`, `journalctl`, `openssl`, `curl`, `sysctl`; `crictl` found automatically), host keys in `known_hosts`
+- **SSH needs**: a login that can become root (`sudo` / `dzdo` / `doas`, probed), standard tools (`df`, `systemctl`, `journalctl`, `openssl`, `curl`, `sysctl`; `crictl` found automatically), host keys in `known_hosts`. `ctrl+s` opens the SSH settings (user, key, password, become, host key policy) and reconnects without restarting - `s` does the same when no login works at all
 - **RBAC**: read-only list/get; the exact list is in the doc
 - **footprint**: light collection every 30 s (~0.2 s per node), heavy tiers only while their tab is open, probes under `renice`/`ionice`; `P` shows what the last cycles cost
 - all of the above in detail: [docs/RUNNING.md](docs/RUNNING.md)

@@ -36,7 +36,7 @@ func (a *App) etcdContent() content {
 			etcdNodes++
 		}
 	}
-	add(styleTitle.Render("etcd") + "  " + kv("distribution", s.Distribution) + "  " + kv("etcd nodes", fmt.Sprint(etcdNodes)) + "  " + kv("probes", fmt.Sprintf("%d done, %d pending", len(a.etcd), len(a.etcdPend))) + styleDim.Render("   enter = full config dumps   X = rescue (restore a snapshot)   D = defrag all members, one at a time"))
+	add(styleTitle.Render("etcd") + "  " + kv("distribution", s.Distribution) + "  " + kv("etcd nodes", fmt.Sprint(etcdNodes)) + "  " + kv("probes", fmt.Sprintf("%d done, %d pending", len(a.etcd), len(a.etcdPend))) + "  " + hint("§enter§ = full config dumps   §X§ = rescue (restore a snapshot)   §D§ = defrag all members, one at a time"))
 	add(a.etcdTiles()...)
 	if !a.sshEnabled {
 		add(styleWarn.Render("SSH collection is off - etcd internals need SSH to the control-plane nodes. API-side view only."))
@@ -1180,7 +1180,7 @@ func (a *App) helmContent() content {
 			hsegs[3].n++
 		}
 	}
-	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope; enter = values, ", len(rows))) + styleKey.Render("u") + styleDim.Render(" upgrade to latest, ") + styleKey.Render("b") + styleDim.Render(" rollback, ") + styleKey.Render("B") + styleDim.Render(" roll a failed release back to the last good revision. Update check: ")}
+	hdr := []string{styleTitle.Render("Helm releases") + "  " + stacked(30, hsegs[:3]) + "  " + legend(hsegs) + styleDim.Render(fmt.Sprintf("   %d in scope", len(rows))) + "  " + hint("§enter§ = values, §u§ upgrade to latest, §b§ rollback, §B§ roll a failed release back to the last good revision") + styleDim.Render("  Update check: ")}
 	if a.helm != nil {
 		hdr[0] += styleOK.Render("on")
 		status := map[string]helmcheck.RepoStatus{}
@@ -1348,17 +1348,25 @@ func (a *App) imagesContent() content {
 			}
 			tarTxt = fmt.Sprintf("%d files %s, %d images", len(ni.Tarballs), humanBytes(float64(tsize)), len(tarImgs))
 		}
-		unusedTxt := fmt.Sprintf("%d (%s)", len(unused), humanBytes(float64(ub)))
-		if float64(ub)/1e9 >= a.cfg.Thresholds.UnusedImagesGB {
-			unusedTxt = styleWarn.Render(unusedTxt)
-		}
+		// not-running is mostly deliberate here (airgap preloads, the images
+		// of the release before this one), so it is not warned on; dangling
+		// is what a prune actually reclaims
+		notRunning := fmt.Sprintf("%d (%s)", len(unused), humanBytes(float64(ub)))
 		if total > 0 {
-			unusedTxt = bar(float64(ub)/float64(total), 8, styleWarn) + " " + unusedTxt
+			notRunning = bar(float64(ub)/float64(total), 8, styleDim) + " " + notRunning
 		}
-		rows = append(rows, []string{n, fmt.Sprint(len(ni.Images)), humanBytes(float64(total)), fmt.Sprint(len(ni.Containers)), unusedTxt, tarTxt, fmt.Sprint(notInTar)})
+		dangling, db := ni.DanglingImages()
+		danglingTxt := styleDim.Render("0")
+		if len(dangling) > 0 {
+			danglingTxt = fmt.Sprintf("%d (%s)", len(dangling), humanBytes(float64(db)))
+			if float64(db)/1e9 >= a.cfg.Thresholds.UnusedImagesGB {
+				danglingTxt = styleWarn.Render(danglingTxt)
+			}
+		}
+		rows = append(rows, []string{n, fmt.Sprint(len(ni.Images)), humanBytes(float64(total)), fmt.Sprint(len(ni.Containers)), notRunning, danglingTxt, tarTxt, fmt.Sprint(notInTar)})
 		ids = append(ids, n)
 	}
-	h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "IMAGES", right: true}, {title: "SIZE", right: true}, {title: "CONTAINERS", right: true}, {title: "UNUSED"}, {title: "AIRGAP TARBALLS"}, {title: "RUNNING NOT IN TARBALLS", right: true}}, rows)
+	h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "IMAGES", right: true}, {title: "SIZE", right: true}, {title: "CONTAINERS", right: true}, {title: "NOT RUNNING"}, {title: "DANGLING"}, {title: "AIRGAP TARBALLS"}, {title: "RUNNING NOT IN TARBALLS", right: true}}, rows)
 	hdr = append(hdr, h)
 	c := content{header: hdr, selectable: true, empty: "no SSH data"}
 	for i, l := range lines {
@@ -2007,7 +2015,7 @@ func errorsPerHour(ls *logs.Summary, n int) []float64 {
 func (a *App) logLinesContent(node string) content {
 	ls := a.logSum[node]
 	ni := a.nodes[node]
-	hdr := []string{styleTitle.Render("Logs: "+node) + styleDim.Render("  esc back to nodes · enter full line + explanation (w wraps) · a toggles info lines · / filters")}
+	hdr := []string{styleTitle.Render("Logs: "+node) + "  " + hint("§esc§ back to nodes · §enter§ full line + explanation (§w§ wraps) · §a§ toggles info lines · §/§ filters")}
 	if ls == nil || ni == nil {
 		return content{header: hdr, empty: "no log data for this node yet (R for a full collection)"}
 	}

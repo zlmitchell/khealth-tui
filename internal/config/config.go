@@ -27,6 +27,10 @@ type Config struct {
 	Context    string        `yaml:"context"`
 	Namespace  string        `yaml:"namespace"`
 	Refresh    time.Duration `yaml:"refresh"`
+	// Theme picks the light or dark palette: auto (ask the terminal for its
+	// background, internal/termtheme), light or dark for a terminal that does
+	// not answer and reads as dark (--theme, KHT_THEME).
+	Theme string `yaml:"theme"`
 	// HeavyEvery is the cadence (in refresh cycles) of a demand tier while
 	// a tab shows it or collect.always pins it: journal, image inventories,
 	// PV du, config facts (docs/ARCHITECTURE.md §7).
@@ -177,6 +181,21 @@ func (s *SSH) AddFallbackHost(host string) {
 	s.Hosts = map[string]string{name: host}
 }
 
+// NormalizeUser splits a user given as user@host. Every ssh command line
+// takes that form, so it is what gets typed into --ssh-user and what ends
+// up remembered in a context; left whole it becomes the login name, every
+// node refuses it, and the reason is only visible in the settings dialog.
+// The host part is kept as the fallback target, matching what the
+// positional [user@]server-node argument does.
+func (s *SSH) NormalizeUser() {
+	u, host, ok := strings.Cut(s.User, "@")
+	if !ok || u == "" || host == "" {
+		return
+	}
+	s.User = u
+	s.AddFallbackHost(host)
+}
+
 // Etcd configures etcd probing and backup expectations.
 type Etcd struct {
 	BackupDirs   []string      `yaml:"backup_dirs"`
@@ -294,6 +313,7 @@ func Load(args []string) (Config, error) {
 		kctx         = fs.String("context", "", "kubeconfig context to use")
 		ns           = fs.String("n", "", "initial namespace filter (empty = all)")
 		refresh      = fs.Duration("refresh", 0, "refresh interval")
+		theme        = fs.String("theme", "", "color palette: auto (ask the terminal for its background), light or dark (also KHT_THEME; for terminals that do not answer, which read as dark)")
 		sshUser      = fs.String("ssh-user", "", "SSH user for nodes")
 		sshKey       = fs.String("ssh-key", "", "SSH private key file")
 		sshPort      = fs.Int("ssh-port", 0, "SSH port")
@@ -442,6 +462,8 @@ func Load(args []string) (Config, error) {
 			cfg.Namespace = *ns
 		case "refresh":
 			cfg.Refresh = *refresh
+		case "theme":
+			cfg.Theme = *theme
 		case "ssh-user":
 			cfg.SSH.User = *sshUser
 		case "ssh-key":
@@ -536,11 +558,25 @@ func Load(args []string) (Config, error) {
 	if cfg.SSH.Password == "" {
 		cfg.SSH.Password = os.Getenv("KHT_SSH_PASSWORD")
 	}
+	cfg.SSH.NormalizeUser() // --ssh-user root@node, or a context that stored one
 	if cfg.SSH.User == "" {
 		cfg.SSH.User = os.Getenv("USER")
 		if cfg.SSH.User == "" {
 			cfg.SSH.User = os.Getenv("USERNAME")
 		}
+	}
+	// the terminal, not the cluster, decides the theme: an environment
+	// variable set for one terminal wins over the config file
+	if t := os.Getenv("KHT_THEME"); t != "" && !cfg.Flags["theme"] {
+		cfg.Theme = t
+	}
+	cfg.Theme = strings.ToLower(strings.TrimSpace(cfg.Theme))
+	switch cfg.Theme {
+	case "":
+		cfg.Theme = "auto"
+	case "auto", "light", "dark":
+	default:
+		return cfg, fmt.Errorf("theme: %q is not auto, light or dark", cfg.Theme)
 	}
 	if cfg.Refresh < 5*time.Second {
 		cfg.Refresh = 5 * time.Second

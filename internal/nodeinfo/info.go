@@ -1496,6 +1496,24 @@ func (i *Info) HardeningItems() []HardeningItem {
 	return out
 }
 
+// DanglingImages returns the images no running container references *and*
+// that carry no repository tag: layers orphaned by a rebuild or a retag,
+// which nothing can pull again by name. These are the ones worth reclaiming.
+//
+// The rest of UnusedImages is usually deliberate on these clusters - the
+// airgap preloads and the previous release's images are untagged by nobody
+// and would be pulled again after a prune - so the two are counted apart.
+func (i *Info) DanglingImages() (dangling []Image, danglingBytes int64) {
+	unused, _ := i.UnusedImages()
+	for _, im := range unused {
+		if len(im.Tags) == 0 {
+			dangling = append(dangling, im)
+			danglingBytes += im.Size
+		}
+	}
+	return
+}
+
 // UnusedImages returns images not referenced by any running container.
 func (i *Info) UnusedImages() (unused []Image, unusedBytes int64) {
 	used := map[string]bool{}

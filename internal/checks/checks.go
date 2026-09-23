@@ -332,9 +332,14 @@ func Evaluate(in Input) []Finding {
 			add(SevWarn, "addons", name, fmt.Sprintf("containerd certs.d has hosts.toml for %s but config.toml sets no config_path: the mirrors are not applied", strings.Join(ni.ContainerdHosts, ", ")), `[plugins."io.containerd.cri.v1.images".registry] config_path = "/etc/containerd/certs.d" (containerd 2.x; io.containerd.grpc.v1.cri on 1.x), then `+nv.RegistryReload)
 		}
 		if ni.Heavy {
-			unused, bytes := ni.UnusedImages()
+			// only the untagged ones: an image no container runs is often
+			// meant to be there (airgap preloads, the release before this
+			// one), and telling an airgapped operator to prune those is how
+			// a node ends up unable to start a pod it used to run
+			dangling, bytes := ni.DanglingImages()
 			if float64(bytes)/1e9 >= thr.UnusedImagesGB {
-				add(SevInfo, "images", name, fmt.Sprintf("%d unused images (%.1f GB)", len(unused), float64(bytes)/1e9), "crictl rmi --prune (keep airgap images if you rely on them)")
+				unused, ub := ni.UnusedImages()
+				add(SevInfo, "images", name, fmt.Sprintf("%d dangling images (%.1f GB): no tag and no container, left by a rebuild or retag; %d images in total are not running (%.1f GB), which on an airgapped node is usually deliberate", len(dangling), float64(bytes)/1e9, len(unused), float64(ub)/1e9), "crictl rmi --prune removes the untagged ones; check the tagged-but-idle images against your airgap tarballs before touching them")
 			}
 		}
 	}
@@ -809,7 +814,7 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 	case snapshotsDisabled:
 		add(SevWarn, "etcd", "backups", "rke2 etcd snapshots are disabled (etcd-disable-snapshots: true)", "enable scheduled snapshots or ensure an external backup")
 	case !backupMechanism && (len(in.Etcd) > 0 || rke2):
-		add(SevWarn, "etcd", "backups", "no etcd backup mechanism detected (no snapshots, timers, crons or CronJobs)", distro.For(s.Distribution).EtcdBackups+"; khealth looks for snapshot files, systemd timers, crons and CronJobs")
+		add(SevWarn, "etcd", "backups", "no etcd backup mechanism detected (no snapshots, timers, crons or CronJobs)", distro.For(s.Distribution).EtcdBackups+"; khealth reads the command behind an etcd timer or cron and scans where it writes, so this means no such job was found - etcd.backup_dirs adds a directory it cannot infer")
 	default:
 		latest := latestLocal
 		src := "local on " + latestLocalNode

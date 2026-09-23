@@ -426,3 +426,70 @@ func TestRescueScrolling(t *testing.T) {
 		t.Errorf("following should show the end of the running step's output:\n%s", v)
 	}
 }
+
+// A cluster whose backups are not where khealth looks - the normal case for
+// a hand-rolled kubeadm cron - used to dead-end at the snapshot picker with
+// nothing to select and no way forward. The path can be typed instead.
+func TestRescueTypedSnapshotPath(t *testing.T) {
+	a := testApp()
+	a.rescue = &rescueView{
+		phase: rescuePickSnap,
+		kind:  rescue.Kubeadm,
+		nodes: []rescueNodeOpt{{node: rescue.Node{Name: "cp-1", Host: "10.0.0.1", IP: "10.0.0.1"}, online: true, state: "healthy"}},
+	}
+	a.overlay = ovRescue
+
+	// p opens the prompt, and the picker says so
+	if v := ansi.Strip(a.View()); !strings.Contains(v, "types a path khealth did not find") {
+		t.Errorf("the snapshot picker does not offer the typed path:\n%s", v)
+	}
+	a.handleOverlayKey(runes("p"))
+	if a.rescue.phase != rescuePickSnapPath {
+		t.Fatalf("p should open the path prompt, phase %v", a.rescue.phase)
+	}
+	if v := ansi.Strip(a.View()); !strings.Contains(v, "Absolute path of the snapshot file on cp-1") {
+		t.Errorf("path prompt view:\n%s", v)
+	}
+
+	// a relative path is refused: the file is read on the node
+	a.rescue.input.SetValue("backup.db")
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.rescue.phase != rescuePickSnapPath || !strings.Contains(a.status, "absolute path") {
+		t.Errorf("a relative path should be refused: phase %v status %q", a.rescue.phase, a.status)
+	}
+
+	// an absolute one becomes the selected restore point
+	a.rescue.input.SetValue("/srv/backups/etcd/snap-2026-09-22.db")
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(a.rescue.snaps) != 1 {
+		t.Fatalf("the typed path should be the restore point: %+v", a.rescue.snaps)
+	}
+	s := a.rescue.snaps[0]
+	if s.path != "/srv/backups/etcd/snap-2026-09-22.db" || !s.typed || s.name != "snap-2026-09-22.db" || s.dir != "/srv/backups/etcd" {
+		t.Errorf("typed snapshot: %+v", s)
+	}
+	// nothing was stat'ed, so it must not claim a size or a date
+	a.rescue.phase = rescuePickSnap
+	if v := ansi.Strip(a.View()); !strings.Contains(v, "checked by the preflight") || !strings.Contains(v, "typed") {
+		t.Errorf("a typed path should not show an age or size:\n%s", v)
+	}
+}
+
+// With nothing found at all the prompt opens straight away rather than
+// leaving the operator at an empty list.
+func TestRescueNoSnapshotsAsksForPath(t *testing.T) {
+	a := testApp()
+	a.rescue = &rescueView{
+		phase: rescuePickNode,
+		kind:  rescue.Kubeadm,
+		nodes: []rescueNodeOpt{{node: rescue.Node{Name: "cp-1", Host: "10.0.0.1", IP: "10.0.0.1"}, online: true, state: "healthy"}},
+	}
+	a.overlay = ovRescue
+	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.rescue.phase != rescuePickSnapPath {
+		t.Fatalf("an empty snapshot list should ask for a path, phase %v status %q", a.rescue.phase, a.status)
+	}
+	if !strings.Contains(a.status, "type the path") {
+		t.Errorf("status should say why: %q", a.status)
+	}
+}

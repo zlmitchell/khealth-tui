@@ -78,3 +78,55 @@ func TestPositionalBootstrapHost(t *testing.T) {
 		t.Error("bare host marked ssh-user as given")
 	}
 }
+
+// user@host is the form every ssh command line takes, so it gets typed
+// into --ssh-user and stored in a context. Left whole it becomes the login
+// name and every node refuses it.
+func TestNormalizeUser(t *testing.T) {
+	for _, c := range []struct {
+		in, user, host string
+	}{
+		{"root@10.0.0.5", "root", "10.0.0.5"},
+		{"root", "root", ""},
+		{"", "", ""},
+		{"@10.0.0.5", "@10.0.0.5", ""}, // no user: not ours to split
+		{"root@", "root@", ""},         // no host: same
+	} {
+		s := SSH{User: c.in}
+		s.NormalizeUser()
+		if s.User != c.user {
+			t.Errorf("%q: user %q, want %q", c.in, s.User, c.user)
+		}
+		if c.host == "" {
+			if len(s.Hosts) != 0 {
+				t.Errorf("%q: should add no fallback host, got %v", c.in, s.Hosts)
+			}
+			continue
+		}
+		if s.Hosts[c.host] != c.host {
+			t.Errorf("%q: fallback host %v, want %s", c.in, s.Hosts, c.host)
+		}
+	}
+
+	// a host already configured is not replaced
+	s := SSH{User: "root@10.0.0.5", Hosts: map[string]string{"cp-1": "10.0.0.9"}}
+	s.NormalizeUser()
+	if s.User != "root" || s.Hosts["cp-1"] != "10.0.0.9" || len(s.Hosts) != 1 {
+		t.Errorf("configured hosts should win: user %q hosts %v", s.User, s.Hosts)
+	}
+}
+
+// ...and the flag goes through it.
+func TestLoadSplitsUserAtHost(t *testing.T) {
+	isolate(t)
+	cfg, err := Load([]string{"--ssh-user", "root@10.0.0.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSH.User != "root" {
+		t.Errorf("--ssh-user root@host should log in as root, got %q", cfg.SSH.User)
+	}
+	if cfg.SSH.Hosts["10.0.0.5"] != "10.0.0.5" {
+		t.Errorf("the host should become the fallback target, got %v", cfg.SSH.Hosts)
+	}
+}

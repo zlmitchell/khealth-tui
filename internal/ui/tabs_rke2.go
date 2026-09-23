@@ -41,7 +41,7 @@ func (a *App) rke2Content() content {
 	if !rancher {
 		keys = driftKeysUpstream
 	}
-	hdr := []string{styleTitle.Render(a.tabName(tabRKE2)+" configuration") + "  " + kv("distribution", dist) + "  " + kv("version", s.Version) + styleDim.Render("   enter = full "+voc.ConfigName+", manifests and static pod dumps for the node")}
+	hdr := []string{styleTitle.Render(a.tabName(tabRKE2)+" configuration") + "  " + kv("distribution", dist) + "  " + kv("version", s.Version) + "  " + hint("§enter§ = full "+voc.ConfigName+", manifests and static pod dumps for the node")}
 	if st := a.tierStatus(tierConfig); st != "" {
 		hdr = append(hdr, styleDim.Render("  "+st))
 	}

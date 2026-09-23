@@ -17,11 +17,22 @@ import (
 
 // action is a mutating CLI command that needs explicit confirmation.
 type action struct {
-	title  string
+	title string
+	// short names the action in the header while it runs ("etcd defrag"),
+	// where the title is too long. Not every action is a helm action.
+	short  string
 	argv   []string                                  // CLI form
 	run    func(ctx context.Context) (string, error) // in-process form (API patch)
 	desc   []string
 	onFail string // what to do next when the command fails (shown under FAILED)
+}
+
+// label is what the header shows while the action runs.
+func (a *action) label() string {
+	if a == nil || a.short == "" {
+		return "action"
+	}
+	return a.short
 }
 
 func (a *action) command() string {
@@ -139,6 +150,7 @@ func (a *App) startHelmUpgrade() {
 	}
 	a.pendingAct = &action{
 		title:  fmt.Sprintf("Upgrade %s/%s: %s %s -> %s", rel.Namespace, rel.Name, rel.Chart, rel.Version, l.Version),
+		short:  "helm upgrade",
 		argv:   argv,
 		onFail: fmt.Sprintf("the failed revision is now in the release history; B on the Helm tab rolls %s back to revision %d, b picks a revision", rel.Name, rel.Revision),
 		desc: []string{
@@ -215,6 +227,7 @@ func (a *App) startHelmChartUpgrade(rel *k8s.HelmRelease) {
 	desc = append(desc, "Progress: the Addons tab (rke2 HelmCharts) shows the job; "+fmt.Sprintf("B on the Helm tab rolls back to revision %d if it fails.", rel.Revision))
 	a.pendingAct = &action{
 		title:  fmt.Sprintf("Upgrade HelmChart %s/%s: %s %s -> %s", crNS, name, rel.Chart, rel.Version, version),
+		short:  "HelmChart upgrade",
 		desc:   desc,
 		onFail: "the CR was not changed; kubectl -n " + crNS + " get helmchart " + name + " -o yaml shows its state",
 		run: func(ctx context.Context) (string, error) {
@@ -299,6 +312,7 @@ func (a *App) confirmRollback(rev k8s.HelmRevision) {
 	}
 	a.pendingAct = &action{
 		title: fmt.Sprintf("Rollback %s/%s to revision %d (%s %s, %s)", rel.Namespace, rel.Name, rev.Revision, rev.Chart, rev.Version, rev.Status),
+		short: "helm rollback",
 		argv:  argv,
 		desc:  desc,
 	}
@@ -307,7 +321,7 @@ func (a *App) confirmRollback(rev k8s.HelmRevision) {
 
 // runAction executes the pending action in the background.
 func (a *App) runAction(act *action) tea.Cmd {
-	a.actionRunning = true
+	a.actionRunning, a.actionLabel = true, act.label()
 	a.setStatus("running: " + act.command())
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -324,7 +338,7 @@ func (a *App) runAction(act *action) tea.Cmd {
 }
 
 func (a *App) handleActionDone(m actionDoneMsg) tea.Cmd {
-	a.actionRunning = false
+	a.actionRunning, a.actionLabel = false, ""
 	lines := []string{styleDim.Render("$ " + m.act.command()), ""}
 	for _, l := range strings.Split(strings.TrimRight(m.out, "\n"), "\n") {
 		lines = append(lines, wrap(l, a.width-6)...)
@@ -510,6 +524,7 @@ func (a *App) startEtcdDefrag() {
 	members, dist := x.Members, x.Dist
 	a.pendingAct = &action{
 		title:  fmt.Sprintf("Defragment etcd: %d members, one at a time", len(members)),
+		short:  "etcd defrag",
 		desc:   desc,
 		onFail: "check `etcdctl endpoint health` on every member before anything else; the etcd tab (r) shows which member is unhealthy",
 		run: func(ctx context.Context) (string, error) {

@@ -402,6 +402,12 @@ func (p *Plan) Preflight(ctx context.Context, r Runner) error {
 		}
 	}
 	p.Others = keep
+	// A local snapshot the target cannot stat is a dead restore, so it stops
+	// here rather than at the point of no return. This matters most for a
+	// path typed by hand, where a typo is the likely cause.
+	if !p.S3 && p.Snapshot != "" && p.Target.Facts.SnapshotSize == 0 {
+		return fmt.Errorf("%s: no snapshot at %s (stat found nothing) - check the path, or pick one from the list", p.Target.Name, p.Snapshot)
+	}
 	p.Warnings = append(p.Warnings, p.assess()...)
 	p.build()
 	return nil

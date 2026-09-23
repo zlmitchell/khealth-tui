@@ -17,7 +17,12 @@ import (
 // inspectLevel is one page of the object inspector (a stack of these forms
 // the drill-down history).
 type inspectLevel struct {
-	title   string
+	title string
+	// obj is kept so v can re-render the dump with the secrets decoded;
+	// reveal is per level and is not carried to the next one, so leaving
+	// and coming back shows the masked form again
+	obj     *unstructured.Unstructured
+	reveal  bool
 	meta    []string     // summary lines
 	refs    []k8s.ObjRef // navigable references
 	dump    []string     // object YAML
@@ -125,11 +130,21 @@ func levelFromObject(u *unstructured.Unstructured, snap *k8s.Snapshot) inspectLe
 			}
 		}
 	}
-	lvl.dump = strings.Split(strings.TrimRight(k8s.DumpYAML(u), "\n"), "\n")
-	for i, l := range lvl.dump {
-		lvl.dump[i] = hlYAML(l)
-	}
+	lvl.obj = u
+	lvl.renderDump()
 	return lvl
+}
+
+// renderDump re-renders this level at its current reveal setting.
+func (l *inspectLevel) renderDump() {
+	dump := k8s.DumpYAML(l.obj)
+	if l.reveal {
+		dump = k8s.DumpYAMLReveal(l.obj)
+	}
+	l.dump = strings.Split(strings.TrimRight(dump, "\n"), "\n")
+	for i, s := range l.dump {
+		l.dump[i] = hlYAML(s)
+	}
 }
 
 func joinNS(ns, name string) string {
@@ -173,6 +188,21 @@ func (a *App) handleInspectKey(key string) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	switch key {
+	case "v":
+		// only worth offering where something is actually hidden
+		if top.obj == nil || (top.obj.GetKind() != "Secret" && top.obj.GetKind() != "ConfigMap") {
+			a.setStatus("v decodes the base64 of a Secret or a ConfigMap's binaryData; this object has neither")
+			return a, nil
+		}
+		top.reveal = !top.reveal
+		top.renderDump()
+		a.inspectFind.run(top.dump, top.scroll)
+		if top.reveal {
+			a.setStatus("secret values decoded on screen - esc hides them again (they stay in this terminal's scrollback)")
+		} else {
+			a.setStatus("secret values masked again")
+		}
+		return a, nil
 	case "/":
 		a.inspectFind = textFind{typing: true}
 		return a, nil

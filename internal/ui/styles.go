@@ -14,12 +14,12 @@ import (
 )
 
 var (
-	colorOK     = lipgloss.AdaptiveColor{Light: "#1a7f37", Dark: "#3fb950"}
-	colorWarn   = lipgloss.AdaptiveColor{Light: "#9a6700", Dark: "#d29922"}
-	colorCrit   = lipgloss.AdaptiveColor{Light: "#cf222e", Dark: "#f85149"}
-	colorInfo   = lipgloss.AdaptiveColor{Light: "#0969da", Dark: "#58a6ff"}
-	colorDim    = lipgloss.AdaptiveColor{Light: "#6e7781", Dark: "#8b949e"}
-	colorAccent = lipgloss.AdaptiveColor{Light: "#8250df", Dark: "#bc8cff"}
+	colorOK     = lipgloss.AdaptiveColor{Light: "#116329", Dark: "#3fb950"}
+	colorWarn   = lipgloss.AdaptiveColor{Light: "#7d4e00", Dark: "#d29922"}
+	colorCrit   = lipgloss.AdaptiveColor{Light: "#b91c1c", Dark: "#f85149"}
+	colorInfo   = lipgloss.AdaptiveColor{Light: "#0550ae", Dark: "#58a6ff"}
+	colorDim    = lipgloss.AdaptiveColor{Light: "#57606a", Dark: "#8b949e"}
+	colorAccent = lipgloss.AdaptiveColor{Light: "#6639ba", Dark: "#bc8cff"}
 
 	styleOK     = lipgloss.NewStyle().Foreground(colorOK)
 	styleWarn   = lipgloss.NewStyle().Foreground(colorWarn)
@@ -31,10 +31,10 @@ var (
 	styleHeader = lipgloss.NewStyle().Bold(true).Foreground(colorDim).Underline(true)
 	// selection: a background band rather than reverse video so colored cells
 	// (severity text, bars, sparklines) keep their colors on the selected row
-	colorSelBg  = lipgloss.AdaptiveColor{Light: "#d0d7de", Dark: "#30363d"}
+	colorSelBg  = lipgloss.AdaptiveColor{Light: "#cfe2f8", Dark: "#30363d"}
 	styleSel    = lipgloss.NewStyle().Background(colorSelBg).Bold(true)
-	colorTabBar = lipgloss.AdaptiveColor{Light: "#e4e6ea", Dark: "#21262d"}
-	colorTabTxt = lipgloss.AdaptiveColor{Light: "#24292f", Dark: "#c9d1d9"}
+	colorTabBar = lipgloss.AdaptiveColor{Light: "#d8dee4", Dark: "#21262d"}
+	colorTabTxt = lipgloss.AdaptiveColor{Light: "#1f2328", Dark: "#c9d1d9"}
 
 	// tab strip: a full-width band; active tab is an inverted accent block
 	styleTabBar = lipgloss.NewStyle().Background(colorTabBar)
@@ -43,15 +43,51 @@ var (
 	styleTabKey = lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Background(colorTabBar)
 	// sub-tab strip: same band treatment as the main strip, one shade lighter,
 	// active item inverted in the info color so the two levels read differently
-	colorSubBar    = lipgloss.AdaptiveColor{Light: "#f0f2f5", Dark: "#161b22"}
+	colorSubBar    = lipgloss.AdaptiveColor{Light: "#eaeef2", Dark: "#161b22"}
 	styleSubBar    = lipgloss.NewStyle().Background(colorSubBar)
 	styleSubOn     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Background(colorInfo).Padding(0, 1)
 	styleSubOff    = lipgloss.NewStyle().Foreground(colorTabTxt).Background(colorSubBar)
 	styleRule      = lipgloss.NewStyle().Foreground(colorAccent)
 	styleRuleTitle = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	styleKey       = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
-	styleBox       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1)
+	// tab hints: the extra keys a tab offers ("X = rescue") sat in the dim
+	// text of the header and read as a footnote. They are teal - the one
+	// bright color nothing else here uses, so it lifts them out without
+	// borrowing a meaning: info blue inverted is an active sub-tab, amber is
+	// WARN, green is OK, violet is the active tab and every title.
+	//
+	// No background: a band turned out to be heavier than the header needs.
+	// Only the key names are bold (styleHintKey), so the keys carry the
+	// emphasis instead of the whole sentence.
+	colorHint    = lipgloss.AdaptiveColor{Light: "#0f6b63", Dark: "#2dd4bf"}
+	styleHint    = lipgloss.NewStyle().Foreground(colorHint)
+	styleHintKey = lipgloss.NewStyle().Bold(true).Foreground(colorHint)
+	styleBox     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1)
 )
+
+// hintKeyMark wraps a key name in a hint so it comes out bold: it has to be
+// a character no hint text contains, and the text is written with the keys
+// in place rather than passed separately, so a call site reads as the line
+// it draws.
+const hintKeyMark = "§"
+
+// hint renders the extra keys a tab offers. Key names marked with
+// hintKeyMark come out bold; the rest is plain teal. Callers keep their own
+// separator in front of it.
+func hint(s string) string {
+	var b strings.Builder
+	for i, part := range strings.Split(s, hintKeyMark) {
+		if part == "" {
+			continue
+		}
+		if i%2 == 1 {
+			b.WriteString(styleHintKey.Render(part))
+		} else {
+			b.WriteString(styleHint.Render(part))
+		}
+	}
+	return b.String()
+}
 
 func sevStyle(s checks.Severity) lipgloss.Style {
 	switch s {

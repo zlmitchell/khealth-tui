@@ -20,6 +20,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 	"k8s.io/klog/v2"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/zlmitchell/khealth-tui/internal/headless"
 	"github.com/zlmitchell/khealth-tui/internal/k8s"
 	"github.com/zlmitchell/khealth-tui/internal/sshrun"
+	"github.com/zlmitchell/khealth-tui/internal/termtheme"
 	"github.com/zlmitchell/khealth-tui/internal/ui"
 )
 
@@ -100,6 +102,17 @@ func main() {
 	if cfg.Perf.Pprof != "" {
 		// go tool pprof http://<addr>/debug/pprof/profile?seconds=30
 		go func() { _ = http.ListenAndServe(cfg.Perf.Pprof, nil) }()
+	}
+	// Settle light/dark before bubbletea owns the terminal. Left to lipgloss,
+	// the background query runs on the first render, while bubbletea reads
+	// stdin, and loses the reply; on Windows termenv never asks at all.
+	switch cfg.Theme {
+	case "light":
+		lipgloss.SetHasDarkBackground(false)
+	case "dark":
+		lipgloss.SetHasDarkBackground(true)
+	default:
+		lipgloss.SetHasDarkBackground(termtheme.Dark())
 	}
 	app, err := ui.New(cfg)
 	if err != nil {
@@ -390,6 +403,7 @@ func applySSHHint(cfg *config.Config, h k8s.SSHHint) {
 	}
 	if h.User != "" && !cfg.Flags["ssh-user"] {
 		cfg.SSH.User = h.User
+		cfg.SSH.NormalizeUser() // a context written before this was split
 	}
 	if h.Key != "" && !cfg.Flags["ssh-key"] {
 		cfg.SSH.Key = h.Key

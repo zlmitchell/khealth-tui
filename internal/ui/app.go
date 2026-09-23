@@ -78,6 +78,7 @@ const (
 	ovPodLogs
 	ovContext
 	ovRescue
+	ovSSH // s when SSH is unusable: edit user/become/key/host-key policy
 )
 
 // row is one selectable/scrollable line of a tab.
@@ -194,6 +195,8 @@ type App struct {
 	revRelease    *k8s.HelmRelease
 	revCursor     int
 	actionRunning bool
+	actionLabel   string      // what the running action is called in the header
+	sshEdit       *sshEditor  // the SSH settings dialog (ovSSH)
 	rescue        *rescueView // etcd snapshot restore in progress (X on the etcd tab)
 
 	// apiserver failover: the kubeconfig's server is down, another control
@@ -1575,9 +1578,17 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			return a, a.startScan()
 		}
+	case "ctrl+s":
+		// the settings whatever the state: s only reaches them when nothing
+		// connects, and a login that works is still the wrong one when the
+		// probes come back "permission denied" from sudo on one node
+		a.openSSHConfig()
 	case "s":
 		if a.runner == nil {
-			a.setStatus("SSH unavailable: " + a.sshErr)
+			// no runner means no login worked at all, so there is nothing to
+			// toggle: offer the settings instead of a status line, which was
+			// a dead end that needed a restart to leave
+			a.openSSHConfig()
 		} else {
 			a.sshEnabled = !a.sshEnabled
 			if a.sshEnabled {
@@ -1786,7 +1797,8 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := m.String()
 	// tab switching is disabled while a modal view is open: say so instead
 	// of silently swallowing the key (pod logs use tab/[ ] for containers)
-	if a.overlay != ovPodLogs && a.overlay != ovNamespace && a.overlay != ovRescue && !(a.overlay == ovDetail && a.detailFind.typing) {
+	// ovSSH is here because left/right cycle its become and host key rows
+	if a.overlay != ovPodLogs && a.overlay != ovNamespace && a.overlay != ovRescue && a.overlay != ovSSH && !(a.overlay == ovDetail && a.detailFind.typing) {
 		switch key {
 		case "tab", "shift+tab", "[", "]", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "left", "right", "h", "l":
 			if a.overlay != ovInspect || key == "tab" || key == "shift+tab" {
@@ -1824,6 +1836,8 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleLogKey(key)
 	case ovRescue:
 		return a.handleRescueKey(m)
+	case ovSSH:
+		return a.handleSSHKey(m)
 	case ovContext:
 		switch key {
 		case "esc", "q", "C":
@@ -1974,6 +1988,7 @@ func (a *App) switchContext(c k8s.ContextInfo) tea.Cmd {
 		if h := c.SSH; !h.Empty() {
 			if h.User != "" && !a.cfg.Flags["ssh-user"] {
 				a.cfg.SSH.User = h.User
+				a.cfg.SSH.NormalizeUser() // a context written before this was split
 			}
 			if h.Key != "" && !a.cfg.Flags["ssh-key"] {
 				a.cfg.SSH.Key = h.Key
@@ -2412,7 +2427,11 @@ func (a *App) renderHeader() string {
 	case a.rescueHeader() != "":
 		state = a.spinner.View() + " " + styleWarn.Render(a.rescueHeader())
 	case a.actionRunning:
-		state = a.spinner.View() + " " + styleWarn.Render("helm action running")
+		label := a.actionLabel
+		if label == "" {
+			label = "action"
+		}
+		state = a.spinner.View() + " " + styleWarn.Render(label+" running")
 	case a.refreshing:
 		state = a.spinner.View() + " refreshing"
 	case a.scan.running():
@@ -2585,9 +2604,11 @@ func (a *App) renderFooter() string {
 	case ovContext:
 		keys = []string{"esc cancel", "enter switch", "j/k choose"}
 	case ovInspect:
-		keys = []string{"esc back", "enter drill down", "j/k move", "/ find", "n/N next/prev hit", "q close", "(tabs resume after esc)"}
+		keys = []string{"esc back", "enter drill down", "j/k move", "v reveal secret", "/ find", "n/N next/prev hit", "q close"}
 	case ovPodLogs:
 		keys = []string{"esc close", "[ ]/tab container", "{ } pod", "p previous", "f follow", "w wrap", "/ find", "n/N hit", "& only hits", "T timestamps", "H highlight", "r reload"}
+	case ovSSH:
+		keys = []string{"esc close", "j/k choose", "enter edit/run", "←/→ cycle"}
 	case ovRescue:
 		keys = []string{"esc cancel/back", "j/k choose", "enter next"}
 		if r := a.rescue; r != nil {
@@ -2665,6 +2686,8 @@ func (a *App) renderOverlay() string {
 		title, lines = a.renderPodLogs()
 	case ovRescue:
 		title, lines = a.renderRescue()
+	case ovSSH:
+		title, lines = a.renderSSHConfig()
 	case ovContext:
 		title = "Switch cluster context"
 		lines = append(lines, styleDim.Render("contexts of the kubeconfig in use plus every ~/.kube/khealth-*.yaml written by `khealth user@host`; enter switches and starts a fresh first-contact cycle"), "")
@@ -2780,7 +2803,8 @@ func helpLines(width int) []string {
 		{key("a"), "toggle problems-only view (Overview, Inspect, Events, Security, Resources)"},
 		{key("r"), "refresh now (API + light SSH collection)"},
 		{key("R"), "full refresh: journal logs, images, tarballs, PV du (not the OS STIG)"},
-		{key("s"), "toggle SSH collection on/off"},
+		{key("s"), "toggle SSH collection on/off; when no login works at all it opens the SSH settings instead of refusing"},
+		{key("ctrl+s"), "SSH settings: user, key, password, become, host key policy. Applies to every node and reconnects without restarting - the settings a node refused the login with are usually only visible once you are running"},
 		{key("P"), "footprint: what khealth itself costs the API server, the nodes (remote CPU per probe) and this host"},
 		{key("e"), "export the findings, the security scan (one sheet per benchmark) and the node hardening table: asks for JSON, XLSX or both (--export-dir / export.dir, default: current directory)"},
 		{key("?"), "this help"},
@@ -2789,6 +2813,7 @@ func helpLines(width int) []string {
 
 	section("Tab-specific keys", tabKeyCols, [][]string{
 		{"Inspect", key("enter"), "open the object (references, YAML)"},
+		{"", key("v"), "inside an object: decode a Secret's base64 into stringData (and a ConfigMap's binaryData); esc masks it again. Binary values are shown as a byte count, never written to the terminal"},
 		{"", key("L"), "tail logs of the selected pod / the controller's pods"},
 		{"", key("p"), "jump to the Pods sub-tab"},
 		{"", key("t"), "rollout restart (Deployment/DaemonSet/StatefulSet, confirmed)"},
@@ -2798,7 +2823,7 @@ func helpLines(width int) []string {
 		{"", key("B"), "rollback a failed / pending-* release straight to the last revision that deployed (confirmed)"},
 		{"Nodes", key("enter"), "node dashboard: gauges, security runtime-vs-boot, services, filesystems, certs"},
 		{"etcd", key("enter"), "raw probe output and config dumps"},
-		{"", key("X"), "rescue: rejoin one broken server (quorum fine) or restore a snapshot onto the whole control plane (SSH + actions enabled; preflight, warnings and a typed confirmation first)"},
+		{"", key("X"), "rescue: rejoin one broken server (quorum fine) or restore a snapshot onto the whole control plane (SSH + actions enabled; preflight, warnings and a typed confirmation first). At the snapshot list, p takes the path of a backup khealth did not find - it scans the distribution's directory, etcd.backup_dirs and wherever the node's own timer or cron writes"},
 		{"", key("D"), "defragment every etcd member, one at a time (followers first, leader last, health check between; etcdctl via kubectl exec; confirmed)"},
 		{"Logs", key("enter"), "node lines; enter again = full line + explanation"},
 		{"", key("a"), "include info lines"},
@@ -2833,7 +2858,7 @@ func helpLines(width int) []string {
 		{"Events", "warning events"},
 		{"Addons", "CNI, CSI, DNS/ingress/metrics, registry mirrors (registries.yaml on rke2/k3s, containerd certs.d elsewhere), Rancher management + join topology (rke2/k3s, or a cluster registered in Rancher), rke2 HelmCharts"},
 		{"Helm", "releases (enter = values applied), optional update check; u = upgrade to the newest known chart version (helm upgrade, or a spec.version patch on your own HelmChart CR when the rke2/k3s helm controller owns the release), b = helm rollback to a chosen revision, B = roll a failed or stuck (pending-*) release back to the last revision that deployed (all confirm first; helm/rollback need the helm CLI; --read-only disables them; charts shipped inside rke2 are refused for upgrade)"},
-		{"Images", "per-node image inventory, unused images, airgap tarball contents vs running"},
+		{"Images", "per-node image inventory, images not running, dangling (untagged) images, airgap tarball contents vs running"},
 		{"Security", "Rules: DISA Kubernetes / RKE2 / Rancher MCM STIG + CIS checks from component flags, kubelet config, PSA, RBAC, node facts. Node hardening: per-node runtime vs boot facts (SELinux, FIPS, auditd, firewall...) and the OS STIG summary. OS STIG: every rule of the node's DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG. The whole tab is opt-in: empty until Shift+S runs the scan"},
 		{"Logs", "rke2/kubelet/containerd/rancher-system-agent logs classified into startup-noise / warnings / errors (Rancher plan events flag config rewrites); enter on a node lists its lines, enter on a line shows the full text + explanation, esc goes back, a shows info lines"},
 		{"RKE2/k3s", "config.yaml(.d), data-dir, server/manifests (HelmChartConfig etc.), static pod manifests, audit/PSS policies, config drift, API endpoint vs tls-san vs cert"},
