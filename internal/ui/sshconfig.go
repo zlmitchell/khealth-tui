@@ -263,6 +263,7 @@ func (a *App) applySSHConfig() tea.Cmd {
 	if draft.Port == 0 {
 		draft.Port = 22
 	}
+	draft.NormalizeUser() // typing root@node in the user field is the same mistake
 	r, err := sshrun.New(draft)
 	if err != nil {
 		e.err, e.note = err.Error(), ""

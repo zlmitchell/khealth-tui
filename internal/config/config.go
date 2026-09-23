@@ -181,6 +181,21 @@ func (s *SSH) AddFallbackHost(host string) {
 	s.Hosts = map[string]string{name: host}
 }
 
+// NormalizeUser splits a user given as user@host. Every ssh command line
+// takes that form, so it is what gets typed into --ssh-user and what ends
+// up remembered in a context; left whole it becomes the login name, every
+// node refuses it, and the reason is only visible in the settings dialog.
+// The host part is kept as the fallback target, matching what the
+// positional [user@]server-node argument does.
+func (s *SSH) NormalizeUser() {
+	u, host, ok := strings.Cut(s.User, "@")
+	if !ok || u == "" || host == "" {
+		return
+	}
+	s.User = u
+	s.AddFallbackHost(host)
+}
+
 // Etcd configures etcd probing and backup expectations.
 type Etcd struct {
 	BackupDirs   []string      `yaml:"backup_dirs"`
@@ -543,6 +558,7 @@ func Load(args []string) (Config, error) {
 	if cfg.SSH.Password == "" {
 		cfg.SSH.Password = os.Getenv("KHT_SSH_PASSWORD")
 	}
+	cfg.SSH.NormalizeUser() // --ssh-user root@node, or a context that stored one
 	if cfg.SSH.User == "" {
 		cfg.SSH.User = os.Getenv("USER")
 		if cfg.SSH.User == "" {

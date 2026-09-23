@@ -403,6 +403,7 @@ func applySSHHint(cfg *config.Config, h k8s.SSHHint) {
 	}
 	if h.User != "" && !cfg.Flags["ssh-user"] {
 		cfg.SSH.User = h.User
+		cfg.SSH.NormalizeUser() // a context written before this was split
 	}
 	if h.Key != "" && !cfg.Flags["ssh-key"] {
 		cfg.SSH.Key = h.Key
