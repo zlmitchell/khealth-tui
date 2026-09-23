@@ -443,13 +443,20 @@ func TestEtcdDefragKey(t *testing.T) {
 			t.Errorf("confirm overlay should contain %q: %s", want, v)
 		}
 	}
+	// the header names the running action: every action used to be
+	// reported as "helm action running", including this one
+	a.actionLabel = a.pendingAct.label()
 	a.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
 	a.actionRunning = true
+	hdr := ansi.Strip(a.View())
+	if !strings.Contains(hdr, "etcd defrag running") || strings.Contains(hdr, "helm action running") {
+		t.Errorf("defrag header should say what is running, not helm: %s", hdr)
+	}
 	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
 	if !strings.Contains(a.status, "still running") {
 		t.Errorf("D while an action runs: %q", a.status)
 	}
-	a.actionRunning = false
+	a.actionRunning, a.actionLabel = false, ""
 	a.cfg.Actions.Enabled = false
 	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
 	if a.overlay != ovNone || !strings.Contains(a.status, "disabled") {

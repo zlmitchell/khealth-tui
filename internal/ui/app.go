@@ -194,6 +194,7 @@ type App struct {
 	revRelease    *k8s.HelmRelease
 	revCursor     int
 	actionRunning bool
+	actionLabel   string      // what the running action is called in the header
 	rescue        *rescueView // etcd snapshot restore in progress (X on the etcd tab)
 
 	// apiserver failover: the kubeconfig's server is down, another control
@@ -2412,7 +2413,11 @@ func (a *App) renderHeader() string {
 	case a.rescueHeader() != "":
 		state = a.spinner.View() + " " + styleWarn.Render(a.rescueHeader())
 	case a.actionRunning:
-		state = a.spinner.View() + " " + styleWarn.Render("helm action running")
+		label := a.actionLabel
+		if label == "" {
+			label = "action"
+		}
+		state = a.spinner.View() + " " + styleWarn.Render(label+" running")
 	case a.refreshing:
 		state = a.spinner.View() + " refreshing"
 	case a.scan.running():
