@@ -27,6 +27,10 @@ type Config struct {
 	Context    string        `yaml:"context"`
 	Namespace  string        `yaml:"namespace"`
 	Refresh    time.Duration `yaml:"refresh"`
+	// Theme picks the light or dark palette: auto (ask the terminal), light or
+	// dark. Windows consoles cannot be asked and always read as dark, so a
+	// light terminal there needs light (--theme, KHT_THEME).
+	Theme string `yaml:"theme"`
 	// HeavyEvery is the cadence (in refresh cycles) of a demand tier while
 	// a tab shows it or collect.always pins it: journal, image inventories,
 	// PV du, config facts (docs/ARCHITECTURE.md §7).
@@ -294,6 +298,7 @@ func Load(args []string) (Config, error) {
 		kctx         = fs.String("context", "", "kubeconfig context to use")
 		ns           = fs.String("n", "", "initial namespace filter (empty = all)")
 		refresh      = fs.Duration("refresh", 0, "refresh interval")
+		theme        = fs.String("theme", "", "color palette: auto (ask the terminal for its background), light or dark (also KHT_THEME; Windows cannot be asked and reads as dark)")
 		sshUser      = fs.String("ssh-user", "", "SSH user for nodes")
 		sshKey       = fs.String("ssh-key", "", "SSH private key file")
 		sshPort      = fs.Int("ssh-port", 0, "SSH port")
@@ -442,6 +447,8 @@ func Load(args []string) (Config, error) {
 			cfg.Namespace = *ns
 		case "refresh":
 			cfg.Refresh = *refresh
+		case "theme":
+			cfg.Theme = *theme
 		case "ssh-user":
 			cfg.SSH.User = *sshUser
 		case "ssh-key":
@@ -541,6 +548,19 @@ func Load(args []string) (Config, error) {
 		if cfg.SSH.User == "" {
 			cfg.SSH.User = os.Getenv("USERNAME")
 		}
+	}
+	// the terminal, not the cluster, decides the theme: an environment
+	// variable set for one terminal wins over the config file
+	if t := os.Getenv("KHT_THEME"); t != "" && !cfg.Flags["theme"] {
+		cfg.Theme = t
+	}
+	cfg.Theme = strings.ToLower(strings.TrimSpace(cfg.Theme))
+	switch cfg.Theme {
+	case "":
+		cfg.Theme = "auto"
+	case "auto", "light", "dark":
+	default:
+		return cfg, fmt.Errorf("theme: %q is not auto, light or dark", cfg.Theme)
 	}
 	if cfg.Refresh < 5*time.Second {
 		cfg.Refresh = 5 * time.Second

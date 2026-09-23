@@ -32,6 +32,10 @@ A file bootstrapped earlier is reused while it still connects: matched by server
 
 Started with no usable kubeconfig and no host, khealth asks instead of failing: on a cluster node it offers the local `rke2.yaml` / `k3s.yaml` / `admin.conf` (copied through `sudo` into `~/.kube/khealth-local.yaml` when it is root-only); otherwise it asks for a server node (`[user@]host`, password prompt when there is no key or agent) and bootstraps from it. `--ssh-address` is the node address *type* (InternalIP / ExternalIP / Hostname) used for nodes listed by the API, not a host.
 
+## Light and dark terminals
+
+Every color has a light and a dark variant. `theme: auto` (the default) asks the terminal for its background once at startup (OSC 11) and picks the matching set. Windows consoles cannot be asked and always read as dark, and some terminals and multiplexers do not answer, so pin it: `--theme light`, `KHT_THEME=light` in that terminal's profile, or `theme: light` in the config. The flag beats the variable, and the variable beats the config file, since the background belongs to the terminal rather than the cluster.
+
 ## What counts as a system namespace
 
 Several rules only look at *user* namespaces: privileged / host-namespace pods and missing NetworkPolicies (CIS 5.2.x, 5.3.2), PSA labels (V-254800-ns), the exemption list (V-254800-exempt) and the "user pods on control-plane nodes" table. What is infrastructure is decided in this order, all of it additive:

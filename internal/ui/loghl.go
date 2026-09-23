@@ -14,13 +14,13 @@ import (
 // keyPalette gives every key a stable, distinct color (hashed by name) so
 // the same field is easy to pick out across lines.
 var keyPalette = []lipgloss.AdaptiveColor{
-	{Light: "#0969da", Dark: "#79c0ff"}, // blue
-	{Light: "#8250df", Dark: "#d2a8ff"}, // purple
-	{Light: "#bf3989", Dark: "#f778ba"}, // pink
-	{Light: "#9a6700", Dark: "#e3b341"}, // gold
-	{Light: "#1a7f37", Dark: "#56d364"}, // green
-	{Light: "#0a7d8c", Dark: "#76e3ea"}, // teal
-	{Light: "#bc4c00", Dark: "#f0883e"}, // orange
+	{Light: "#0550ae", Dark: "#79c0ff"}, // blue
+	{Light: "#6639ba", Dark: "#d2a8ff"}, // purple
+	{Light: "#99286e", Dark: "#f778ba"}, // pink
+	{Light: "#7d4e00", Dark: "#e3b341"}, // gold
+	{Light: "#116329", Dark: "#56d364"}, // green
+	{Light: "#0a6573", Dark: "#76e3ea"}, // teal
+	{Light: "#953800", Dark: "#f0883e"}, // orange
 }
 
 func keyStyle(key string) lipgloss.Style {
@@ -40,7 +40,7 @@ func renderKey(key, sep string) string {
 var (
 	styleLogSep   = lipgloss.NewStyle().Foreground(colorDim)
 	styleLogKey   = lipgloss.NewStyle().Foreground(colorDim)
-	styleLogStr   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#0a7f5a", Dark: "#7ee787"})
+	styleLogStr   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#0a6b4c", Dark: "#7ee787"})
 	styleLogNum   = lipgloss.NewStyle().Foreground(colorInfo)
 	styleLogBool  = lipgloss.NewStyle().Foreground(colorAccent)
 	styleLogMsg   = lipgloss.NewStyle().Bold(true)

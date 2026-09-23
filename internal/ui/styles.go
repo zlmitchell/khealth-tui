@@ -14,12 +14,12 @@ import (
 )
 
 var (
-	colorOK     = lipgloss.AdaptiveColor{Light: "#1a7f37", Dark: "#3fb950"}
-	colorWarn   = lipgloss.AdaptiveColor{Light: "#9a6700", Dark: "#d29922"}
-	colorCrit   = lipgloss.AdaptiveColor{Light: "#cf222e", Dark: "#f85149"}
-	colorInfo   = lipgloss.AdaptiveColor{Light: "#0969da", Dark: "#58a6ff"}
-	colorDim    = lipgloss.AdaptiveColor{Light: "#6e7781", Dark: "#8b949e"}
-	colorAccent = lipgloss.AdaptiveColor{Light: "#8250df", Dark: "#bc8cff"}
+	colorOK     = lipgloss.AdaptiveColor{Light: "#116329", Dark: "#3fb950"}
+	colorWarn   = lipgloss.AdaptiveColor{Light: "#7d4e00", Dark: "#d29922"}
+	colorCrit   = lipgloss.AdaptiveColor{Light: "#b91c1c", Dark: "#f85149"}
+	colorInfo   = lipgloss.AdaptiveColor{Light: "#0550ae", Dark: "#58a6ff"}
+	colorDim    = lipgloss.AdaptiveColor{Light: "#57606a", Dark: "#8b949e"}
+	colorAccent = lipgloss.AdaptiveColor{Light: "#6639ba", Dark: "#bc8cff"}
 
 	styleOK     = lipgloss.NewStyle().Foreground(colorOK)
 	styleWarn   = lipgloss.NewStyle().Foreground(colorWarn)
@@ -31,10 +31,10 @@ var (
 	styleHeader = lipgloss.NewStyle().Bold(true).Foreground(colorDim).Underline(true)
 	// selection: a background band rather than reverse video so colored cells
 	// (severity text, bars, sparklines) keep their colors on the selected row
-	colorSelBg  = lipgloss.AdaptiveColor{Light: "#d0d7de", Dark: "#30363d"}
+	colorSelBg  = lipgloss.AdaptiveColor{Light: "#cfe2f8", Dark: "#30363d"}
 	styleSel    = lipgloss.NewStyle().Background(colorSelBg).Bold(true)
-	colorTabBar = lipgloss.AdaptiveColor{Light: "#e4e6ea", Dark: "#21262d"}
-	colorTabTxt = lipgloss.AdaptiveColor{Light: "#24292f", Dark: "#c9d1d9"}
+	colorTabBar = lipgloss.AdaptiveColor{Light: "#d8dee4", Dark: "#21262d"}
+	colorTabTxt = lipgloss.AdaptiveColor{Light: "#1f2328", Dark: "#c9d1d9"}
 
 	// tab strip: a full-width band; active tab is an inverted accent block
 	styleTabBar = lipgloss.NewStyle().Background(colorTabBar)
@@ -43,7 +43,7 @@ var (
 	styleTabKey = lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Background(colorTabBar)
 	// sub-tab strip: same band treatment as the main strip, one shade lighter,
 	// active item inverted in the info color so the two levels read differently
-	colorSubBar    = lipgloss.AdaptiveColor{Light: "#f0f2f5", Dark: "#161b22"}
+	colorSubBar    = lipgloss.AdaptiveColor{Light: "#eaeef2", Dark: "#161b22"}
 	styleSubBar    = lipgloss.NewStyle().Background(colorSubBar)
 	styleSubOn     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}).Background(colorInfo).Padding(0, 1)
 	styleSubOff    = lipgloss.NewStyle().Foreground(colorTabTxt).Background(colorSubBar)
@@ -59,7 +59,7 @@ var (
 	// No background: a band turned out to be heavier than the header needs.
 	// Only the key names are bold (styleHintKey), so the keys carry the
 	// emphasis instead of the whole sentence.
-	colorHint    = lipgloss.AdaptiveColor{Light: "#0f766e", Dark: "#2dd4bf"}
+	colorHint    = lipgloss.AdaptiveColor{Light: "#0f6b63", Dark: "#2dd4bf"}
 	styleHint    = lipgloss.NewStyle().Foreground(colorHint)
 	styleHintKey = lipgloss.NewStyle().Bold(true).Foreground(colorHint)
 	styleBox     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1)

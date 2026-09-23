@@ -20,6 +20,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 	"k8s.io/klog/v2"
 
@@ -100,6 +101,17 @@ func main() {
 	if cfg.Perf.Pprof != "" {
 		// go tool pprof http://<addr>/debug/pprof/profile?seconds=30
 		go func() { _ = http.ListenAndServe(cfg.Perf.Pprof, nil) }()
+	}
+	// Settle light/dark before bubbletea owns the terminal. Left to lipgloss,
+	// the background query runs on the first render, while bubbletea reads
+	// stdin, and loses the reply; Windows cannot be asked at all.
+	switch cfg.Theme {
+	case "light":
+		lipgloss.SetHasDarkBackground(false)
+	case "dark":
+		lipgloss.SetHasDarkBackground(true)
+	default:
+		lipgloss.SetHasDarkBackground(lipgloss.HasDarkBackground())
 	}
 	app, err := ui.New(cfg)
 	if err != nil {

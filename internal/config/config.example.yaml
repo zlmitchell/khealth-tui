@@ -7,6 +7,7 @@ kubeconfig: ~/.kube/config        # default: $KUBECONFIG / ~/.kube/config
 context: ""                       # kubeconfig context (default: current-context)
 namespace: ""                     # initial namespace filter ("" = all); 'n' changes it live
 refresh: 30s                      # API refresh + light SSH collection interval
+theme: auto                       # auto (ask the terminal), light or dark; Windows consoles always read as dark (--theme, KHT_THEME)
 heavy_every: 6                    # every Nth refresh also collects journal logs, image lists, tarball manifests (R forces it)
 
 ssh:

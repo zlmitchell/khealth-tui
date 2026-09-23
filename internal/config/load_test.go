@@ -21,6 +21,7 @@ func isolate(t *testing.T) string {
 	t.Setenv("APPDATA", filepath.Join(home, "AppData"))
 	t.Setenv("KHT_SSH_PASSWORD", "")
 	t.Setenv("KHT_BECOME_PASSWORD", "")
+	t.Setenv("KHT_THEME", "")
 	t.Setenv("USER", "")
 	t.Setenv("USERNAME", "")
 	t.Chdir(t.TempDir())
@@ -200,6 +201,39 @@ func TestLoadEnvironment(t *testing.T) {
 	cfg, _ = Load([]string{"--ssh-password", "flagpw"})
 	if cfg.SSH.Password != "flagpw" || cfg.SSH.User != "unixuser" {
 		t.Errorf("flag over env / USER first: %+v", cfg.SSH)
+	}
+}
+
+// The theme is a property of the terminal: KHT_THEME, set per terminal, wins
+// over the config file, and --theme over both.
+func TestLoadTheme(t *testing.T) {
+	isolate(t)
+	file := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(file, []byte("theme: dark\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		env  string
+		args []string
+		want string
+	}{
+		{"", nil, "auto"},
+		{"", []string{"--config", file}, "dark"},
+		{" Light ", []string{"--config", file}, "light"},
+		{"light", []string{"--config", file, "--theme", "dark"}, "dark"},
+	} {
+		t.Setenv("KHT_THEME", c.env)
+		cfg, err := Load(c.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Theme != c.want {
+			t.Errorf("KHT_THEME=%q %v: theme %q, want %q", c.env, c.args, cfg.Theme, c.want)
+		}
+	}
+	t.Setenv("KHT_THEME", "")
+	if _, err := Load([]string{"--theme", "solarized"}); err == nil {
+		t.Error("unknown theme accepted")
 	}
 }
 
