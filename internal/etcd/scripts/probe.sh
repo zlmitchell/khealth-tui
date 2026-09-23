@@ -238,14 +238,91 @@ echo "$DATADIR"
 [ -d "$DATADIR" ] && du -sk "$DATADIR" 2>/dev/null | cut -f1
 [ -d "$DATADIR" ] && df -Pk "$DATADIR" 2>/dev/null | tail -1
 if [ "__FULL__" = 1 ]; then
+# Where does this host's own backup job write? On kubeadm there is no
+# built-in scheduler, so the snapshots are wherever an operator's timer or
+# cron puts them - which is nowhere khealth can guess. The command is read
+# out of the unit or the crontab line and the destination taken from it, so
+# the files below are found and graded like a distribution's own.
+#
+# Only paths are taken from an EnvironmentFile: those files hold S3
+# credentials (see the kubeadm hardening's /etc/etcd-snapshot.env) and are
+# never printed.
+HINTS=
+FOUND=
+# paths out of a command line: `etcdctl snapshot save <path>` and the
+# BACKUP_DIR-style variables a wrapper script reads
+# One sed per rule on purpose: with several -e the expressions run in turn
+# on the same pattern space, so the first match rewrites the line and the
+# later rules never see the original. That hid BACKUP_DIR=${BACKUP_DIR:-/x},
+# which is how a wrapper script usually states its default.
+paths_in() {
+  _t=$1
+  {
+    printf '%s\n' "$_t" | tr ' \t' '\n\n' | sed -n 's|^["'"'"']\{0,1\}\(/[^"'"'"']*\)["'"'"']\{0,1\}$|\1|p'
+    printf '%s\n' "$_t" | sed -n 's|.*snapshot[ \t][ \t]*save[ \t][ \t]*["'"'"']\{0,1\}\([^ \t"'"'"']*\).*|\1|p'
+    printf '%s\n' "$_t" | sed -n 's|.*:-\(/[^ \t"'"'"'}]*\)}.*|\1|p'
+    for _k in BACKUP_DIR SNAPSHOT_DIR SNAP_DIR DEST_DIR; do
+      printf '%s\n' "$_t" | sed -n "s|.*$_k=[\"']\{0,1\}\([^ \t\"'}:]*\).*|\1|p"
+    done
+  } | grep '^/' | sort -u
+}
+# record both the path and its parent: either may be the directory
+keep() {
+  for p in $1; do
+    case "$p" in /*) ;; *) continue ;; esac
+    FOUND="$FOUND $p $(dirname "$p")"
+  done
+}
+# the directory to show for a job: a destination usually carries a date in
+# its name ($(date +%F)), which is not worth printing half-expanded
+shown_dir() {
+  for p in $1; do
+    case "$p" in
+      /*'$'*) dirname "$(printf '%s' "$p" | sed 's|\$.*||')"; return ;;
+      /*) printf '%s' "$p"; return ;;
+    esac
+  done
+}
+for unit in $(systemctl list-timers --all --no-pager --no-legend 2>/dev/null | awk '{print $NF}' | grep -i 'etcd\|backup' | head -5); do
+  svc=$(systemctl show -p Unit "$unit" 2>/dev/null | sed 's/^Unit=//')
+  [ -n "$svc" ] || svc=$(echo "$unit" | sed 's/\.timer$/.service/')
+  ex=$(systemctl show -p ExecStart "$svc" 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -1)
+  args=$(systemctl show -p ExecStart "$svc" 2>/dev/null | sed -n 's/.*argv\[\]=\([^;]*\).*/\1/p' | head -1)
+  env=$(systemctl show -p Environment "$svc" 2>/dev/null | sed 's/^Environment=//')
+  when=$(systemctl list-timers --all --no-pager --no-legend 2>/dev/null | grep -F "$unit" | head -1 | sed 's/  */ /g')
+  cand=$(paths_in "$args $env")
+  # the command is usually a wrapper: read it (bounded) for its own default
+  if [ -n "$ex" ] && [ -r "$ex" ] && [ -f "$ex" ]; then
+    cand="$cand $(paths_in "$(head -c 8000 "$ex" 2>/dev/null | grep -i 'snapshot save\|BACKUP_DIR=\|SNAPSHOT_DIR=')")"
+  fi
+  # an EnvironmentFile may name the directory; take only that key from it
+  for f in $(systemctl show -p EnvironmentFiles "$svc" 2>/dev/null | sed 's/^EnvironmentFiles=//' | tr ' ' '\n' | sed 's/^-//' | grep '^/'); do
+    [ -r "$f" ] && cand="$cand $(grep -hE '^[ \t]*(BACKUP_DIR|SNAPSHOT_DIR|SNAP_DIR)=' "$f" 2>/dev/null | head -3 | sed 's/.*=//' | tr -d '"'"'"'"')"
+  done
+  keep "$cand"
+  HINTS="$HINTS
+timer: $unit -> $svc${ex:+ exec=$ex}$(shown_dir "$cand" | sed 's|^| writes=|')${when:+ | $when}"
+done
+for f in $(grep -rlisE 'etcdctl|etcdutl|etcd.*snapshot' /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/crontab /var/spool/cron 2>/dev/null | head -5); do
+  line=$(grep -hiE 'etcdctl|etcdutl|snapshot' "$f" 2>/dev/null | grep -v '^[ \t]*#' | head -1)
+  cand=$(paths_in "$line")
+  for s in $(printf '%s\n' "$line" | tr ' \t' '\n\n' | grep '^/' | head -3); do
+    [ -f "$s" ] && [ -r "$s" ] && cand="$cand $(paths_in "$(head -c 8000 "$s" 2>/dev/null | grep -i 'snapshot save\|BACKUP_DIR=\|SNAPSHOT_DIR=')")"
+  done
+  keep "$cand"
+  HINTS="$HINTS
+cron: $f: $(printf '%s' "$line" | cut -c1-160)$(shown_dir "$cand" | sed 's|^| writes=|')"
+done
 sec SNAPSHOTS
-for d in $SNAPDIR $EXTRA_DIRS /var/lib/etcd-backup /var/lib/etcd/backup /var/backups/etcd /opt/etcd-backup /opt/etcd/backup /backup/etcd /var/lib/rancher/rke2/server/db/snapshots /var/lib/rancher/k3s/server/db/snapshots; do
+SEEN=
+for d in $SNAPDIR $EXTRA_DIRS $FOUND /var/lib/etcd-backup /var/lib/etcd/backup /var/backups/etcd /opt/etcd-backup /opt/etcd/backup /backup/etcd /var/lib/rancher/rke2/server/db/snapshots /var/lib/rancher/k3s/server/db/snapshots; do
   [ -d "$d" ] || continue
+  case " $SEEN " in *" $d "*) continue ;; esac   # a discovered dir may repeat a known one
+  SEEN="$SEEN $d"
   echo "--- $d"
   for f in "$d"/*; do [ -f "$f" ] && stat -c '%s|%Y|%n' "$f" 2>/dev/null; done
 done
 sec BACKUPHINTS
-systemctl list-timers --all --no-pager --no-legend 2>/dev/null | grep -i etcd | sed 's/^/timer: /'
-grep -rlisE 'etcd' /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/crontab /var/spool/cron 2>/dev/null | sed 's/^/cron: /'
+printf '%s\n' "$HINTS" | grep -v '^$'
 fi
 sec END

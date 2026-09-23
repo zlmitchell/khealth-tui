@@ -809,7 +809,7 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 	case snapshotsDisabled:
 		add(SevWarn, "etcd", "backups", "rke2 etcd snapshots are disabled (etcd-disable-snapshots: true)", "enable scheduled snapshots or ensure an external backup")
 	case !backupMechanism && (len(in.Etcd) > 0 || rke2):
-		add(SevWarn, "etcd", "backups", "no etcd backup mechanism detected (no snapshots, timers, crons or CronJobs)", distro.For(s.Distribution).EtcdBackups+"; khealth looks for snapshot files, systemd timers, crons and CronJobs")
+		add(SevWarn, "etcd", "backups", "no etcd backup mechanism detected (no snapshots, timers, crons or CronJobs)", distro.For(s.Distribution).EtcdBackups+"; khealth reads the command behind an etcd timer or cron and scans where it writes, so this means no such job was found - etcd.backup_dirs adds a directory it cannot infer")
 	default:
 		latest := latestLocal
 		src := "local on " + latestLocalNode
