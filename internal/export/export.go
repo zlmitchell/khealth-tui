@@ -92,9 +92,31 @@ type Finding struct {
 	Resolved  *time.Time `json:"resolved,omitempty"`
 }
 
-// Security is the STIG / CIS scan: one entry per benchmark.
+// Security is the STIG / CIS scan: one entry per benchmark, then the open
+// rules regrouped by the file or object the fix changes.
 type Security struct {
 	Benchmarks []Benchmark `json:"benchmarks"`
+	Checklist  []FixGroup  `json:"checklist,omitempty"`
+}
+
+// FixGroup is one target of the fix list: a file on the nodes, a
+// Kubernetes object, packages, units, or the review bucket.
+type FixGroup struct {
+	Kind   string    `json:"kind"`
+	Target string    `json:"target"`
+	Hint   string    `json:"hint,omitempty"`
+	Nodes  []string  `json:"nodes,omitempty"`
+	Items  []FixItem `json:"items"`
+}
+
+// FixItem is one change and every rule it closes.
+type FixItem struct {
+	IDs    []string `json:"ids"`
+	Cat    string   `json:"cat,omitempty"`
+	Status string   `json:"status"`
+	Title  string   `json:"title"`
+	Change string   `json:"change"`
+	Nodes  []string `json:"nodes,omitempty"`
 }
 
 // Benchmark is one reference document with its scorecard and rules.
@@ -287,6 +309,13 @@ func security(rs []stig.Result) *Security {
 		b.Sheet = sheetName(name)
 		sec.Benchmarks = append(sec.Benchmarks, *b)
 	}
+	for _, g := range stig.Checklist(rs) {
+		fg := FixGroup{Kind: g.Kind.String(), Target: g.Name, Hint: g.Hint, Nodes: g.Nodes}
+		for _, it := range g.Items {
+			fg.Items = append(fg.Items, FixItem{IDs: it.IDs, Cat: it.Cat, Status: it.Status.String(), Title: it.Title, Change: it.Change, Nodes: it.Nodes})
+		}
+		sec.Checklist = append(sec.Checklist, fg)
+	}
 	return sec
 }
 
@@ -355,16 +384,16 @@ func FileBase(r *Report) string {
 // WriteFiles writes <dir>/<base>.json and <dir>/<base>.xlsx and returns
 // their paths.
 func WriteFiles(dir string, r *Report) (jsonPath, xlsxPath string, err error) {
-	paths, err := WriteFormats(dir, r, true, true)
+	paths, err := WriteFormats(dir, r, true, true, false)
 	if err != nil {
 		return "", "", err
 	}
 	return paths[0], paths[1], nil
 }
 
-// WriteFormats writes the report as JSON and/or XLSX under dir and returns
-// the paths written, JSON first.
-func WriteFormats(dir string, r *Report, json, xlsx bool) ([]string, error) {
+// WriteFormats writes the report as JSON, XLSX and/or the markdown fix list
+// (<base>-fixes.md) under dir and returns the paths written in that order.
+func WriteFormats(dir string, r *Report, json, xlsx, md bool) ([]string, error) {
 	if dir == "" {
 		dir = "."
 	}
@@ -392,6 +421,21 @@ func WriteFormats(dir string, r *Report, json, xlsx bool) ([]string, error) {
 		p := base + ".xlsx"
 		if err := WriteXLSX(p, r); err != nil {
 			return nil, fmt.Errorf("xlsx: %w", err)
+		}
+		out = append(out, p)
+	}
+	if md {
+		p := base + "-fixes.md"
+		f, err := os.Create(p)
+		if err != nil {
+			return nil, err
+		}
+		if err := WriteMarkdown(f, r); err != nil {
+			f.Close()
+			return nil, err
+		}
+		if err := f.Close(); err != nil {
+			return nil, err
 		}
 		out = append(out, p)
 	}

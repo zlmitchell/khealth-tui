@@ -1477,6 +1477,8 @@ func (a *App) securitySubContent() content {
 		return a.hardeningContent()
 	case "OS STIG":
 		return a.osStigContent()
+	case "Fix list":
+		return a.fixListContent()
 	}
 	var clusterRes []stig.Result
 	for _, r := range a.stigRes {

@@ -165,6 +165,19 @@ func exportOnce(cfg config.Config) error {
 			return err
 		}
 		fmt.Println("wrote", out)
+	case ".md":
+		f, err := os.Create(out)
+		if err != nil {
+			return err
+		}
+		if err := export.WriteMarkdown(f, rep); err != nil {
+			f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		fmt.Println("wrote", out)
 	default:
 		jsonPath, xlsxPath, err := export.WriteFiles(out, rep)
 		if err != nil {

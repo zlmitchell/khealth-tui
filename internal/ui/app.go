@@ -58,7 +58,7 @@ var subTabs = map[tab][]string{
 	tabWorkloads: {"Controllers", "Pods", "Resources", "Object"},
 	tabEvents:    {"Events", "Object"},
 	tabLogs:      {"Nodes", "Lines"},
-	tabSecurity:  {"Rules", "Node hardening", "OS STIG"},
+	tabSecurity:  {"Rules", "Node hardening", "OS STIG", "Fix list"},
 }
 
 const subInspect = "Object"
@@ -130,6 +130,7 @@ type App struct {
 	s3Reach    map[string]etcd.S3Check
 	logSum     map[string]*logs.Summary
 	stigRes    []stig.Result
+	fixList    []stig.ChecklistGroup // stigRes regrouped by target, rebuilt with it
 	helmLatest map[string]helmcheck.Latest
 	findings   []checks.Finding
 	findingAge map[string]findingTrack // first/last seen per finding key (see findings.go)
@@ -1046,9 +1047,10 @@ func (a *App) s3CheckCmd(node string) tea.Cmd {
 // only changes when a heavy probe lands.
 func (a *App) recompute() {
 	if !a.secScanned {
-		a.stigRes = nil
+		a.stigRes, a.fixList = nil, nil
 	} else if a.stigDirty || a.stigRes == nil {
 		a.stigRes = stig.Evaluate(stig.Input{Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec})
+		a.fixList = stig.Checklist(a.stigRes)
 		a.stigDirty = false
 	}
 	a.findings = checks.Evaluate(checks.Input{
@@ -1849,11 +1851,13 @@ func (a *App) handleOverlayKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.overlay = ovNone
 		switch key {
 		case "j", "J":
-			a.exportReport(true, false)
+			a.exportReport(true, false, false)
 		case "x", "X":
-			a.exportReport(false, true)
+			a.exportReport(false, true, false)
+		case "m", "M":
+			a.exportReport(false, false, true)
 		case "b", "B", "enter":
-			a.exportReport(true, true)
+			a.exportReport(true, true, false)
 		default:
 			a.setStatus("export canceled")
 		}
@@ -2637,7 +2641,7 @@ func (a *App) renderFooter() string {
 	case ovConfirm, ovRevisions:
 		keys = []string{"esc cancel", "enter confirm", "j/k choose", "(tabs resume after esc)"}
 	case ovExport:
-		keys = []string{"j json", "x xlsx", "b/enter both", "esc cancel"}
+		keys = []string{"j json", "x xlsx", "b/enter both", "m fix list (md)", "esc cancel"}
 	case ovNamespace:
 		keys = []string{"esc cancel", "enter select", "type filter", "↑/↓ choose"}
 	case ovContext:
@@ -2845,7 +2849,7 @@ func helpLines(width int) []string {
 		{key("s"), "toggle SSH collection on/off; when no login works at all it opens the SSH settings instead of refusing"},
 		{key("ctrl+s"), "SSH settings: user, key, password, become, host key policy. Applies to every node and reconnects without restarting - the settings a node refused the login with are usually only visible once you are running"},
 		{key("P"), "footprint: what khealth itself costs the API server, the nodes (remote CPU per probe) and this host"},
-		{key("e"), "export the findings, the security scan (one sheet per benchmark) and the node hardening table: asks for JSON, XLSX or both (--export-dir / export.dir, default: current directory)"},
+		{key("e"), "export the findings, the security scan (one sheet per benchmark) and the node hardening table: asks for JSON, XLSX or both, or m for the security fix list as a markdown checklist (--export-dir / export.dir, default: current directory)"},
 		{key("?"), "this help"},
 		{key("q"), "quit (steps back first when inside an object/log view)"},
 	})

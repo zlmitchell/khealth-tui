@@ -332,7 +332,7 @@ func Load(args []string) (Config, error) {
 		diag         = fs.Bool("diag", false, "run API/permission diagnostics (nodes/proxy, stats/summary, pods/exec, ...) and exit")
 		perfLog      = fs.String("perf-log", "", "append one JSON line per refresh cycle with the tool's own footprint (remote CPU, API bytes, local CPU) to this file")
 		exportDir    = fs.String("export-dir", "", "directory where 'e' writes the findings report as khealth-<context>-<timestamp>.json and .xlsx (default: current directory)")
-		exportOut    = fs.String("export", "", "no TUI: run one collection cycle, write the findings report and exit; a directory gets khealth-<context>-<timestamp>.json + .xlsx, a path ending in .json or .xlsx that one file")
+		exportOut    = fs.String("export", "", "no TUI: run one collection cycle, write the findings report and exit; a directory gets khealth-<context>-<timestamp>.json + .xlsx, a path ending in .json or .xlsx that one file, .md the security fix list (with --export-scan)")
 		exportScan   = fs.Bool("export-scan", false, "with --export: run the security scan too (STIG/CIS rules, OS STIG facts over SSH; one sheet per benchmark)")
 		exportHeavy  = fs.Bool("export-heavy", false, "with --export: collect the heavy node tiers too (journal, images, registry pull dry run)")
 		pprofAddr    = fs.String("pprof", "", "serve net/http/pprof on this address (e.g. 127.0.0.1:6060)")

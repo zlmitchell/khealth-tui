@@ -95,6 +95,8 @@ type Result struct {
 	RuleID  string            // STIG rule ID (RHEL-09-211010) when the reference has one
 	Check   string            // the reference's own check text (OS STIGs), shown in the detail view
 	PerNode map[string]Status // per-node outcome for perNode rules
+	Targets []Target          // what the fix changes (checklist.go); empty = inferred
+	aliasOf []string          // RKE2 STIG rows that restate other rules
 }
 
 // Input is everything the rules look at.
@@ -137,6 +139,7 @@ func Evaluate(in Input) []Result {
 	e.rke2STIGRules() // every RKE2 STIG rule with its own row (rke2stig.go)
 	e.clusterRules()
 	e.rancherRules()
+	e.finishTargets()
 
 	sort.SliceStable(e.out, func(i, j int) bool {
 		if e.out[i].Status != e.out[j].Status {

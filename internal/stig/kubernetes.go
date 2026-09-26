@@ -473,16 +473,18 @@ func (e *evaluator) clusterRules() {
 	s := e.in.Snap
 
 	// V-242383 default namespace
-	var def []string
+	var def, defOwners []string
 	for i := range s.Pods {
 		if s.Pods[i].Namespace == "default" {
 			def = append(def, s.Pods[i].Name)
+			defOwners = append(defOwners, workloadOf(&s.Pods[i]))
 		}
 	}
 	r := Result{ID: "V-242383", Title: "User workloads not deployed in the default namespace", Cat: "I", Group: g, Status: Pass, Detail: "no pods in default", Fix: "move workloads to dedicated namespaces"}
 	if len(def) > 0 {
 		r.Status = Fail
 		r.Detail = fmt.Sprintf("%d pod(s) in default: %s", len(def), strutil.TruncList(def, 5))
+		r.Targets = objectTargets(defOwners, "move to a dedicated namespace")
 	}
 	e.add(r)
 
@@ -531,6 +533,11 @@ func (e *evaluator) clusterRules() {
 		r.Status = Fail
 		r.Detail = fmt.Sprintf("%d namespace(s) without enforce label: %s", len(noPSA), strutil.TruncList(noPSA, 6))
 	}
+	if r.Status == Fail || r.Status == Manual {
+		for _, ns := range noPSA {
+			r.Targets = append(r.Targets, Target{Kind: TargetResource, Name: "Namespace " + ns, Change: "kubectl label ns " + ns + " pod-security.kubernetes.io/enforce=restricted (or baseline)"})
+		}
+	}
 	e.add(r)
 	if psa != nil {
 		// exemptions bypass every level, labels included: a user namespace
@@ -547,6 +554,7 @@ func (e *evaluator) clusterRules() {
 			r.Status = Fail
 			r.Detail = fmt.Sprintf("%d user namespace(s) exempt from PSA in %s: %s", len(user), psa.Path, strutil.TruncList(user, 6))
 		}
+		r.Targets = []Target{{Kind: TargetFile, Name: psa.Path, Change: "exemptions: namespaces lists only system namespaces; no usernames / runtimeClasses"}}
 		if len(psa.ExemptUsers) > 0 || len(psa.ExemptRuntimeClasses) > 0 {
 			if r.Status == Pass {
 				r.Status = Manual
@@ -562,12 +570,13 @@ func (e *evaluator) clusterRules() {
 		if strings.Contains(s.Deployments[i].Name, "kubernetes-dashboard") {
 			r.Status = Fail
 			r.Detail = s.Deployments[i].Namespace + "/" + s.Deployments[i].Name
+			r.Targets = append(r.Targets, Target{Kind: TargetResource, Name: "Deployment " + r.Detail, Change: "uninstall kubernetes-dashboard"})
 		}
 	}
 	e.add(r)
 
 	// V-242415 secrets as environment variables
-	var secretEnv []string
+	var secretEnv, secretOwners []string
 	for i := range s.Pods {
 		p := &s.Pods[i]
 		ref := p.Namespace + "/" + p.Name
@@ -575,6 +584,7 @@ func (e *evaluator) clusterRules() {
 			for _, env := range c.Env {
 				if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
 					secretEnv = append(secretEnv, ref)
+					secretOwners = append(secretOwners, workloadOf(p))
 					break
 				}
 			}
@@ -584,6 +594,7 @@ func (e *evaluator) clusterRules() {
 	if len(secretEnv) > 0 {
 		r.Status = Manual
 		r.Detail = fmt.Sprintf("%d pod(s) use secretKeyRef env: %s", len(secretEnv), strutil.TruncList(strutil.Uniq(secretEnv), 5))
+		r.Targets = objectTargets(secretOwners, "mount the secret as a file instead of secretKeyRef env")
 	}
 	e.add(r)
 

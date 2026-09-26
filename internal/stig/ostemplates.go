@@ -344,7 +344,58 @@ func evalSSHD(info *nodeinfo.Info, c stigdata.Check, _ string) (Status, string) 
 	} else if strings.EqualFold(got, want) {
 		return Pass, ""
 	}
-	return Fail, param + " " + got + " (want " + want + ")"
+	detail := param + " " + got + " (want " + want + ")"
+	if src := sshdSource(info, param); src != "" {
+		detail += " in " + src
+	}
+	return Fail, detail
+}
+
+// sshdSource names the file whose line sshd uses for a keyword ("" when
+// none sets it outside a Match block): sshd keeps the first value it
+// reads, and sshd_config pulls sshd_config.d/*.conf in where its Include
+// line stands - at the top on RHEL 9 and Ubuntu, so a drop-in beats a line
+// appended to sshd_config.
+func sshdSource(info *nodeinfo.Info, key string) string {
+	main, ok := info.STIGFile("/etc/ssh/sshd_config")
+	if !ok {
+		return ""
+	}
+	// first keyword of each directive line up to the first Match block
+	directives := func(content string) [][]string {
+		var out [][]string
+		for _, l := range strings.Split(content, "\n") {
+			f := strings.Fields(l)
+			if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+				continue
+			}
+			if strings.EqualFold(f[0], "Match") {
+				break
+			}
+			out = append(out, f)
+		}
+		return out
+	}
+	for _, f := range directives(main) {
+		switch {
+		case strings.EqualFold(f[0], key):
+			return "/etc/ssh/sshd_config"
+		case strings.EqualFold(f[0], "Include") && len(f) > 1 && strings.Contains(f[1], "sshd_config.d"):
+			drops := info.STIGFilesGlob("/etc/ssh/sshd_config.d")
+			sort.Slice(drops, func(i, j int) bool { return drops[i].Path < drops[j].Path })
+			for _, d := range drops {
+				if !strings.HasSuffix(d.Path, ".conf") {
+					continue
+				}
+				for _, df := range directives(d.Content) {
+					if strings.EqualFold(df[0], key) {
+						return d.Path
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // ---------- files ----------

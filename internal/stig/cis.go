@@ -153,6 +153,7 @@ func (e *evaluator) cisClusterRules() {
 
 	// cluster-admin bindings
 	var subjects []string
+	var crbTargets []Target
 	for i := range s.CRBs {
 		b := &s.CRBs[i]
 		if b.RoleRef.Name != "cluster-admin" {
@@ -163,17 +164,19 @@ func (e *evaluator) cisClusterRules() {
 				continue
 			}
 			subjects = append(subjects, fmt.Sprintf("%s/%s (via %s)", sub.Kind, sub.Name, b.Name))
+			crbTargets = append(crbTargets, Target{Kind: TargetResource, Name: "ClusterRoleBinding " + b.Name, Change: "review cluster-admin for " + sub.Kind + " " + sub.Name})
 		}
 	}
 	r := Result{ID: "CIS-5.1.1", Title: "cluster-admin role bindings minimized", Cat: "II", Group: g, Status: Pass, Detail: "only system:masters", Fix: "review and remove unnecessary cluster-admin bindings"}
 	if len(subjects) > 0 {
 		r.Status = Manual
 		r.Detail = fmt.Sprintf("%d subject(s): %s", len(subjects), strutil.TruncList(subjects, 6))
+		r.Targets = crbTargets
 	}
 	e.add(r)
 
 	// privileged / host namespaces outside system namespaces
-	var priv, hostNS []string
+	var priv, hostNS, privOwners, hostOwners []string
 	for i := range s.Pods {
 		p := &s.Pods[i]
 		sys := k8s.IsSystemNamespace(p.Namespace)
@@ -181,23 +184,27 @@ func (e *evaluator) cisClusterRules() {
 		for _, c := range append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
 			if c.SecurityContext != nil && c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged && !sys {
 				priv = append(priv, ref)
+				privOwners = append(privOwners, workloadOf(p))
 				break
 			}
 		}
 		if (p.Spec.HostNetwork || p.Spec.HostPID || p.Spec.HostIPC) && !sys {
 			hostNS = append(hostNS, ref)
+			hostOwners = append(hostOwners, workloadOf(p))
 		}
 	}
 	r = Result{ID: "CIS-5.2.2", Title: "No privileged containers outside system namespaces", Cat: "II", Group: g, Status: Pass, Detail: "none", Fix: "remove privileged: true or move to a system namespace with PSA privileged"}
 	if len(priv) > 0 {
 		r.Status = Fail
 		r.Detail = fmt.Sprintf("%d pod(s): %s", len(priv), strutil.TruncList(strutil.Uniq(priv), 5))
+		r.Targets = objectTargets(privOwners, "remove privileged: true (or move to a PSA-privileged system namespace)")
 	}
 	e.add(r)
 	r = Result{ID: "CIS-5.2.3", Title: "No host PID/IPC/network pods outside system namespaces (CIS 5.2.3-5.2.5)", Cat: "II", Group: g, Status: Pass, Detail: "none", Fix: "remove hostNetwork/hostPID/hostIPC"}
 	if len(hostNS) > 0 {
 		r.Status = Fail
 		r.Detail = fmt.Sprintf("%d pod(s): %s", len(hostNS), strutil.TruncList(strutil.Uniq(hostNS), 5))
+		r.Targets = objectTargets(hostOwners, "remove hostNetwork / hostPID / hostIPC")
 	}
 	e.add(r)
 
@@ -216,11 +223,14 @@ func (e *evaluator) cisClusterRules() {
 	if len(noNP) > 0 {
 		r.Status = Manual
 		r.Detail = fmt.Sprintf("%d namespace(s) without: %s", len(noNP), strutil.TruncList(noNP, 6))
+		for _, ns := range noNP {
+			r.Targets = append(r.Targets, Target{Kind: TargetResource, Name: "Namespace " + ns, Change: "add a default-deny NetworkPolicy"})
+		}
 	}
 	e.add(r)
 
 	// default service account automount
-	var autoSA []string
+	var autoSA, saOwners []string
 	for i := range s.Pods {
 		p := &s.Pods[i]
 		if k8s.IsSystemNamespace(p.Namespace) {
@@ -228,12 +238,14 @@ func (e *evaluator) cisClusterRules() {
 		}
 		if (p.Spec.ServiceAccountName == "" || p.Spec.ServiceAccountName == "default") && (p.Spec.AutomountServiceAccountToken == nil || *p.Spec.AutomountServiceAccountToken) {
 			autoSA = append(autoSA, p.Namespace+"/"+p.Name)
+			saOwners = append(saOwners, workloadOf(p))
 		}
 	}
 	r = Result{ID: "CIS-5.1.6", Title: "Pods do not use the default ServiceAccount with automounted tokens", Cat: "III", Group: g, Status: Pass, Detail: "none", Fix: "use dedicated service accounts; automountServiceAccountToken: false"}
 	if len(autoSA) > 0 {
 		r.Status = Manual
 		r.Detail = fmt.Sprintf("%d pod(s): %s", len(autoSA), strutil.TruncList(autoSA, 5))
+		r.Targets = objectTargets(saOwners, "dedicated ServiceAccount, or automountServiceAccountToken: false")
 	}
 	e.add(r)
 }
