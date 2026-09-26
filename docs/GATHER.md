@@ -54,6 +54,61 @@ khealth-bundle-<context>-<timestamp>/
 The raw probe output is there so that the findings can be computed again from the bundle alone, and so that a
 later analysis can put the journals, events and pod logs on one timeline.
 
+## Analyzing a bundle (`--analyze`)
+
+`khealth --analyze bundle.tar.gz` (or an unpacked directory) needs no kubeconfig and no SSH. It rebuilds the
+checks' input from `snapshot.json` and the raw probe output, then evaluates it as of the moment the bundle was
+gathered, with the local config's thresholds. The output prints the findings and compares them with the
+`report.json` recorded at gather time. A difference means the checks changed between the two khealth versions,
+or the thresholds did.
+
+```sh
+khealth --analyze khealth-bundle-prod-20260926-101112.tar.gz
+khealth --analyze ./khealth-bundle-prod-20260926-101112 --export findings.xlsx   # also write the report (.json, .xlsx, .md or a directory)
+```
+
+A bundle whose `manifest.json` has a newer `format` than the running khealth reads is refused.
+
+### Root-cause analysis
+
+Before the findings, `--analyze` prints the probable causes, best supported first, followed by a timeline.
+
+**The timeline** (`internal/rca`) puts everything the bundle recorded on one clock:
+
+- every journal of every node, and rke2's `kubelet.log` / `containerd.log`, classified together with the log knowledge base so that restart noise is recognised as such
+- the kernel log
+- container logs, both on disk and through the API
+- events
+- each container's last termination and each node condition change from the snapshot
+
+Only lines the knowledge base recognises become entries; a journal is mostly routine. Two corrections keep the nodes on one clock:
+
+- Each node's times are shifted by the clock offset its probe measured, when that is over 2 s.
+- klog lines, which carry local time without a zone, are read in the node's UTC offset, which `gather.sh` records.
+
+**The rules** each take a cause and look for the effects that should follow it in time. The more of the chain appears, the higher the confidence (low, medium, high):
+
+| Rule | Cause | Effects it looks for |
+|---|---|---|
+| etcd latency | slow fsync / apply warnings (or, without them, repeated leader elections) | leader elections, controllers losing their lease, kubelets failing node-lease renewals, NotReady nodes |
+| disk | `no space left on device`, DiskPressure | evictions, image GC failures |
+| memory | OOMKilled containers (with their limit); the kernel OOM killer, MemoryPressure | evictions for memory |
+| image pull | failed pulls grouped by image | the cause, from the registry's answer: credentials, TLS, unreachable, missing tag, rate limit |
+| crash loop | restarting containers: exit code, reason and the last error line of the previous run | exits with 0 (the command does not stay in the foreground) |
+| liveness | failing liveness probes | the kubelet killing the container |
+| NotReady node | the node's own warnings and errors in the 15 minutes before it turned | SSH failing too (the machine is down or cut off, not only the kubelet) |
+| scheduling | FailedScheduling, grouped by reason | the pending pods |
+| admission | Pod Security, ResourceQuota, admission webhooks | the controllers that cannot create pods |
+| sandbox / volumes | FailedCreatePodSandBox (CNI), FailedMount / FailedAttachVolume | the pods stuck in ContainerCreating |
+| host | fapolicyd and SELinux denials | |
+| trust and join | token, CA, cluster-ID and member mismatches, clock skew, port in use, swap, kernel defaults, containerd or kubelet exiting, when they persist | |
+| unit restarts | systemd restarting a service | the error the service logged just before its first restart |
+
+Every piece of evidence names its bundle file and line (`nodes/cp-2/journal/rke2-server.log:1830`).
+`--timeline FILE` writes the full timeline: JSON lines for `.jsonl`, text otherwise.
+
+The rules are checked end to end by the Docker lab in [test/gatherlab](../test/gatherlab/README.md): a k3s cluster with staged incidents and a stand-in node over SSH.
+
 ## Cost and limits
 
 | Setting (`gather:` in the config) | Flag | Default | What it caps |
@@ -87,6 +142,7 @@ Pod and journal logs are copied as they are: an application that logs its own se
   - the node half over real SSH against Debian 12 (dash)
   - the API-down fallback through `ssh.hosts`
   - `internal/gather` tests: running `gather.sh` under `sh`, tar path handling and limits, the scrubbing rules, pod selection
+  - `--analyze`: replay reproduces the gather-time findings. The gatherlab check (test/gatherlab) passes: every staged incident is named by its rule, nothing leaks. `internal/rca` tests cover the etcd chain, OOM, crash loop, scheduling, clock-skew correction and node time zones.
 - **Not yet run** against the rke2 (RHEL 9, SELinux/fapolicyd) and kubeadm (Ubuntu 24.04) lab clusters: the
   checks still to do are in [GATHER-VALIDATION.md](../GATHER-VALIDATION.md).
 - **Supported:** the distributions and node OSes in [SUPPORT.md](SUPPORT.md).

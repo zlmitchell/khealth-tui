@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"math"
-	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -2162,7 +2161,7 @@ var klogPrefix = regexp.MustCompile(`^[IWEF]\d{4} \d{2}:\d{2}:\d{2}(\.\d+)?\s+\d
 var logfmtPrefix = regexp.MustCompile(`^time="[^"]*"\s*`)
 
 // logFileUnit names the unit a tailed log file belongs to (kubelet.log -> kubelet).
-func logFileUnit(p string) string { return strings.TrimSuffix(path.Base(p), ".log") }
+func logFileUnit(p string) string { return nodeinfo.LogFileUnit(p) }
 
 // logLineDetail shows one full log line with the matching pattern's explanation.
 func (a *App) logLineDetail(node, id string) (string, []string) {

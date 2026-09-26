@@ -71,6 +71,18 @@ type NodeEntry struct {
 	Seconds   float64  `json:"seconds"`
 }
 
+// ProbeMeta is nodes/<node>/probe/<kind>.meta.json: what replaying a
+// probe's output needs besides the output (the clock-skew check compares
+// the node's clock with when the probe was sent).
+type ProbeMeta struct {
+	Node     string    `json:"node"`
+	Host     string    `json:"host"`
+	Started  time.Time `json:"started"`
+	Finished time.Time `json:"finished"`
+	HostKey  string    `json:"host_key,omitempty"`
+	Status   string    `json:"status"`
+}
+
 // Result is where the bundle went.
 type Result struct {
 	Path     string
@@ -127,6 +139,7 @@ func Run(ctx context.Context, cfg config.Config, log io.Writer) (*Result, error)
 		if r.Err != nil && !strings.Contains(r.Stdout, "===END") {
 			status = strutil.FirstLine(r.Err.Error())
 		}
+		_ = st.writeJSON(dir+kind+".meta.json", ProbeMeta{Node: t.Name, Host: t.Host, Started: r.Started, Finished: r.Finished, HostKey: r.HostKey, Status: status})
 		mu.Lock()
 		defer mu.Unlock()
 		e := entry(t)

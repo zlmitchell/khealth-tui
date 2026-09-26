@@ -52,6 +52,13 @@ type Config struct {
 	// Gather sizes the log bundle --gather writes (internal/gather).
 	Gather Gather `yaml:"gather"`
 
+	// Analyze (--analyze) is a log bundle to evaluate offline: the checks
+	// run against what the bundle recorded, the cluster is not contacted.
+	Analyze string `yaml:"-"`
+	// Timeline (--timeline) is where --analyze writes the bundle's full
+	// classified timeline: JSON lines for .jsonl, text otherwise.
+	Timeline string `yaml:"-"`
+
 	// Namespaces names what this deployment treats as infrastructure.
 	Namespaces Namespaces `yaml:"namespaces"`
 
@@ -359,6 +366,8 @@ func Load(args []string) (Config, error) {
 		exportScan   = fs.Bool("export-scan", false, "with --export: run the security scan too (STIG/CIS rules, OS STIG facts over SSH; one sheet per benchmark)")
 		exportHeavy  = fs.Bool("export-heavy", false, "with --export: collect the heavy node tiers too (journal, images, registry pull dry run)")
 		gatherOut    = fs.String("gather", "", "no TUI: collect a log bundle for root-cause analysis and exit (API objects, events, pod logs, node journals, kernel/container/network state, masked config, the findings); a directory gets khealth-bundle-<context>-<timestamp>.tar.gz")
+		analyze      = fs.String("analyze", "", "no TUI, no cluster: evaluate a log bundle (.tar.gz or unpacked directory) written by --gather and print the findings as of when it was gathered; with --export also write the report")
+		timelineOut  = fs.String("timeline", "", "with --analyze: write the full classified timeline of the bundle here (JSON lines for .jsonl, text otherwise)")
 		gatherSince  = fs.Duration("gather-since", 0, "with --gather: how far back logs go (default 24h)")
 		gatherWl     = fs.String("gather-workload", "", "with --gather: one workload instead of the whole cluster, as namespace/kind/name (deploy, sts, ds, job, cronjob, rs, pod): every pod's logs healthy or not, the namespace's objects and events, its nodes and the control plane")
 		gatherNodeMB = fs.Int("gather-node-mb", 0, "with --gather: per-node budget in MiB, uncompressed (default 200)")
@@ -540,6 +549,10 @@ func Load(args []string) (Config, error) {
 			cfg.Export.Heavy = *exportHeavy
 		case "gather":
 			cfg.Gather.Out = *gatherOut
+		case "analyze":
+			cfg.Analyze = *analyze
+		case "timeline":
+			cfg.Timeline = *timelineOut
 		case "gather-since":
 			cfg.Gather.Since = *gatherSince
 		case "gather-workload":
@@ -666,6 +679,9 @@ func Load(args []string) (Config, error) {
 	}
 	if cfg.Gather.PodLogMB <= 0 {
 		cfg.Gather.PodLogMB = 5
+	}
+	if cfg.Timeline != "" && cfg.Analyze == "" {
+		return cfg, errors.New("--timeline needs --analyze <bundle>")
 	}
 	if cfg.Gather.Workload != "" && cfg.Gather.Out == "" {
 		return cfg, errors.New("--gather-workload needs --gather <dir|file.tar.gz>")

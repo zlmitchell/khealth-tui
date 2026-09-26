@@ -19,3 +19,4 @@ khealth-*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9
 
 # coverage profile written by `go test -coverprofile` (CI does this too)
 coverage.out
+/test/gatherlab/out/

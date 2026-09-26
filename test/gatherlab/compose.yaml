@@ -1,0 +1,66 @@
+# Lab for --gather / --analyze: a one-node k3s cluster with staged
+# incidents, plus a Debian sshd container that stands in for the node over
+# SSH (k3s-in-docker has no sshd or journald of its own). See README.md.
+#
+#   docker compose -f test/gatherlab/compose.yaml up -d --build      # the lab
+#   docker compose -f test/gatherlab/compose.yaml --profile test run --rm check
+#   docker compose -f test/gatherlab/compose.yaml down -v
+name: khealth-gatherlab
+
+services:
+  k3s:
+    image: rancher/k3s:v1.33.4-k3s1
+    privileged: true
+    hostname: lab-node
+    # 16443 on both sides, so the kubeconfig k3s writes works from the host
+    # as it is; the check service reaches it as k3s:16443 (hence the SAN)
+    command: server --node-name lab-node --disable=traefik --https-listen-port 16443 --tls-san 127.0.0.1 --tls-san k3s
+    environment:
+      K3S_KUBECONFIG_OUTPUT: /out/kubeconfig.yaml
+      K3S_KUBECONFIG_MODE: "644"
+    ports: ["16443:16443"]
+    volumes:
+      - ./out:/out
+      # k3s applies whatever lands in its manifests directory
+      - ./manifests/shop.yaml:/var/lib/rancher/k3s/server/manifests/lab-shop.yaml:ro
+      - ./manifests/incidents.yaml:/var/lib/rancher/k3s/server/manifests/lab-incidents.yaml:ro
+    healthcheck:
+      test: ["CMD", "kubectl", "get", "--raw", "/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  node:
+    build: ./node
+    hostname: lab-node
+    ports: ["2222:22"]
+    volumes:
+      - ./out:/out
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /root/.ssh/authorized_keys && pgrep -x sshd"]
+      interval: 3s
+      retries: 60
+
+  # end-to-end check: build khealth from this checkout, gather, analyze,
+  # and assert the expected root causes (check.sh)
+  check:
+    profiles: [test]
+    image: golang:1.26
+    depends_on:
+      k3s: {condition: service_healthy}
+      node: {condition: service_healthy}
+    working_dir: /src
+    environment:
+      CGO_ENABLED: "0"
+      LAB_SETTLE: ${LAB_SETTLE:-120}
+    volumes:
+      - ../..:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+    entrypoint: ["sh", "/src/test/gatherlab/check.sh"]
+
+# the check's Go caches: the lab's own, not build.sh's khealth-gomod /
+# khealth-gocache, since `down -v` removes every volume declared here
+volumes:
+  gomod: {}
+  gocache: {}

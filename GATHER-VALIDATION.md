@@ -111,7 +111,37 @@ ssh:
 - [ ] `headless.Run`: `--export` still produces the same report, and now honours `--ssh-nodes`. That is a behaviour change: note it in the changelog commit.
 - [ ] `sshrun.Run`: the TUI still probes all nodes; the reconnect-after-drop path still works (restart sshd on a node while the TUI runs).
 
-## 10. Before calling it done
+## 10. `--analyze` (offline replay)
+
+For every bundle from sections 1, 6 and 7:
+
+- [ ] `khealth --analyze <bundle>` prints "the same as at gather time". Any `+` / `-` line is a replay gap to fix, unless it comes from a check that reads something replay does not have (note which).
+- [ ] The log findings (area `logs`) are there on RKE2: the journal now carries `short-iso-precise` timestamps, and replay has to classify them with the right times.
+- [ ] The etcd findings on the 3-node clusters match between the TUI, `--gather` and `--analyze`.
+- [ ] `--analyze <bundle> --export out.xlsx` opens in Excel with the same findings.
+- [ ] The API-down bundle (section 7) analyzes without errors; the notes explain the missing API data.
+- [ ] `--export` on a live cluster now includes log findings (`headless.Run` classifies the probe journal like the TUI does). Check that they are the ones the TUI's Logs tab shows.
+
+## 11. Root-cause analysis on real incidents
+
+First run the local lab (`docker compose -f test/gatherlab/compose.yaml --profile test run --rm check`, see
+test/gatherlab/README.md) and make sure it passes. Then stage each incident on the lab clusters, gather, and
+check that `--analyze` names the cause in its top three, with evidence lines that open at the right place in the bundle:
+
+- [ ] etcd latency (RHEL rke2): slow the etcd disk on one server (`fio` or `dd oflag=dsync` on the same disk as `server/db`). The chain should read: slow fsync, then leader changes, then leases lost.
+- [ ] etcd leader elections without a slow disk: the nft isolation trick on redhat9-test-3. Expect "Repeated etcd leader elections" and NotReady for the isolated node, with "SSH failed too" if it is isolated from the workstation as well.
+- [ ] Disk full on a worker: fill `/var` (fallocate), wait for DiskPressure and evictions, then gather. The gather must still succeed (it stages in /var/tmp: check that it falls back or reports clearly).
+- [ ] OOMKilled workload and node memory pressure (a stress pod without limits on a small node).
+- [ ] Image pull: an unreachable registry, a wrong tag, and bad credentials, which on redhat9 can use the hosts.toml trick from memory. Each has to name the right cause.
+- [ ] fapolicyd denial: remove an allow line from `81-rke2-local.rules` for a Longhorn path, restart fapolicyd, restart a Longhorn pod. Expect "fapolicyd blocks executables". Put the rule back.
+- [ ] Restarting rke2-server: a bad `config.yaml` line (e.g. an unknown flag) on one server. Expect "Service rke2-server restarting" citing the error logged before the first restart. Fix it immediately after.
+- [ ] kubeadm: stop kubelet on one node for 2 minutes. Expect "Node NotReady" citing the kubelet journal.
+- [ ] Timezones: on a node whose timezone is not UTC, rke2's `kubelet.log` entries sit next to the journal lines of the same moment in `--timeline` (klog lines are read in the node's `tz:` offset).
+- [ ] Clock skew: step one node's clock by +2 min (`date -s`, then restore with chrony). The report prints "clock: <node> runs 2m0s off" and the node's lines line up with the other nodes'.
+- [ ] Size: `--analyze` on the largest bundle from section 8. Record the time (the classifier runs at about 24 µs per line, and nodes are read in parallel).
+- [ ] False positives: on a healthy cluster, `--analyze` should report nothing high, or explain every high hypothesis.
+
+## 12. Before calling it done
 
 - [ ] Unpack a bundle on Windows (tar in PowerShell or 7-Zip) and on Linux; file names are fine on both.
 - [ ] Update docs/GATHER.md "Tested / supported" with what was run above, and delete this file.

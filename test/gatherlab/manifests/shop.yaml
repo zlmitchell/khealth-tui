@@ -1,0 +1,56 @@
+# Workloads for the lab: healthy ones (web, healthy), a crash loop whose
+# last log line names the cause, and a Secret and an env value that must
+# never reach a bundle (check.sh greps for both).
+apiVersion: v1
+kind: Namespace
+metadata: {name: shop}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: db, namespace: shop}
+stringData: {password: hunter2-should-never-leak}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web, namespace: shop}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec:
+      containers:
+      - name: web
+        image: busybox:1.36
+        command: ["sh","-c","i=0; while true; do echo web tick $i; i=$((i+1)); sleep 2; done"]
+        env:
+        - {name: DB_PASSWORD, value: literal-secret-should-be-masked}
+        - {name: LOG_LEVEL, value: debug}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: crashy, namespace: shop}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: crashy}}
+  template:
+    metadata: {labels: {app: crashy}}
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.36
+        command: ["sh","-c","echo starting; echo 'FATAL: cannot connect to db:5432' >&2; exit 1"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: healthy, namespace: shop}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: healthy}}
+  template:
+    metadata: {labels: {app: healthy}}
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.36
+        command: ["sh","-c","while true; do echo ok; sleep 5; done"]

@@ -2928,15 +2928,7 @@ var _ = lipgloss.Width
 // base, or returns nil when the probe carried none (light cycle: the
 // previous summary stays).
 func classifyLogs(ni *nodeinfo.Info) *logs.Summary {
-	if ni == nil || (len(ni.Journal) == 0 && len(ni.LogFiles) == 0) {
-		return nil
-	}
-	// rke2's kubelet/containerd log to files rather than the journal
-	srcs := []logs.Source{{Lines: ni.Journal}}
-	for _, lf := range ni.LogFiles {
-		srcs = append(srcs, logs.Source{Unit: logFileUnit(lf.Path), Lines: strings.Split(lf.Content, "\n")})
-	}
-	return logs.ClassifySources(srcs, time.Now())
+	return ni.ClassifyLogs(time.Now())
 }
 
 // setNetTargets gives a node's probe the addresses its network checks

@@ -17,6 +17,7 @@ import (
 	"github.com/zlmitchell/khealth-tui/internal/config"
 	"github.com/zlmitchell/khealth-tui/internal/etcd"
 	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/logs"
 	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 	"github.com/zlmitchell/khealth-tui/internal/sshrun"
 	"github.com/zlmitchell/khealth-tui/internal/stig"
@@ -100,7 +101,7 @@ func Run(ctx context.Context, cfg config.Config, o Options) (*Result, error) {
 	}
 	snap := client.Fetch(ctx)
 	res := &Result{Client: client, Snap: snap}
-	in := checks.Input{Snap: snap, Nodes: map[string]*nodeinfo.Info{}, Etcd: map[string]*etcd.Probe{}, Cfg: cfg, Now: time.Now(), APIServer: client.Host, SSHEnabled: cfg.SSH.Enabled}
+	in := checks.Input{Snap: snap, Nodes: map[string]*nodeinfo.Info{}, Etcd: map[string]*etcd.Probe{}, Logs: map[string]*logs.Summary{}, Cfg: cfg, Now: time.Now(), APIServer: client.Host, SSHEnabled: cfg.SSH.Enabled}
 	if cfg.SSH.Enabled {
 		runner := o.Runner
 		if runner == nil {
@@ -131,8 +132,12 @@ func Run(ctx context.Context, cfg config.Config, o Options) (*Result, error) {
 				}
 				info := nodeinfo.Parse(t.Name, t.Host, r.Stdout, r.Started)
 				info.HostKey = r.HostKey
+				ls := info.ClassifyLogs(in.Now)
 				mu.Lock()
 				in.Nodes[t.Name] = info
+				if ls != nil {
+					in.Logs[t.Name] = ls
+				}
 				mu.Unlock()
 			}(t)
 			if t.Etcd {

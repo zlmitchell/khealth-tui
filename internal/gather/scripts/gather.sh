@@ -91,6 +91,9 @@ done
 # --- 1. the node at a glance (small, always) -----------------------------
 sysinfo() {
   echo "hostname: $(hostname)"; echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ) (local $(date))"
+  # klog lines (rke2's kubelet.log) carry local time without a zone: the
+  # timeline reads them with this offset
+  echo "tz: $(date +%z)"
   uname -a; cat /proc/uptime; cat /proc/loadavg; nproc 2>/dev/null
   cat /etc/os-release 2>/dev/null
   echo "rke2=$IS_RKE2 k3s=$IS_K3S kubeadm=$IS_KUBEADM units:$K8S_UNITS"

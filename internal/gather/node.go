@@ -86,6 +86,16 @@ func readNodeTar(r io.Reader, dir string, limit int64) (files int, n int64, err 
 			return 0, 0, errors.New("no archive in the node's output (the script stopped before packing; see _gather/stderr.txt)")
 		}
 	}
+	return extract(br, dir, limit)
+}
+
+// extract unpacks a gzipped or plain tar under dir, refusing names that
+// leave dir and stopping at limit bytes of content.
+func extract(r io.Reader, dir string, limit int64) (files int, n int64, err error) {
+	br, ok := r.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReader(r)
+	}
 	var src io.Reader = br
 	if b, _ := br.Peek(2); len(b) == 2 && b[0] == 0x1f && b[1] == 0x8b {
 		gz, err := gzip.NewReader(br)

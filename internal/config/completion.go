@@ -235,7 +235,7 @@ var flagValues = map[string][]string{
 // both (FilesSentinel / DirsSentinel).
 var pathFlags = map[string]bool{
 	"config": true, "kubeconfig": true, "ssh-key": true, "perf-log": true,
-	"export": true, "gather": true, "bootstrap-out": true, "bootstrap-kubeconfig": true,
+	"export": true, "gather": true, "analyze": true, "timeline": true, "bootstrap-out": true, "bootstrap-kubeconfig": true,
 }
 var dirFlags = map[string]bool{"export-dir": true}
 
