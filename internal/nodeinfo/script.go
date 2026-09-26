@@ -196,6 +196,11 @@ func STIGStageScript(name string) string {
 	return ""
 }
 
+// Prelude is what a script of another package needs to share the node
+// probe's helpers: the JSON-to-YAML step, sec / mask / maskreg, the rke2 and
+// k3s data dirs (RKE2_DD, K3S_DD) and crictl (runcri). It prints nothing.
+func Prelude() string { return AsYAMLShell + scriptPrelude() }
+
 // scriptPrelude is the head of base.sh up to its first section: the sec
 // and mask helpers every script needs, defined once in base.sh.
 func scriptPrelude() string {

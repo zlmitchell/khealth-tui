@@ -50,10 +50,10 @@ AUTHN_WEBHOOK=$(cfgarg kube-apiserver-arg authentication-token-webhook-config-fi
 # it unconverted, in "key":"value" pairs anywhere on the line
 mask() { sed -E 's/^([[:space:]]*"?(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)"?[[:space:]]*:).*/\1 <masked>/; s/"(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/"\1":"<masked>"/g' "$1"; }
 maskreg() { sed -E 's/^([[:space:]]*"?(password|username|token|auth|identitytoken)"?[[:space:]]*:).*/\1 <masked>/; s/"(password|username|token|auth|identitytoken)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/"\1":"<masked>"/g' "$1"; }
-sec DATADIR; echo "rke2=$RKE2_DD"; echo "k3s=$K3S_DD"
 # crictl and the CRI socket: rke2 ships its own binary, k3s wraps it, kubeadm
-# nodes have the distro package. Used by the heavy tier (images, containers)
-# and the registry pull dry run in preflight.sh.
+# nodes have the distro package. Used by the heavy tier (images, containers),
+# the registry pull dry run in preflight.sh and the log bundle (gather.sh).
+# Above the first section so nodeinfo.Prelude carries it.
 CRICTL=; CRI=
 if [ -x "$RKE2_DD"/bin/crictl ]; then CRICTL=$RKE2_DD/bin/crictl; CRI=unix:///run/k3s/containerd/containerd.sock
 elif command -v k3s >/dev/null 2>&1 && [ -S /run/k3s/containerd/containerd.sock ]; then CRICTL="k3s crictl"; CRI=
@@ -61,6 +61,7 @@ elif command -v crictl >/dev/null 2>&1; then CRICTL=$(command -v crictl)
   for s in /run/containerd/containerd.sock /var/run/crio/crio.sock /run/cri-dockerd.sock; do [ -S "$s" ] && { CRI="unix://$s"; break; }; done
 fi
 runcri() { if [ -n "$CRI" ]; then $CRICTL -r "$CRI" "$@"; else $CRICTL "$@"; fi; }
+sec DATADIR; echo "rke2=$RKE2_DD"; echo "k3s=$K3S_DD"
 sec TIME; date +%s.%N 2>/dev/null || date +%s
 sec HOST; hostname; uname -r; uname -m
 sec UPTIME; cat /proc/uptime

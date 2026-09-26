@@ -28,6 +28,7 @@ import (
 	"github.com/zlmitchell/khealth-tui/internal/config"
 	"github.com/zlmitchell/khealth-tui/internal/etcd"
 	"github.com/zlmitchell/khealth-tui/internal/export"
+	"github.com/zlmitchell/khealth-tui/internal/gather"
 	"github.com/zlmitchell/khealth-tui/internal/headless"
 	"github.com/zlmitchell/khealth-tui/internal/k8s"
 	"github.com/zlmitchell/khealth-tui/internal/sshrun"
@@ -92,6 +93,13 @@ func main() {
 	// top of the alt-screen; silence it while the TUI owns the terminal.
 	klog.SetOutput(io.Discard)
 	klog.LogToStderr(false)
+	if cfg.Gather.Out != "" {
+		if err := gatherOnce(cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if cfg.Export.Out != "" {
 		if err := exportOnce(cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -201,6 +209,49 @@ func exportOnce(cfg config.Config) error {
 		}
 	}
 	fmt.Println()
+	return nil
+}
+
+// gatherOnce is --gather: the log bundle for a root-cause analysis, no TUI.
+func gatherOnce(cfg config.Config) error {
+	scope := "cluster"
+	if cfg.Gather.Workload != "" {
+		scope = "workload " + cfg.Gather.Workload
+	}
+	fmt.Fprintf(os.Stderr, "gathering a log bundle (%s, last %s) ...\n", scope, cfg.Gather.Since)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	res, err := gather.Run(ctx, cfg, os.Stderr)
+	if err != nil {
+		return err
+	}
+	m := res.Manifest
+	ok := 0
+	for _, n := range m.Nodes {
+		if n.Logs == "ok" {
+			ok++
+		}
+	}
+	fmt.Printf("wrote %s (%.1f MiB)\n", res.Path, float64(res.Size)/(1<<20))
+	if !m.APIReachable {
+		why := "no nodes listed"
+		if len(m.APIErrors) > 0 {
+			why = m.APIErrors[0]
+		}
+		fmt.Printf("API server not usable (%s)\n", why)
+		if len(m.Nodes) == 0 {
+			fmt.Println("  and no node to reach over SSH: list the nodes under ssh.hosts in the config file (node name: address) and gather again")
+		}
+	}
+	fmt.Printf("%d/%d nodes, %d pod logs from %d pods, %d API types, %d findings, in %s\n", ok, len(m.Nodes), m.PodLogs.Containers, m.PodLogs.Pods, len(m.Resources), m.Findings, m.Duration)
+	for _, n := range m.Nodes {
+		if n.Logs != "ok" {
+			fmt.Printf("  %s: %s\n", n.Name, n.Logs)
+		} else if len(n.Skipped) > 0 {
+			fmt.Printf("  %s: %d items skipped past the node budget (--gather-node-mb)\n", n.Name, len(n.Skipped))
+		}
+	}
+	fmt.Println("secrets are masked (Secret/ConfigMap values, Helm values, credential-looking env and config keys); review before sending it outside your organisation")
 	return nil
 }
 

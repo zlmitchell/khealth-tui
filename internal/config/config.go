@@ -49,6 +49,9 @@ type Config struct {
 	// Export is where `e` writes the findings report (JSON + XLSX).
 	Export Export `yaml:"export"`
 
+	// Gather sizes the log bundle --gather writes (internal/gather).
+	Gather Gather `yaml:"gather"`
+
 	// Namespaces names what this deployment treats as infrastructure.
 	Namespaces Namespaces `yaml:"namespaces"`
 
@@ -85,6 +88,25 @@ type Export struct {
 	// Heavy (--export-heavy) includes the heavy node tiers (journal, images,
 	// registry pull dry run) so their findings are in the report.
 	Heavy bool `yaml:"-"`
+}
+
+// Gather configures the log bundle (internal/gather): what --gather
+// collects from the API and over SSH for a later root-cause analysis.
+type Gather struct {
+	Since    time.Duration `yaml:"since"`      // how far back journals and logs go (default 24h)
+	NodeMB   int           `yaml:"node_mb"`    // per-node budget, uncompressed; lower-priority items are skipped past it (default 200)
+	FileMB   int           `yaml:"file_mb"`    // cap per collected file, the newest end kept (default 20)
+	PodLogMB int           `yaml:"pod_log_mb"` // cap per container log (default 5)
+
+	// Out (--gather): run the collection without the TUI and write the
+	// bundle; a directory gets khealth-bundle-<context>-<timestamp>.tar.gz.
+	Out string `yaml:"-"`
+	// Workload (--gather-workload namespace/kind/name) narrows the bundle to
+	// one workload: all of its pods' logs, healthy or not, its namespace's
+	// objects and events, and the nodes its pods run on plus the control
+	// plane. Without it the bundle covers the cluster: system namespaces and
+	// every failing or restarting pod.
+	Workload string `yaml:"-"`
 }
 
 // Bootstrap holds the --bootstrap-* flags.
@@ -278,6 +300,7 @@ func Default() Config {
 		Etcd:    Etcd{MaxBackupAge: 24 * time.Hour},
 		Helm:    Helm{CheckUpdates: true, UseHelmRepos: true, Timeout: 15 * time.Second},
 		Logs:    Logs{Lines: 400, Since: "-24h"},
+		Gather:  Gather{Since: 24 * time.Hour, NodeMB: 200, FileMB: 20, PodLogMB: 5},
 		Actions: Actions{Enabled: true, HelmBinary: "helm"},
 		Thresholds: Thresholds{
 			DiskWarnPct:     80,
@@ -335,6 +358,10 @@ func Load(args []string) (Config, error) {
 		exportOut    = fs.String("export", "", "no TUI: run one collection cycle, write the findings report and exit; a directory gets khealth-<context>-<timestamp>.json + .xlsx, a path ending in .json or .xlsx that one file, .md the security fix list (with --export-scan)")
 		exportScan   = fs.Bool("export-scan", false, "with --export: run the security scan too (STIG/CIS rules, OS STIG facts over SSH; one sheet per benchmark)")
 		exportHeavy  = fs.Bool("export-heavy", false, "with --export: collect the heavy node tiers too (journal, images, registry pull dry run)")
+		gatherOut    = fs.String("gather", "", "no TUI: collect a log bundle for root-cause analysis and exit (API objects, events, pod logs, node journals, kernel/container/network state, masked config, the findings); a directory gets khealth-bundle-<context>-<timestamp>.tar.gz")
+		gatherSince  = fs.Duration("gather-since", 0, "with --gather: how far back logs go (default 24h)")
+		gatherWl     = fs.String("gather-workload", "", "with --gather: one workload instead of the whole cluster, as namespace/kind/name (deploy, sts, ds, job, cronjob, rs, pod): every pod's logs healthy or not, the namespace's objects and events, its nodes and the control plane")
+		gatherNodeMB = fs.Int("gather-node-mb", 0, "with --gather: per-node budget in MiB, uncompressed (default 200)")
 		pprofAddr    = fs.String("pprof", "", "serve net/http/pprof on this address (e.g. 127.0.0.1:6060)")
 		noNice       = fs.Bool("no-nice", false, "do not renice/ionice the probe scripts on the nodes")
 		noBackoff    = fs.Bool("no-backoff", false, "do not skip cycles for nodes whose probes are slow or still running")
@@ -511,6 +538,14 @@ func Load(args []string) (Config, error) {
 			cfg.Export.Scan = *exportScan
 		case "export-heavy":
 			cfg.Export.Heavy = *exportHeavy
+		case "gather":
+			cfg.Gather.Out = *gatherOut
+		case "gather-since":
+			cfg.Gather.Since = *gatherSince
+		case "gather-workload":
+			cfg.Gather.Workload = *gatherWl
+		case "gather-node-mb":
+			cfg.Gather.NodeMB = *gatherNodeMB
 		case "pprof":
 			cfg.Perf.Pprof = *pprofAddr
 		case "no-nice":
@@ -619,6 +654,21 @@ func Load(args []string) (Config, error) {
 	}
 	if cfg.Logs.Since == "" {
 		cfg.Logs.Since = "-24h"
+	}
+	if cfg.Gather.Since <= 0 {
+		cfg.Gather.Since = 24 * time.Hour
+	}
+	if cfg.Gather.NodeMB <= 0 {
+		cfg.Gather.NodeMB = 200
+	}
+	if cfg.Gather.FileMB <= 0 {
+		cfg.Gather.FileMB = 20
+	}
+	if cfg.Gather.PodLogMB <= 0 {
+		cfg.Gather.PodLogMB = 5
+	}
+	if cfg.Gather.Workload != "" && cfg.Gather.Out == "" {
+		return cfg, errors.New("--gather-workload needs --gather <dir|file.tar.gz>")
 	}
 	if cfg.Helm.Timeout <= 0 {
 		cfg.Helm.Timeout = 15 * time.Second

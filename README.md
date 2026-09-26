@@ -72,6 +72,8 @@ khealth --ssh-user admin --ask-pass       # prompt for a password used when keys
 khealth root@10.0.0.11                    # no kubeconfig yet: fetch the admin kubeconfig over SSH from a server node
 khealth --theme light                     # a light terminal that does not answer the background query (Windows never does)
 khealth --export ./reports --export-scan  # no TUI: one cycle + the security scan, JSON + XLSX, exit
+khealth --gather ./bundles                # no TUI: log bundle for root-cause analysis (docs/GATHER.md)
+khealth --gather . --gather-workload shop/deploy/web  # one workload: all its pods' logs, its namespace, its nodes
 ```
 
 - **no kubeconfig?** `khealth [user@]server` fetches `rke2.yaml` / `k3s.yaml` / `admin.conf` and rewrites the endpoint to one the apiserver cert is valid for; run with nothing and it lists the clusters it already knows

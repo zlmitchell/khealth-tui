@@ -70,6 +70,12 @@ perf:                             # the tool's own footprint (docs/PERFORMANCE.m
 export:                           # e writes the findings report (JSON + XLSX, one sheet per benchmark); tools/findings -json/-xlsx headlessly
   dir: ""                         # directory for khealth-<context>-<timestamp>.json/.xlsx (--export-dir; default: the current directory)
 
+gather:                           # the log bundle --gather writes for root-cause analysis (docs/GATHER.md)
+  since: 24h                      # how far back journals and logs go (--gather-since)
+  node_mb: 200                    # per-node budget, uncompressed; lower-priority items are skipped past it (--gather-node-mb)
+  file_mb: 20                     # cap per collected file; the newest end is kept
+  pod_log_mb: 5                   # cap per container log
+
 namespaces:                       # what this deployment treats as infrastructure, on top of the built-ins (kube-*, cattle-*, longhorn-*, cert-manager, ...)
   system: []                      # extra system namespaces: exact names, or prefixes with a trailing - or * (platform-*, infra, logging); the PSA config's exempt namespaces count without being listed
   cni: []                         # extra CNI agent pod names/prefixes (kube-ovn-cni, kube-router) for the MTU and restart checks

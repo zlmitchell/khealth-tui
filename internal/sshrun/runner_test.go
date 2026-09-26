@@ -184,6 +184,20 @@ func TestRunAsRoot(t *testing.T) {
 	}
 }
 
+func TestStream(t *testing.T) {
+	srv := sshtest.New(t, hostHandler{uid: "0"}.handle)
+	r := newRunner(t, testCfg(srv))
+	var buf strings.Builder
+	res := r.Stream(context.Background(), srv.Addr, "tar\n", &buf)
+	if res.Err != nil {
+		t.Fatalf("stream: %v stderr=%q", res.Err, res.Stderr)
+	}
+	// the output went to the writer, not into the result
+	if res.Stdout != "" || !strings.HasSuffix(buf.String(), "tar\n") || !strings.HasPrefix(buf.String(), "ran[/bin/sh -s]:") {
+		t.Errorf("stdout %q, writer %q", res.Stdout, buf.String())
+	}
+}
+
 func TestRunWithoutNice(t *testing.T) {
 	srv := sshtest.New(t, hostHandler{uid: "0"}.handle)
 	cfg := testCfg(srv)
