@@ -83,6 +83,21 @@ func TestS3UploadFailPattern(t *testing.T) {
 	}
 }
 
+// The log bundle collects the journal with -o short-iso-precise.
+func TestClassifyPreciseTimestamps(t *testing.T) {
+	now := time.Date(2024, 9, 18, 12, 0, 0, 0, time.UTC)
+	s := Classify([]string{
+		`2024-09-18T10:00:01.123456+0000 cp-1 rke2[100]: time="2024-09-18T10:00:01Z" level=fatal msg="token does not match"`,
+		`2024-09-18T10:00:02.5-04:00 cp-1 kubelet[200]: E0918 10:00:02.000 12 kubelet.go:100] "x"`,
+	}, now)
+	if m := s.Matches[0]; m.Unit != "rke2" || !m.Time.Equal(time.Date(2024, 9, 18, 10, 0, 1, 123456000, time.UTC)) {
+		t.Errorf("precise: unit %q time %v", m.Unit, m.Time)
+	}
+	if m := s.Matches[1]; m.Unit != "kubelet" || !m.Time.Equal(time.Date(2024, 9, 18, 14, 0, 2, 500000000, time.UTC)) {
+		t.Errorf("offset with colon: unit %q time %v", m.Unit, m.Time)
+	}
+}
+
 func TestClassifySourcesFiles(t *testing.T) {
 	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
 	srcs := []Source{

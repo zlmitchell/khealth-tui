@@ -42,6 +42,9 @@ type Pattern struct {
 	// Persist: if the pattern is still seen after the unit has been up this
 	// long, escalate startup noise to a warning.
 	Persist time.Duration
+
+	need []string                      // literals one of which a match must contain (prefilter.go)
+	pre  func(line, lower string) bool // hand-written necessary condition, for patterns without literals
 }
 
 // Match is a classified log line.
@@ -51,6 +54,8 @@ type Match struct {
 	Unit    string
 	Class   Class
 	Pattern *Pattern
+	Source  string // Source.Name of the stream it came from
+	LineNo  int    // 1-based line number in that stream
 }
 
 // Summary aggregates matches for one node.
@@ -301,7 +306,9 @@ func (s *Summary) Recur(m Match) Recurrence {
 	return r
 }
 
-var journalTime = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:?\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s+\S+\s+([^\[:\s]+)`)
+// journalTime: journalctl -o short-iso ("2024-09-18T10:00:01+0000") and
+// short-iso-precise (microseconds, what the log bundle collects)
+var journalTime = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:[+-]\d{2}:?\d{2}|Z))\s+\S+\s+([^\[:\s]+)`)
 
 // klogTime: "I0918 10:22:00.123456    1234 file.go:12] msg" (kubelet.log has no year)
 var klogTime = regexp.MustCompile(`^[IWEF](\d{2})(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?\s`)
@@ -315,6 +322,7 @@ var logfmtTime = regexp.MustCompile(`^time="([^"]+)"`)
 type Source struct {
 	Unit  string
 	Lines []string
+	Name  string // where the lines came from (a file in a log bundle); copied to Match.Source
 }
 
 // Classify runs journal lines through the knowledge base.
@@ -327,13 +335,13 @@ func Classify(lines []string, now time.Time) *Summary {
 func ClassifySources(srcs []Source, now time.Time) *Summary {
 	s := &Summary{Counts: map[Class]int{}, ByName: map[string]int{}, Now: now}
 	for _, src := range srcs {
-		for _, line := range src.Lines {
+		for i, line := range src.Lines {
 			t := strings.TrimSpace(line)
 			if t == "" {
 				continue
 			}
 			s.Total++
-			m := Match{Line: line, Class: ClassInfo, Unit: src.Unit}
+			m := Match{Line: line, Class: ClassInfo, Unit: src.Unit, Source: src.Name, LineNo: i + 1}
 			if src.Unit == "" {
 				if g := journalTime.FindStringSubmatch(t); g != nil {
 					m.Unit = g[2]
@@ -397,9 +405,10 @@ func fileTime(t string, now time.Time) time.Time {
 // classify matches one line against the knowledge base and records it.
 func (s *Summary) classify(m *Match) {
 	t := strings.TrimSpace(m.Line)
+	lower := strings.ToLower(t)
 	for i := range patterns {
 		p := &patterns[i]
-		if p.Re.MatchString(t) {
+		if p.matches(t, lower) {
 			m.Pattern = p
 			m.Class = p.Class
 			switch p.Name {
@@ -479,6 +488,20 @@ func (s *Summary) Last(name string) Match {
 		}
 	}
 	return last
+}
+
+// Lookup matches one line (without a journal prefix) against the knowledge
+// base, for lines that carry their own timestamp format (container logs);
+// nil when no pattern matches.
+func Lookup(line string) *Pattern {
+	t := strings.TrimSpace(line)
+	lower := strings.ToLower(t)
+	for i := range patterns {
+		if patterns[i].matches(t, lower) {
+			return &patterns[i]
+		}
+	}
+	return nil
 }
 
 // Find returns the pattern by name.
