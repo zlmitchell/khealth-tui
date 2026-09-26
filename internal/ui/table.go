@@ -145,9 +145,24 @@ func flow(width, indent int, items ...string) []string {
 // the width and wraps, with the other cells blank on continuation lines. The
 // header is omitted when no column has a title.
 func wrapTable(width int, cols []column, rows [][]string) []string {
+	header, groups := wrapTableRows(width, cols, rows)
+	var out []string
+	if header != "" {
+		out = append(out, header)
+	}
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
+}
+
+// wrapTableRows is wrapTable with the lines of each row kept together (one
+// group per row) and the header returned apart ("" when untitled). A styled
+// last cell wraps escape-aware, its color carried over the breaks.
+func wrapTableRows(width int, cols []column, rows [][]string) (string, [][]string) {
 	n := len(cols)
 	if n == 0 {
-		return nil
+		return "", nil
 	}
 	widths := make([]int, n)
 	for i, c := range cols {
@@ -189,7 +204,7 @@ func wrapTable(width int, cols []column, rows [][]string) []string {
 		}
 		return strings.TrimRight(b.String(), " ")
 	}
-	var out []string
+	header := ""
 	titled := false
 	titles := make([]string, n)
 	for i, c := range cols {
@@ -197,22 +212,30 @@ func wrapTable(width int, cols []column, rows [][]string) []string {
 		titled = titled || c.title != ""
 	}
 	if titled {
-		out = append(out, styleHeader.Render(format(titles)))
+		header = styleHeader.Render(format(titles))
 	}
+	groups := make([][]string, 0, len(rows))
 	for _, r := range rows {
 		text := ""
 		if len(r) >= n {
 			text = r[n-1]
 		}
-		parts := wrap(text, last)
+		var parts []string
+		if strings.Contains(text, "\x1b") {
+			parts = wrapStyled(text, last)
+		} else {
+			parts = wrap(text, last)
+		}
+		var g []string
 		for j, p := range parts {
 			cells := make([]string, n)
 			if j == 0 {
 				copy(cells, r)
 			}
 			cells[n-1] = p
-			out = append(out, format(cells))
+			g = append(g, format(cells))
 		}
+		groups = append(groups, g)
 	}
-	return out
+	return header, groups
 }

@@ -85,6 +85,10 @@ const (
 type row struct {
 	id   string
 	text string
+	// cont marks a continuation line of the row above (a wrapped cell): the
+	// cursor skips it, the selection covers it and a filter keeps or drops
+	// the whole entry
+	cont bool
 }
 
 // content is what a tab renders.
@@ -190,6 +194,7 @@ type App struct {
 	statusAt     time.Time
 	logsNode     string // Logs tab: node whose lines are listed ("" = node list)
 	logsAll      bool   // Logs tab: show info lines too
+	logsWrap     bool   // Logs tab: wrap the message column of a node's lines
 
 	pendingAct    *action
 	revRelease    *k8s.HelmRelease
@@ -1604,6 +1609,20 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.problemOnly = !a.problemOnly
 		a.cursor[a.tab], a.scroll[a.tab], a.freeScroll[a.tab] = 0, 0, false
+	case "w":
+		if a.tab == tabLogs && a.logsNode != "" {
+			// keep the selected entry: its row index moves with the wrapping
+			id := a.selectedID()
+			a.logsWrap = !a.logsWrap
+			a.cursor[a.tab], a.freeScroll[a.tab] = 0, false
+			for i, r := range a.filteredRows(a.currentContent()) {
+				if r.id == id && !r.cont {
+					a.cursor[a.tab] = i
+					break
+				}
+			}
+			a.clamp(a.currentContent())
+		}
 	case "m":
 		if a.tab == tabSecurity {
 			a.hideManual = !a.hideManual
@@ -1706,7 +1725,7 @@ func (a *App) move(delta int) {
 	// headings and blank lines carry no id: land on the next real row in the
 	// direction of travel
 	for i := target; i >= 0 && i < len(rows); i += dir {
-		if rows[i].id != "" {
+		if rows[i].id != "" && !rows[i].cont {
 			if i != a.cursor[a.tab] {
 				a.cursor[a.tab] = i
 				a.freeScroll[a.tab] = false
@@ -1739,6 +1758,9 @@ func (a *App) clamp(c content) {
 		if a.cursor[a.tab] >= len(rows) {
 			a.cursor[a.tab] = len(rows) - 1
 		}
+		if rows[a.cursor[a.tab]].cont {
+			a.cursor[a.tab] = nearestRow(rows, a.cursor[a.tab])
+		}
 		if rows[a.cursor[a.tab]].id == "" {
 			// a fresh page (cursor and scroll at 0): the cursor takes the first
 			// real row but the view stays at the top, so the text above the
@@ -1759,8 +1781,14 @@ func (a *App) clamp(c content) {
 			if a.cursor[a.tab] < a.scroll[a.tab] {
 				a.scroll[a.tab] = a.cursor[a.tab]
 			}
-			if a.cursor[a.tab] >= a.scroll[a.tab]+visible {
-				a.scroll[a.tab] = a.cursor[a.tab] - visible + 1
+			// the selected entry's last line: a wrapped one shows whole when
+			// it fits
+			last := a.cursor[a.tab]
+			for last+1 < len(rows) && rows[last+1].cont && last+1-a.cursor[a.tab] < visible-1 {
+				last++
+			}
+			if last >= a.scroll[a.tab]+visible {
+				a.scroll[a.tab] = last - visible + 1
 			}
 		}
 	} else {
@@ -1781,12 +1809,12 @@ func (a *App) clamp(c content) {
 // row), preferring the ones after i; i itself when none has an id.
 func nearestRow(rows []row, i int) int {
 	for j := i; j < len(rows); j++ {
-		if rows[j].id != "" {
+		if rows[j].id != "" && !rows[j].cont {
 			return j
 		}
 	}
 	for j := i - 1; j >= 0; j-- {
-		if rows[j].id != "" {
+		if rows[j].id != "" && !rows[j].cont {
 			return j
 		}
 	}
@@ -2207,10 +2235,17 @@ func (a *App) filteredRows(c content) []row {
 		return fc.rows
 	}
 	var out []row
-	for _, r := range c.rows {
-		if strings.Contains(strings.ToLower(ansi.Strip(r.text)), f) {
-			out = append(out, r)
+	for i := 0; i < len(c.rows); {
+		// a row and its continuation lines match (and show) as one
+		j := i + 1
+		text := ansi.Strip(c.rows[i].text)
+		for ; j < len(c.rows) && c.rows[j].cont; j++ {
+			text += " " + strings.TrimSpace(ansi.Strip(c.rows[j].text))
 		}
+		if strings.Contains(strings.ToLower(text), f) {
+			out = append(out, c.rows[i:j]...)
+		}
+		i = j
 	}
 	if fc.valid && len(fc.c.rows) == len(c.rows) && (len(c.rows) == 0 || &fc.c.rows[0] == &c.rows[0]) {
 		fc.filter, fc.rows, fc.rowsOK = f, out, true
@@ -2559,9 +2594,13 @@ func (a *App) renderBody() string {
 	if end > len(rows) {
 		end = len(rows)
 	}
+	selEnd := a.cursor[a.tab] // the selection runs over a wrapped entry's lines
+	for selEnd+1 < len(rows) && rows[selEnd+1].cont {
+		selEnd++
+	}
 	for i := start; i < end; i++ {
 		t := trunc(rows[i].text, a.width)
-		if c.selectable && i == a.cursor[a.tab] {
+		if c.selectable && i >= a.cursor[a.tab] && i <= selEnd {
 			t = selectRow(t, a.width)
 		}
 		lines = append(lines, t)
@@ -2827,6 +2866,7 @@ func helpLines(width int) []string {
 		{"", key("D"), "defragment every etcd member, one at a time (followers first, leader last, health check between; etcdctl via kubectl exec; confirmed)"},
 		{"Logs", key("enter"), "node lines; enter again = full line + explanation"},
 		{"", key("a"), "include info lines"},
+		{"", key("w"), "wrap long messages in a node's lines instead of cutting them"},
 		{"Events", key("enter"), "open the involved object in the inspector"},
 		{"Security", key("← →"), "Rules / Node hardening / OS STIG"},
 		{"", key("enter"), "rule detail, fix and the STIG's own check procedure"},
@@ -2860,7 +2900,7 @@ func helpLines(width int) []string {
 		{"Helm", "releases (enter = values applied), optional update check; u = upgrade to the newest known chart version (helm upgrade, or a spec.version patch on your own HelmChart CR when the rke2/k3s helm controller owns the release), b = helm rollback to a chosen revision, B = roll a failed or stuck (pending-*) release back to the last revision that deployed (all confirm first; helm/rollback need the helm CLI; --read-only disables them; charts shipped inside rke2 are refused for upgrade)"},
 		{"Images", "per-node image inventory, images not running, dangling (untagged) images, airgap tarball contents vs running"},
 		{"Security", "Rules: DISA Kubernetes / RKE2 / Rancher MCM STIG + CIS checks from component flags, kubelet config, PSA, RBAC, node facts. Node hardening: per-node runtime vs boot facts (SELinux, FIPS, auditd, firewall...) and the OS STIG summary. OS STIG: every rule of the node's DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG. The whole tab is opt-in: empty until Shift+S runs the scan"},
-		{"Logs", "rke2/kubelet/containerd/rancher-system-agent logs classified into startup-noise / warnings / errors (Rancher plan events flag config rewrites); enter on a node lists its lines, enter on a line shows the full text + explanation, esc goes back, a shows info lines"},
+		{"Logs", "rke2/kubelet/containerd/rancher-system-agent logs classified into startup-noise / warnings / errors (Rancher plan events flag config rewrites); enter on a node lists its lines, enter on a line shows the full text + explanation, esc goes back, a shows info lines, w wraps long messages"},
 		{"RKE2/k3s", "config.yaml(.d), data-dir, server/manifests (HelmChartConfig etc.), static pod manifests, audit/PSS policies, config drift, API endpoint vs tls-san vs cert"},
 		{"kubeadm", "(same tab on upstream clusters) kubeadm-config ClusterConfiguration, API endpoint vs certSANs vs apiserver.crt"},
 	})

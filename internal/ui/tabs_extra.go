@@ -2015,7 +2015,7 @@ func errorsPerHour(ls *logs.Summary, n int) []float64 {
 func (a *App) logLinesContent(node string) content {
 	ls := a.logSum[node]
 	ni := a.nodes[node]
-	hdr := []string{styleTitle.Render("Logs: "+node) + "  " + hint("§esc§ back to nodes · §enter§ full line + explanation (§w§ wraps) · §a§ toggles info lines · §/§ filters")}
+	hdr := []string{styleTitle.Render("Logs: "+node) + "  " + hint("§esc§ back to nodes · §enter§ full line + explanation · §w§ wraps messages · §a§ toggles info lines · §/§ filters")}
 	if ls == nil || ni == nil {
 		return content{header: hdr, empty: "no log data for this node yet (R for a full collection)"}
 	}
@@ -2043,9 +2043,22 @@ func (a *App) logLinesContent(node string) content {
 		rows = append(rows, []string{classStyle(m.Class).Render(fmt.Sprintf("%-7s", m.Class.String())), ts, m.Unit, styleDim.Render(name), highlightLog(logMessage(m.Line))})
 		ids = append(ids, fmt.Sprint(i))
 	}
-	h, lines := renderTable(a.width, []column{{title: "CLASS"}, {title: "TIME"}, {title: "UNIT", max: 22}, {title: "PATTERN", max: 20}, {title: "MESSAGE"}}, rows)
-	hdr = append(hdr, h)
-	c := content{header: hdr, selectable: true, empty: styleOK.Render("nothing noteworthy in the collected window (a shows all lines)")}
+	cols := []column{{title: "CLASS"}, {title: "TIME"}, {title: "UNIT", max: 22}, {title: "PATTERN", max: 20}, {title: "MESSAGE"}}
+	c := content{selectable: true, empty: styleOK.Render("nothing noteworthy in the collected window (a shows all lines)")}
+	if a.logsWrap {
+		// the message wraps under its column; the entry's continuation lines
+		// move, highlight and filter with it
+		h, groups := wrapTableRows(a.width, cols, rows)
+		c.header = append(hdr, h)
+		for i, g := range groups {
+			for j, l := range g {
+				c.rows = append(c.rows, row{id: ids[i], text: l, cont: j > 0})
+			}
+		}
+		return c
+	}
+	h, lines := renderTable(a.width, cols, rows)
+	c.header = append(hdr, h)
 	for i, l := range lines {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
