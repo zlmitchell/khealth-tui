@@ -15,6 +15,13 @@ paths = [
 ]
 
 [[allowlists]]
+description = "tests: fixtures are fake data by design (component flags such as --profiling=true trip generic-api-key, redaction tests carry planted secrets); test/gatherlab plants secrets the lab checks never reach a bundle and keeps its throwaway SSH key and kubeconfig under the gitignored out/"
+paths = [
+  '''^test/''',
+  '''_test\.go$''',
+]
+
+[[allowlists]]
 description = "the OS STIG probe greps for the GRUB password prefix; the literal is the pattern, not a hash"
 regexTarget = "match"
 regexes = [

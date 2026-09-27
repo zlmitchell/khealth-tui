@@ -74,7 +74,8 @@ khealth --theme light                     # a light terminal that does not answe
 khealth --export ./reports --export-scan  # no TUI: one cycle + the security scan, JSON + XLSX, exit
 khealth --gather ./bundles                # no TUI: log bundle for root-cause analysis (docs/GATHER.md)
 khealth --gather . --gather-workload shop/deploy/web  # one workload: all its pods' logs, its namespace, its nodes
-khealth --analyze bundle.tar.gz           # no cluster: probable root causes, timeline and findings of a bundle
+khealth --analyze bundle.tar.gz           # no cluster: probable root causes, incidents, timeline and findings of a bundle
+khealth --analyze bundle.tar.gz --tui     # the bundle in the TUI: every tab, the Incidents tab first (who caused an eviction, traffic, node shape)
 ```
 
 - **no kubeconfig?** `khealth [user@]server` fetches `rke2.yaml` / `k3s.yaml` / `admin.conf` and rewrites the endpoint to one the apiserver cert is valid for; run with nothing and it lists the clusters it already knows

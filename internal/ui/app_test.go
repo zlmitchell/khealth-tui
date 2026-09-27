@@ -577,7 +577,7 @@ func TestLogsDrillDown(t *testing.T) {
 
 func TestAddonsRowSelection(t *testing.T) {
 	a := testApp()
-	a.tab = tabAddons
+	a.tab, a.sub[tabRKE2] = tabRKE2, 1 // the Addons view of the distribution tab
 	c := a.currentContent()
 	if !c.selectable {
 		t.Fatalf("addons tab should be row-selectable")
@@ -586,7 +586,7 @@ func TestAddonsRowSelection(t *testing.T) {
 	a.clamp(c)
 	for i := 0; i < len(c.rows)+2; i++ {
 		if id := a.selectedID(); id == "" {
-			t.Fatalf("cursor %d landed on a row without an id", a.cursor[tabAddons])
+			t.Fatalf("cursor %d landed on a row without an id", a.cursor[tabRKE2])
 		}
 		a.move(1)
 	}
@@ -596,9 +596,9 @@ func TestAddonsRowSelection(t *testing.T) {
 	}
 	// enter on the registries row of cp-1 dumps that node's registries.yaml
 	for a.selectedID() != "registries:cp-1" {
-		before := a.cursor[tabAddons]
+		before := a.cursor[tabRKE2]
 		a.move(1)
-		if a.cursor[tabAddons] == before {
+		if a.cursor[tabRKE2] == before {
 			t.Fatalf("no registries row for cp-1; ids seen up to %q", a.selectedID())
 		}
 	}
@@ -648,7 +648,7 @@ server = "https://docker.io"
 	if ni.Dist != "kubeadm" || ni.ContainerdSetting("sandbox_image", "sandbox") != "registry.k8s.io/pause:3.10.1" || ni.ContainerdSetting("config_path") != "" {
 		t.Fatalf("fixture: dist=%q sandbox=%q config_path=%q", ni.Dist, ni.ContainerdSetting("sandbox_image", "sandbox"), ni.ContainerdSetting("config_path"))
 	}
-	a.tab = tabAddons
+	a.tab, a.sub[tabRKE2] = tabRKE2, 1 // the Addons view of the distribution tab
 	got := ansi.Strip(strings.Join(rowsText(a.currentContent()), "\n"))
 	for _, bad := range []string{"registries.yaml", "50-rancher", "Rancher management", "rancher-system-agent", "join topology", "SYSTEM-DEFAULT-REGISTRY"} {
 		if strings.Contains(got, bad) {
@@ -762,7 +762,7 @@ func TestPodLogsRenderCache(t *testing.T) {
 // cursor move pins the view to the cursor again.
 func TestScrollAboveFirstRow(t *testing.T) {
 	a := testApp()
-	a.tab = tabAddons
+	a.tab, a.sub[tabRKE2] = tabRKE2, 1 // the Addons view of the distribution tab
 	c := a.currentContent()
 	rows := a.filteredRows(c)
 	first := nearestRow(rows, 0)
@@ -824,5 +824,14 @@ func TestScrollAboveFirstRow(t *testing.T) {
 	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	if a.freeScroll[a.tab] {
 		t.Errorf("a problems toggle should re-pin the view")
+	}
+}
+
+// A pod mix where the unhealthy pods outnumber the running ones (crash
+// loops count as unhealthy without being Running) made the Overview's pod
+// bar ask strings.Repeat for a negative count and crashed the TUI.
+func TestStackedNegativeSegment(t *testing.T) {
+	if got := ansi.StringWidth(stacked(10, []seg{{-3, styleOK, "ok"}, {5, styleCrit, "bad"}})); got != 10 {
+		t.Errorf("width %d, want 10", got)
 	}
 }

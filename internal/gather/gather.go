@@ -154,6 +154,9 @@ func Run(ctx context.Context, cfg config.Config, log io.Writer) (*Result, error)
 		return nil, err
 	}
 	snap, client := hres.Snap, hres.Client
+	// the moment the checks were evaluated at: replay evaluates as of
+	// Created, so relative ages ("last restart 26s ago") come out the same
+	m.Created = hres.Input.Now.UTC()
 	m.Context, m.Server = client.Context, client.Host
 	m.Distribution, m.K8sVersion = snap.Distribution, snap.Version
 	m.APIReachable = len(snap.Nodes) > 0
@@ -198,9 +201,17 @@ func Run(ctx context.Context, cfg config.Config, log io.Writer) (*Result, error)
 		fmt.Fprintf(log, "workload %s/%s %s: %d pods on %d nodes\n", w.Namespace, strings.ToLower(w.Kind), w.Name, len(w.Pods), len(w.Nodes))
 	} else {
 		for i := range snap.Pods {
-			if needsLogs(&snap.Pods[i], since) {
+			if needsLogs(&snap.Pods[i], since) && k8s.IngressController(&snap.Pods[i]) == "" {
 				pods = append(pods, snap.Pods[i])
 			}
+		}
+	}
+	// the ingress controllers' access logs are the traffic view of the
+	// analysis: always collected, with a larger cap (they are busy)
+	var controllers []corev1.Pod
+	for i := range snap.Pods {
+		if k8s.IngressController(&snap.Pods[i]) != "" && snap.Pods[i].Status.Phase == corev1.PodRunning {
+			controllers = append(controllers, snap.Pods[i])
 		}
 	}
 
@@ -222,6 +233,9 @@ func Run(ctx context.Context, cfg config.Config, log io.Writer) (*Result, error)
 			errs := apiHealth(ctx, client, st)
 			res := dumpResources(ctx, client, st, ns)
 			pl := podLogs(ctx, client, st, pods, g.Since, int64(g.PodLogMB)<<20)
+			cl := podLogs(ctx, client, st, controllers, g.Since, int64(g.PodLogMB)<<22)
+			pl.Pods, pl.Containers, pl.Previous, pl.Bytes = pl.Pods+cl.Pods, pl.Containers+cl.Containers, pl.Previous+cl.Previous, pl.Bytes+cl.Bytes
+			pl.Errors = append(pl.Errors, cl.Errors...)
 			mu.Lock()
 			m.APIErrors = append(m.APIErrors, errs...)
 			m.Resources, m.PodLogs = res, pl

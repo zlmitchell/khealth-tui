@@ -21,7 +21,7 @@ ssh:
   key: $OUT/id_lab
   strict_host_key: false
   hosts:
-    lab-node: "node:22"
+    lab-node: "k3s:22"
 helm:
   check_updates: false
 EOF
@@ -40,6 +40,9 @@ expect() {
 echo
 echo "=== expected root causes"
 expect "etcd disk latency on lab-node"
+if [ "$LAB_DATASTORE" = sqlite ]; then
+  expect "no etcd: k3s keeps the cluster state in SQLite (kine) on lab-node"
+fi
 expect "leader elections from"
 expect "lost their leader lease"
 expect "kubelets failed to renew their node lease"
@@ -53,6 +56,32 @@ expect "memory limit 24Mi"
 expect "Liveness probe failing"
 expect "last error logged: FATAL: cannot connect to db:5432"
 expect "the same as at gather time"
+
+echo "=== incidents in context"
+# the noisy neighbour: api evicted, batch/report to blame, the 5xx at Traefik
+ev=$(grep -E '^  eviction-[0-9]+ .* shop/deploy/api ' $OUT/analyze.txt | awk '{print $1}' | head -1)
+if [ -z "$ev" ]; then
+  echo "FAIL  no eviction of shop/api in the incident list (the node never crossed the eviction threshold? see LAB_EVICT_HEADROOM_MI in compose.yaml)"; fail=1
+else
+  /tmp/khealth --analyze $OUT/lab.tar.gz --incident "$ev" > $OUT/incident-eviction.txt
+  sed -n '1,/^Node /p' $OUT/incident-eviction.txt
+  expectIn() {
+    if grep -qF -- "$2" "$1"; then echo "ok    $2"; else echo "FAIL  $2  (in $(basename $1))"; fail=1; fi
+  }
+  expectIn $OUT/incident-eviction.txt "low on resource: memory"
+  expectIn $OUT/incident-eviction.txt "most likely pushed by batch/report-"
+  expectIn $OUT/incident-eviction.txt "the node stopped evicting once it was evicted"
+  expectIn $OUT/incident-eviction.txt "Traffic to shop/api via ingress api api.lab/"
+  expectIn $OUT/incident-eviction.txt "req"
+fi
+# the dependency: crashy names db, which crashed first
+rs=$(grep -E '^  restart-[0-9]+ .* shop/deploy/crashy/' $OUT/analyze.txt | awk '{print $1}' | head -1)
+if [ -n "$rs" ]; then
+  /tmp/khealth --analyze $OUT/lab.tar.gz --incident "$rs" > $OUT/incident-restart.txt
+  if grep -qF "shop/deploy/db" $OUT/incident-restart.txt; then echo "ok    crashy's restart blames its dependency db"; else echo "FAIL  crashy's restart does not name db"; fail=1; fi
+else
+  echo "FAIL  no restart incident for shop/crashy"; fail=1
+fi
 
 echo "=== secrets"
 mkdir -p /tmp/lab && tar -xzf $OUT/lab.tar.gz -C /tmp/lab

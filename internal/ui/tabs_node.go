@@ -280,7 +280,7 @@ func (a *App) nodeDetail(name string) (string, []string) {
 		plat = append(plat, []string{"registry mirrors", strings.Join(ni.RegistryMirrors, ", ") + styleDim.Render("  containerd hosts: "+strings.Join(ni.ContainerdHosts, ", "))})
 	}
 	if len(plat) > 0 {
-		add("", styleTitle.Render("Platform")+styleDim.Render("  full config on the RKE2 and Addons tabs"))
+		add("", styleTitle.Render("Platform")+styleDim.Render("  full config and addons on the distribution tab"))
 		kvTable(plat)
 	}
 	if ni.NetProbed && len(ni.NetProbes) > 0 {

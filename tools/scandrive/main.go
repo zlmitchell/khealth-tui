@@ -11,7 +11,7 @@
 //
 //	scandrive [-press 23s] [-timeout 6m] -- [khealth flags]
 //	scandrive -press 23s -- --kubeconfig ~/.kube/x.yaml --ssh-user root --ssh-key ~/.ssh/id_rsa
-//	scandrive -dump 60s -final 7 -- ...   (no scan: print the Addons tab 60 s in and exit)
+//	scandrive -dump 60s -final 7 -- ...   (no scan: print the Incidents tab 60 s in and exit)
 //	scandrive -dump 60s -final '5jj\n' -- ...   (Storage tab, third row, \n = enter: its detail)
 //	KHT_SSH_PASSWORD=... scandrive -- --kubeconfig ~/.kube/x.yaml --ssh-user ops --become sudo
 package main
@@ -42,7 +42,7 @@ func main() {
 	bf := flag.NewFlagSet("scandrive", flag.ExitOnError)
 	press := bf.Duration("press", 0, "delay after the first snapshot before 0 + Shift+S are pressed")
 	timeout := bf.Duration("timeout", 6*time.Minute, "give up (and print the current view) after this long")
-	final := bf.String("final", "", "keys to press before the final dump instead of the OS STIG sub-tab (e.g. 7 for Addons)")
+	final := bf.String("final", "", "keys to press before the final dump instead of the OS STIG sub-tab (e.g. 7 for Incidents)")
 	dump := bf.Duration("dump", 0, "instead of waiting for the scan: press -final this long after start, print the view and exit")
 	finalAt := bf.Duration("final-at", 0, "with -dump: press -final this long after start instead of at the dump (lets on-enter probes land before the view is printed)")
 	bf.Usage = func() {

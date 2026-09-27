@@ -1,0 +1,11 @@
+[Unit]
+Description=gatherlab: plant the log lines of an etcd slow-disk incident
+After=k3s.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/plant.sh
+
+[Install]
+WantedBy=multi-user.target

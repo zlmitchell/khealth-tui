@@ -447,6 +447,9 @@ func podsMatching(s *k8s.Snapshot, ns string, sel *metav1.LabelSelector) []*core
 // startRolloutRestart prepares a kubectl-style rollout restart (annotation
 // patch on the pod template) for the selected Deployment/DaemonSet/StatefulSet.
 func (a *App) startRolloutRestart() {
+	if a.readOnly("rollout restart") {
+		return
+	}
 	if !a.cfg.Actions.Enabled {
 		a.setStatus("mutating actions are disabled (--read-only / actions.enabled: false)")
 		return

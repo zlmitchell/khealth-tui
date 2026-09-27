@@ -58,6 +58,12 @@ type Config struct {
 	// Timeline (--timeline) is where --analyze writes the bundle's full
 	// classified timeline: JSON lines for .jsonl, text otherwise.
 	Timeline string `yaml:"-"`
+	// Incident (--incident) prints one incident of the analyzed bundle in
+	// context: who caused it, its workload, its node, the traffic around it.
+	Incident string `yaml:"-"`
+	// AnalyzeTUI (--tui) opens the analyzed bundle in the TUI instead of
+	// printing it: every tab from the bundle, the Incidents tab first.
+	AnalyzeTUI bool `yaml:"-"`
 
 	// Namespaces names what this deployment treats as infrastructure.
 	Namespaces Namespaces `yaml:"namespaces"`
@@ -367,6 +373,8 @@ func Load(args []string) (Config, error) {
 		exportHeavy  = fs.Bool("export-heavy", false, "with --export: collect the heavy node tiers too (journal, images, registry pull dry run)")
 		gatherOut    = fs.String("gather", "", "no TUI: collect a log bundle for root-cause analysis and exit (API objects, events, pod logs, node journals, kernel/container/network state, masked config, the findings); a directory gets khealth-bundle-<context>-<timestamp>.tar.gz")
 		analyze      = fs.String("analyze", "", "no TUI, no cluster: evaluate a log bundle (.tar.gz or unpacked directory) written by --gather and print the findings as of when it was gathered; with --export also write the report")
+		analyzeTUI   = fs.Bool("tui", false, "with --analyze: open the bundle in the TUI (every tab from the bundle, Incidents first) instead of printing the analysis")
+		incidentID   = fs.String("incident", "", "with --analyze: show one incident (an ID from the incident list, e.g. eviction-1) in context: suspects, workload, node shape, ingress traffic, timeline")
 		timelineOut  = fs.String("timeline", "", "with --analyze: write the full classified timeline of the bundle here (JSON lines for .jsonl, text otherwise)")
 		gatherSince  = fs.Duration("gather-since", 0, "with --gather: how far back logs go (default 24h)")
 		gatherWl     = fs.String("gather-workload", "", "with --gather: one workload instead of the whole cluster, as namespace/kind/name (deploy, sts, ds, job, cronjob, rs, pod): every pod's logs healthy or not, the namespace's objects and events, its nodes and the control plane")
@@ -553,6 +561,10 @@ func Load(args []string) (Config, error) {
 			cfg.Analyze = *analyze
 		case "timeline":
 			cfg.Timeline = *timelineOut
+		case "incident":
+			cfg.Incident = *incidentID
+		case "tui":
+			cfg.AnalyzeTUI = *analyzeTUI
 		case "gather-since":
 			cfg.Gather.Since = *gatherSince
 		case "gather-workload":
@@ -679,6 +691,12 @@ func Load(args []string) (Config, error) {
 	}
 	if cfg.Gather.PodLogMB <= 0 {
 		cfg.Gather.PodLogMB = 5
+	}
+	if cfg.AnalyzeTUI && cfg.Analyze == "" {
+		return cfg, errors.New("--tui needs --analyze <bundle>")
+	}
+	if cfg.Incident != "" && cfg.Analyze == "" {
+		return cfg, errors.New("--incident needs --analyze <bundle>")
 	}
 	if cfg.Timeline != "" && cfg.Analyze == "" {
 		return cfg, errors.New("--timeline needs --analyze <bundle>")

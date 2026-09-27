@@ -121,17 +121,7 @@ func main() {
 		// go tool pprof http://<addr>/debug/pprof/profile?seconds=30
 		go func() { _ = http.ListenAndServe(cfg.Perf.Pprof, nil) }()
 	}
-	// Settle light/dark before bubbletea owns the terminal. Left to lipgloss,
-	// the background query runs on the first render, while bubbletea reads
-	// stdin, and loses the reply; on Windows termenv never asks at all.
-	switch cfg.Theme {
-	case "light":
-		lipgloss.SetHasDarkBackground(false)
-	case "dark":
-		lipgloss.SetHasDarkBackground(true)
-	default:
-		lipgloss.SetHasDarkBackground(termtheme.Dark())
-	}
+	setTheme(cfg)
 	app, err := ui.New(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -230,6 +220,21 @@ func writeReport(out string, rep *export.Report) error {
 	return nil
 }
 
+// setTheme settles light/dark before bubbletea owns the terminal. Left to
+// lipgloss, the background query runs on the first render, while
+// bubbletea reads stdin, and loses the reply; on Windows termenv never asks
+// at all.
+func setTheme(cfg config.Config) {
+	switch cfg.Theme {
+	case "light":
+		lipgloss.SetHasDarkBackground(false)
+	case "dark":
+		lipgloss.SetHasDarkBackground(true)
+	default:
+		lipgloss.SetHasDarkBackground(termtheme.Dark())
+	}
+}
+
 // analyzeOnce is --analyze: the findings of a log bundle, recomputed
 // offline as of when it was gathered.
 func analyzeOnce(cfg config.Config) error {
@@ -259,8 +264,31 @@ func analyzeOnce(cfg config.Config) error {
 		fmt.Println("note:", n)
 	}
 	tl := rca.Build(b, r)
+	if cfg.AnalyzeTUI {
+		klog.SetOutput(io.Discard)
+		klog.LogToStderr(false)
+		setTheme(cfg)
+		app := ui.NewOffline(cfg, &ui.Offline{Bundle: b, Replayed: r, Timeline: tl, Source: rca.NewBundleSource(b, r)})
+		_, err := tea.NewProgram(app, tea.WithAltScreen()).Run()
+		return err
+	}
+	incidents := rca.Extract(tl, r.Snap)
+	if cfg.Incident != "" {
+		for _, in := range incidents {
+			if in.ID == cfg.Incident {
+				fmt.Println()
+				rca.WriteContext(os.Stdout, in.Context(rca.NewBundleSource(b, r), tl, incidents, rca.DefaultWindow))
+				return nil
+			}
+		}
+		fmt.Println()
+		rca.WriteIncidents(os.Stdout, incidents)
+		return fmt.Errorf("no incident %q in the bundle (the list is above)", cfg.Incident)
+	}
 	fmt.Println()
-	rca.WriteReport(os.Stdout, rca.Analyze(b, r, tl), tl, 60)
+	rca.WriteReport(os.Stdout, rca.Analyze(rca.NewBundleSource(b, r), tl), tl, 60)
+	fmt.Println()
+	rca.WriteIncidents(os.Stdout, incidents)
 	if cfg.Timeline != "" {
 		f, err := os.Create(cfg.Timeline)
 		if err != nil {

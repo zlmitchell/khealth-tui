@@ -90,7 +90,7 @@ func TestAnalyze(t *testing.T) {
 		t.Fatal(err)
 	}
 	tl := Build(b, r)
-	hs := Analyze(b, r, tl)
+	hs := Analyze(NewBundleSource(b, r), tl)
 
 	find := func(title string) *Hypothesis {
 		for i := range hs {
@@ -155,6 +155,65 @@ func TestKlogInNodeZone(t *testing.T) {
 	}
 }
 
+// A noisy neighbour: the kubelet evicts victim (low priority, a little
+// over its request) first and hog last; the evictions stop after hog, so
+// hog is the one to blame even without usage in its eviction message.
+func TestEvictionBlamesTheLastOfTheEpisode(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	t0 := now.Add(-10 * time.Minute)
+	node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}, Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("8Gi")}}}
+	mk := func(ns, name, rs string, prio int32, req string) corev1.Pod {
+		yes := true
+		p := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, Labels: map[string]string{"pod-template-hash": "abc12345"},
+			OwnerReferences: []metav1.OwnerReference{{Kind: "ReplicaSet", Name: rs, Controller: &yes}}},
+			Spec:   corev1.PodSpec{NodeName: "n1", Priority: &prio, Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(req)}}}}},
+			Status: corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted", StartTime: &metav1.Time{Time: t0.Add(-time.Hour)}}}
+		return p
+	}
+	victim := mk("shop", "api-abc12345-aaaaa", "api-abc12345", 0, "16Mi")
+	hog := mk("batch", "report-abc12345-bbbbb", "report-abc12345", 1000, "64Mi")
+	ev := func(p corev1.Pod, at time.Time, msg string) corev1.Event {
+		return corev1.Event{Reason: "Evicted", Type: corev1.EventTypeWarning, LastTimestamp: metav1.NewTime(at), Source: corev1.EventSource{Host: "n1"},
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Namespace: p.Namespace, Name: p.Name}, Message: msg}
+	}
+	snap := &k8s.Snapshot{Nodes: []corev1.Node{node}, Pods: []corev1.Pod{victim, hog}, Events: []corev1.Event{
+		ev(victim, t0, "The node was low on resource: memory. Threshold quantity: 1Gi, available: 900Mi. Container c was using 40Mi, request is 16Mi, has larger consumption of memory."),
+		ev(hog, t0.Add(3*time.Second), "The node was low on resource: memory. Threshold quantity: 1Gi, available: 800Mi. "),
+	}}
+	dir := writeBundle(t, map[string]string{}, snap, now)
+	b, err := gather.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	r, _ := b.Replay(config.Default())
+	tl := Build(b, r)
+	ins := Extract(tl, r.Snap)
+	var target *Incident
+	for i := range ins {
+		if ins[i].Kind == KindEviction && ins[i].Namespace == "shop" {
+			target = &ins[i]
+		}
+	}
+	if target == nil {
+		t.Fatalf("no eviction of shop/api in %+v", ins)
+	}
+	c := target.Context(NewBundleSource(b, r), tl, ins, DefaultWindow)
+	if len(c.Suspects) == 0 || !strings.HasPrefix(c.Suspects[0].Who, "batch/report-") {
+		t.Fatalf("suspects %+v, want batch/report first", c.Suspects)
+	}
+	if !strings.Contains(c.Verdict, "batch/report") {
+		t.Errorf("verdict %q", c.Verdict)
+	}
+	// the hog's pod object gone (a drain or the terminated-pod GC deleted
+	// it): the eviction events alone still name it
+	r.Snap.Pods = []corev1.Pod{victim}
+	c = target.Context(NewBundleSource(b, r), tl, ins, DefaultWindow)
+	if len(c.Suspects) == 0 || !strings.HasPrefix(c.Suspects[0].Who, "batch/report-") {
+		t.Fatalf("with the hog's pod deleted: suspects %+v", c.Suspects)
+	}
+}
+
 func titles(hs []Hypothesis) []string {
 	var out []string
 	for _, h := range hs {
@@ -191,3 +250,71 @@ func TestClockFix(t *testing.T) {
 
 // unixNano is the probe's TIME section: date +%s.%N
 func unixNano(t time.Time) string { return fmt.Sprintf("%d.%09d", t.Unix(), t.Nanosecond()) }
+
+// kubectl drain: the node is cordoned (unschedulable taint with its time),
+// pods on it are stopped through the Eviction API (Killing events, no
+// Evicted), and their replacements cannot be scheduled. The drain is one
+// incident listing the stopped pods, and it is what the pending pods blame.
+// An OOMKilled container is its own limit, not a neighbour.
+func TestDrainAndOwnLimit(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	cordon := now.Add(-10 * time.Minute)
+	node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}, Spec: corev1.NodeSpec{Unschedulable: true,
+		Taints: []corev1.Taint{{Key: "node.kubernetes.io/unschedulable", Effect: corev1.TaintEffectNoSchedule, TimeAdded: &metav1.Time{Time: cordon}}}}}
+	ev := func(reason, kind, ns, name, host, msg string, at time.Time) corev1.Event {
+		return corev1.Event{Reason: reason, Type: corev1.EventTypeNormal, LastTimestamp: metav1.NewTime(at), Source: corev1.EventSource{Host: host},
+			InvolvedObject: corev1.ObjectReference{Kind: kind, Namespace: ns, Name: name}, Message: msg}
+	}
+	pending := ev("FailedScheduling", "Pod", "shop", "web-abc12345-new01", "", "0/1 nodes are available: 1 node(s) were unschedulable. preemption: 0/1 nodes are available", cordon.Add(5*time.Second))
+	pending.Type = corev1.EventTypeWarning
+	limit := resource.MustParse("24Mi")
+	oom := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "hungry-1"},
+		Spec: corev1.PodSpec{NodeName: "n1", Containers: []corev1.Container{{Name: "app", Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: limit}}}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: "app", RestartCount: 2,
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled", ExitCode: 137, FinishedAt: metav1.NewTime(now.Add(-time.Hour))}}}}}}
+	snap := &k8s.Snapshot{Nodes: []corev1.Node{node}, Pods: []corev1.Pod{oom}, Events: []corev1.Event{
+		ev("NodeNotSchedulable", "Node", "", "n1", "n1", "Node n1 status is now: NodeNotSchedulable", cordon),
+		ev("Killing", "Pod", "shop", "web-abc12345-old01", "n1", "Stopping container web", cordon.Add(2*time.Second)),
+		ev("Killing", "Pod", "kube-system", "coredns-1", "n1", "Stopping container coredns", cordon.Add(3*time.Second)),
+		pending,
+	}}
+	dir := writeBundle(t, map[string]string{}, snap, now)
+	b, err := gather.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	r, _ := b.Replay(config.Default())
+	tl := Build(b, r)
+	ins := Extract(tl, r.Snap)
+	src := NewBundleSource(b, r)
+	var drain, sched, oomIn *Incident
+	for i := range ins {
+		switch ins[i].Kind {
+		case KindDrain:
+			drain = &ins[i]
+		case KindSchedule:
+			sched = &ins[i]
+		case KindOOM:
+			oomIn = &ins[i]
+		}
+	}
+	if drain == nil || drain.Node != "n1" || len(drain.Pods) != 2 || !strings.Contains(drain.Summary, "2 pods stopped") {
+		t.Fatalf("drain incident %+v", drain)
+	}
+	if c := drain.Context(src, tl, ins, DefaultWindow); len(c.Suspects) != 0 || !strings.Contains(c.Verdict, "audit log") {
+		t.Errorf("a drain is an action, not a symptom: suspects %+v verdict %q", c.Suspects, c.Verdict)
+	}
+	if sched == nil {
+		t.Fatal("no scheduling incident")
+	}
+	if c := sched.Context(src, tl, ins, DefaultWindow); len(c.Suspects) == 0 || c.Suspects[0].Who != "node drain n1" || c.Suspects[0].Score < 0.85 {
+		t.Errorf("pending pods should blame the drain: %+v", c.Suspects)
+	}
+	if oomIn == nil {
+		t.Fatal("no OOM incident")
+	}
+	if c := oomIn.Context(src, tl, ins, DefaultWindow); !strings.Contains(c.Verdict, "its own memory limit of 24Mi") {
+		t.Errorf("OOM verdict %q", c.Verdict)
+	}
+}

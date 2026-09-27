@@ -57,6 +57,7 @@ spec:
         image: busybox:1.36
         command: ["sh","-c","echo serving; sleep 3600"]
         livenessProbe: {exec: {command: ["cat","/tmp/healthy"]}, periodSeconds: 3, failureThreshold: 2, initialDelaySeconds: 1}
+        resources: {requests: {memory: 32Mi}}
 ---
 apiVersion: v1
 kind: Namespace

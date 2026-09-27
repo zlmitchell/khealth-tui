@@ -18,6 +18,9 @@ type crdCountMsg struct {
 
 // crdCountCmd fetches instance counts for all CRDs (once per refresh cycle).
 func (a *App) crdCountCmd() tea.Cmd {
+	if a.offline != nil {
+		return nil
+	}
 	if a.snap == nil || len(a.snap.CRDs) == 0 || a.crdCounting {
 		return nil
 	}
@@ -107,6 +110,9 @@ func (a *App) crdsContent() content {
 
 // openCRDInstances lists a CRD's instances into the inspector.
 func (a *App) openCRDInstances(id string) tea.Cmd {
+	if a.readOnly("listing custom resources") {
+		return nil
+	}
 	var idx int
 	if _, err := fmt.Sscan(id, &idx); err != nil {
 		return nil

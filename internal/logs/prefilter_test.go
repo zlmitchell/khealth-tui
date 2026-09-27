@@ -15,8 +15,8 @@ import (
 func TestNeedLiterals(t *testing.T) {
 	for expr, want := range map[string][]string{
 		`slow fdatasync|took too long`:               {"slow fdatasync", "took too long"},
-		`Waiting for etcd (to become|cluster)`:       {"waiting for etcd "},
-		`(rke2|k3s) is up and running`:               {" is up and running"},
+		`Waiting for etcd (to become|cluster)`:       {"waiting for etcd to become", "waiting for etcd cluster"},
+		`(rke2|k3s) is up and running`:               {"rke2 is up and running", "k3s is up and running"},
 		`level=warn(ing)?|\bW[0-9]{4} `:              nil,                           // "w" is too short to be worth checking
 		`(?i)(failed|error|unable).{0,60}(upload|x)`: {"failed", "error", "unable"}, // the "x" branch is too short, the other one serves
 		`dial tcp [0-9.]+:9345: connect`:             {":9345: connect"},
@@ -24,6 +24,21 @@ func TestNeedLiterals(t *testing.T) {
 	} {
 		if got := needLiterals(expr); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: %q, want %q", expr, got, want)
+		}
+	}
+}
+
+// Weak literals let routine lines through the prefilter: Go's parser
+// factors Start(ing|ed) and an optional (ment)? broke the chain, leaving
+// "start" and "started", which every "... started for volume" line has.
+func TestPrefilterSelective(t *testing.T) {
+	routine := `I0926 10:22:00.000 12 reconciler.go:100] "operationExecutor.VerifyControllerAttachedVolume started for volume" pod="ns-1/pod-1"`
+	if MayMatch(routine) {
+		t.Errorf("a routine kubelet line passes the prefilter")
+	}
+	for _, p := range []string{"rke2-start", "defrag"} {
+		if need := Find(p).need; need == nil || shortest(need) < 10 {
+			t.Errorf("%s: literals %q", p, need)
 		}
 	}
 }
@@ -69,6 +84,10 @@ func TestPrefilterNeverHidesAMatch(t *testing.T) {
 				checked++
 				if !p.matches(tl, lower) {
 					t.Errorf("prefilter of %s (%q) hides a match: %q", p.Name, p.need, tl)
+				}
+				var scratch []byte
+				if !MayMatch(line) || !MayMatchBytes([]byte(line), &scratch) {
+					t.Errorf("MayMatch drops a line %s matches: %q", p.Name, line)
 				}
 			}
 		}

@@ -26,6 +26,7 @@ import (
 	"github.com/zlmitchell/khealth-tui/internal/logs"
 	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 	"github.com/zlmitchell/khealth-tui/internal/perf"
+	"github.com/zlmitchell/khealth-tui/internal/rca"
 	"github.com/zlmitchell/khealth-tui/internal/sshrun"
 	"github.com/zlmitchell/khealth-tui/internal/stig"
 	"github.com/zlmitchell/khealth-tui/internal/strutil"
@@ -40,7 +41,7 @@ const (
 	tabEtcd
 	tabStorage
 	tabEvents
-	tabAddons
+	tabIncidents
 	tabHelm
 	tabImages
 	tabSecurity
@@ -49,7 +50,7 @@ const (
 	tabCount
 )
 
-var tabNames = [...]string{"Overview", "Nodes", "Inspect", "etcd", "Storage", "Events", "Addons", "Helm", "Images", "Security", "Logs", "RKE2"}
+var tabNames = [...]string{"Overview", "Nodes", "Inspect", "etcd", "Storage", "Events", "Incidents", "Helm", "Images", "Security", "Logs", "RKE2"}
 var tabKeys = [...]string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="}
 
 // subTabs are second-level views of a tab (h/l switch). "Inspect" renders
@@ -59,6 +60,10 @@ var subTabs = map[tab][]string{
 	tabEvents:    {"Events", "Object"},
 	tabLogs:      {"Nodes", "Lines"},
 	tabSecurity:  {"Rules", "Node hardening", "OS STIG", "Fix list"},
+	// the distribution tab: its configuration, and the addons that run on it
+	tabRKE2: {"Config", "Addons"},
+	// the incident list, then one incident seen from each angle
+	tabIncidents: incidentPanes,
 }
 
 const subInspect = "Object"
@@ -193,9 +198,11 @@ type App struct {
 	detailScroll int
 	status       string
 	statusAt     time.Time
-	logsNode     string // Logs tab: node whose lines are listed ("" = node list)
-	logsAll      bool   // Logs tab: show info lines too
-	logsWrap     bool   // Logs tab: wrap the message column of a node's lines
+	logsNode     string   // Logs tab: node whose lines are listed ("" = node list)
+	inc          incState // Incidents tab
+	offline      *Offline // a log bundle instead of a cluster (--analyze --tui)
+	logsAll      bool     // Logs tab: show info lines too
+	logsWrap     bool     // Logs tab: wrap the message column of a node's lines
 
 	pendingAct    *action
 	revRelease    *k8s.HelmRelease
@@ -251,12 +258,21 @@ func (a *App) subName() string {
 		}
 		return "Nodes"
 	}
+	if a.tab == tabIncidents {
+		if a.inc.open == "" {
+			return "List"
+		}
+		return incidentPanes[max(1, min(a.sub[a.tab], len(incidentPanes)-1))]
+	}
 	i := a.sub[a.tab]
 	if i < 0 || i >= len(st) {
 		i = 0
 	}
 	return st[i]
 }
+
+// onAddons reports whether the distribution tab shows its Addons sub-tab.
+func (a *App) onAddons() bool { return a.tab == tabRKE2 && a.subName() == "Addons" }
 
 // onCRDs reports whether the CRDs sub-tab is showing.
 func (a *App) onCRDs() bool { return a.tab == tabWorkloads && a.subName() == "Resources" }
@@ -428,10 +444,16 @@ func New(cfg config.Config) (*App, error) {
 
 // Init starts the first refresh.
 func (a *App) Init() tea.Cmd {
+	if a.offline != nil {
+		return a.spinner.Tick
+	}
 	return tea.Batch(a.spinner.Tick, a.refreshCmd())
 }
 
 func (a *App) refreshCmd() tea.Cmd {
+	if a.offline != nil {
+		return nil
+	}
 	a.seq++
 	a.refreshing = true
 	seq := a.seq
@@ -789,7 +811,7 @@ func (a *App) adoptSTIG(name string) {
 // disk (healthy etcd members first), the last node list, ssh.hosts. Each
 // host is tried once until the API is seen again.
 func (a *App) apiFailoverCmd() tea.Cmd {
-	if a.snap == nil || len(a.snap.Nodes) > 0 || a.apiTrying || !k8s.Unreachable(a.snap.Errors) {
+	if a.offline != nil || a.snap == nil || len(a.snap.Nodes) > 0 || a.apiTrying || !k8s.Unreachable(a.snap.Errors) {
 		return nil
 	}
 	cur, _ := url.Parse(a.client.Host)
@@ -921,6 +943,9 @@ func (a *App) withPeers(nodes []corev1.Node) []corev1.Node {
 // etcdExecCmd runs etcdctl inside an etcd static pod through the API
 // (kubectl exec equivalent). Tries pods in order until one answers.
 func (a *App) etcdExecCmd(snap *k8s.Snapshot) tea.Cmd {
+	if a.offline != nil {
+		return nil
+	}
 	if snap == nil {
 		return nil
 	}
@@ -994,6 +1019,9 @@ func (a *App) helmCmd(snap *k8s.Snapshot) tea.Cmd {
 func helmKey(r k8s.HelmRelease) string { return r.Namespace + "/" + r.Name }
 
 func (a *App) s3Cmd(name string) tea.Cmd {
+	if a.offline != nil {
+		return nil
+	}
 	client := a.client
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1055,9 +1083,9 @@ func (a *App) recompute() {
 	}
 	a.findings = checks.Evaluate(checks.Input{
 		Snap: a.snap, Nodes: a.nodes, Etcd: a.etcd, EtcdExec: a.etcdExec, S3: a.s3, S3Reach: a.s3Reach, Logs: a.logSum, Stig: a.stigRes,
-		HelmLatest: a.helmLatest, SSHEnabled: a.sshEnabled, SSHErr: a.sshErr, Cfg: a.cfg, Now: time.Now(), APIServer: a.apiServer(),
+		HelmLatest: a.helmLatest, SSHEnabled: a.sshEnabled, SSHErr: a.sshErr, Cfg: a.cfg, Now: a.clock(), APIServer: a.apiServer(),
 	})
-	a.trackFindings(time.Now())
+	a.trackFindings(a.clock())
 }
 
 // apiServer is the kubeconfig server URL ("" without a client, as in tests).
@@ -1202,7 +1230,19 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.spinner, cmd = a.spinner.Update(m)
 		return a, cmd
+	case incCtxMsg:
+		if a.inc.ctx == nil {
+			a.inc.ctx = map[string]*rca.Context{}
+		}
+		a.inc.ctx[m.id] = m.ctx
+		if a.inc.loading == m.id {
+			a.inc.loading = ""
+		}
+		return a, nil
 	case tickMsg:
+		if a.offline != nil {
+			return a, nil
+		}
 		if m.seq == a.seq && !a.refreshing {
 			return a, a.refreshCmd()
 		}
@@ -1452,6 +1492,11 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a.handleInspectKey(key)
 		}
 	}
+	if a.tab == tabIncidents && !a.filterOn {
+		if cmd, ok := a.handleIncidentKey(key); ok {
+			return a, cmd
+		}
+	}
 	if key == "q" && a.tab == tabLogs && a.logsNode != "" {
 		a.logsNode = ""
 		a.cursor[a.tab], a.scroll[a.tab] = 0, 0
@@ -1553,16 +1598,25 @@ func (a *App) handleKeyInner(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.nsCursor = 0
 		return a, a.nsInput.Focus()
 	case "C":
+		if a.readOnly("switching context") {
+			return a, nil
+		}
 		a.ctxList = k8s.Contexts(a.cfg.Kubeconfig, a.client.Context)
 		a.ctxCursor = 0
 		a.overlay = ovContext
 		return a, nil
 	case "r":
+		if a.readOnly("refresh") {
+			return a, nil
+		}
 		if !a.refreshing {
 			a.setStatus("refreshing")
 			return a, a.refreshCmd()
 		}
 	case "R":
+		if a.readOnly("refresh") {
+			return a, nil
+		}
 		a.heavyNext = true
 		a.client.ResetDenied() // retry the API calls that were refused
 		if !a.refreshing {
@@ -2213,8 +2267,8 @@ func (a *App) buildContent() content {
 		return a.storageContent()
 	case tabEvents:
 		return a.eventsContent()
-	case tabAddons:
-		return a.addonsContent()
+	case tabIncidents:
+		return a.incidentsContent()
 	case tabHelm:
 		return a.helmContent()
 	case tabImages:
@@ -2224,6 +2278,9 @@ func (a *App) buildContent() content {
 	case tabLogs:
 		return a.logsContent()
 	case tabRKE2:
+		if a.onAddons() {
+			return a.addonsContent()
+		}
 		return a.rke2Content()
 	}
 	return content{}
@@ -2477,6 +2534,8 @@ func (a *App) renderHeader() string {
 		state = a.spinner.View() + " " + styleWarn.Render(fmt.Sprintf("scan %d%% %d/%d nodes", a.scan.percent(), a.scan.done(), len(a.scan.nodes)))
 	case len(a.pending) > 0 || len(a.etcdPend) > 0:
 		state = a.spinner.View() + fmt.Sprintf(" collecting %d", len(a.pending)+len(a.etcdPend))
+	case a.offline != nil:
+		state = styleWarn.Render("bundle, gathered " + a.offline.Bundle.Manifest.Created.Local().Format("2006-01-02 15:04"))
 	case !a.lastRefresh.IsZero():
 		state = "updated " + age(a.lastRefresh) + " ago"
 	}
@@ -2633,6 +2692,16 @@ func (a *App) renderBody() string {
 
 func (a *App) renderFooter() string {
 	keys := []string{"tab/shift-tab switch", "←/→ sub-tab", "j/k move", "enter inspect", "n namespace", "C context", "/ filter", "a problems", "r refresh", "R full", "s ssh", "? help", "q quit"}
+	if a.offline != nil {
+		keys = []string{"tab/shift-tab switch", "←/→ sub-tab", "j/k move", "enter inspect", "n namespace", "/ filter", "a problems", "? help", "q quit"}
+	}
+	if a.tab == tabIncidents {
+		if a.inc.open == "" {
+			keys = []string{"t type", "enter/l open", "j/k move", "/ filter", "tab/shift-tab switch", "? help", "q quit"}
+		} else {
+			keys = []string{"h/l views", "enter open row", "L pod logs", "j/k move", "/ filter", "esc list", "? help"}
+		}
+	}
 	// a modal view has its own keys; esc is always the way out and the tab
 	// row is inactive until it closes
 	switch a.overlay {
@@ -2900,13 +2969,14 @@ func helpLines(width int) []string {
 		{"etcd", "members, health, db size/quota/fragmentation, fsync latency, config source, snapshots/backups. X = rescue: stop rke2-server/k3s (or park the kubeadm static pods) on every server, move each etcd data dir into a timestamped rescue dir, cluster-reset/restore the chosen snapshot on the chosen node, fix owner/mode, start it, rejoin the other servers one at a time with an etcd member/health/leader check after each, take a fresh snapshot"},
 		{"Storage", "StorageClasses, CSI drivers, PVs/PVCs and node filesystems"},
 		{"Events", "warning events"},
-		{"Addons", "CNI, CSI, DNS/ingress/metrics, registry mirrors (registries.yaml on rke2/k3s, containerd certs.d elsewhere), Rancher management + join topology (rke2/k3s, or a cluster registered in Rancher), rke2 HelmCharts"},
+		{"Incidents", "OOM kills, evictions, restarts, liveness kills, image pulls, scheduling, admission, volume and node incidents from events, pod states and node journals, grouped per workload; t = type filter, enter = one incident in context: who caused it (the neighbour the kubelet's eviction order points at, a dependency that failed first, a rollout just before), its workload and revisions, the node's pods at that moment, ingress traffic to it, the timeline around it, its last log lines, the cluster; h/l switch views, L = its pod logs"},
 		{"Helm", "releases (enter = values applied), optional update check; u = upgrade to the newest known chart version (helm upgrade, or a spec.version patch on your own HelmChart CR when the rke2/k3s helm controller owns the release), b = helm rollback to a chosen revision, B = roll a failed or stuck (pending-*) release back to the last revision that deployed (all confirm first; helm/rollback need the helm CLI; --read-only disables them; charts shipped inside rke2 are refused for upgrade)"},
-		{"Images", "per-node image inventory, images not running, dangling (untagged) images, airgap tarball contents vs running"},
+		{"Images", "per-node image inventory: running (a running container or the pod sandbox image uses it), non-running, dangling (non-running and untagged: what a prune reclaims); airgap tarball contents vs running"},
 		{"Security", "Rules: DISA Kubernetes / RKE2 / Rancher MCM STIG + CIS checks from component flags, kubelet config, PSA, RBAC, node facts. Node hardening: per-node runtime vs boot facts (SELinux, FIPS, auditd, firewall...) and the OS STIG summary. OS STIG: every rule of the node's DISA RHEL 8/9/10 or Ubuntu 22.04/24.04 STIG. The whole tab is opt-in: empty until Shift+S runs the scan"},
 		{"Logs", "rke2/kubelet/containerd/rancher-system-agent logs classified into startup-noise / warnings / errors (Rancher plan events flag config rewrites); enter on a node lists its lines, enter on a line shows the full text + explanation, esc goes back, a shows info lines, w wraps long messages"},
 		{"RKE2/k3s", "config.yaml(.d), data-dir, server/manifests (HelmChartConfig etc.), static pod manifests, audit/PSS policies, config drift, API endpoint vs tls-san vs cert"},
 		{"kubeadm", "(same tab on upstream clusters) kubeadm-config ClusterConfiguration, API endpoint vs certSANs vs apiserver.crt"},
+		{"  Addons", "(l on the distribution tab) CNI, CSI, DNS/ingress/metrics, registry mirrors (registries.yaml on rke2/k3s, containerd certs.d elsewhere), Rancher management + join topology (rke2/k3s, or a cluster registered in Rancher), rke2 HelmCharts, upgrade readiness"},
 	})
 
 	lines = append(lines, "")

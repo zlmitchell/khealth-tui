@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/zlmitchell/khealth-tui/internal/gather"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
 	"github.com/zlmitchell/khealth-tui/internal/logs"
 	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 )
@@ -105,7 +107,7 @@ func Build(b *gather.Bundle, r *gather.Replayed) *Timeline {
 		add(es, n)
 	}()
 	wg.Wait()
-	tl.Entries = append(tl.Entries, snapshotEntries(r)...)
+	tl.Entries = append(tl.Entries, snapshotEntries(r.Snap)...)
 	tl.Entries = dedupe(tl.Entries)
 	sort.SliceStable(tl.Entries, func(i, j int) bool { return tl.Entries[i].Time.Before(tl.Entries[j].Time) })
 	return tl
@@ -154,13 +156,13 @@ func nodeEntries(b *gather.Bundle, dir, node string, now time.Time) ([]Entry, in
 		sub := strings.TrimPrefix(rel, dir+"/")
 		switch {
 		case strings.HasPrefix(sub, "journal/") && strings.HasSuffix(sub, ".log"):
-			ls := readLines(p)
-			lines += len(ls)
-			srcs = append(srcs, logs.Source{Name: rel, Lines: ls})
+			ls, nums, n := readCandidates(p)
+			lines += n
+			srcs = append(srcs, logs.Source{Name: rel, Lines: ls, Numbers: nums})
 		case strings.HasPrefix(sub, "files/") && (strings.HasSuffix(sub, "kubelet.log") || strings.HasSuffix(sub, "containerd.log")):
-			ls := readLines(p)
-			lines += len(ls)
-			srcs = append(srcs, logs.Source{Name: rel, Unit: nodeinfo.LogFileUnit(sub), Lines: ls})
+			ls, nums, n := readCandidates(p)
+			lines += n
+			srcs = append(srcs, logs.Source{Name: rel, Unit: nodeinfo.LogFileUnit(sub), Lines: ls, Numbers: nums})
 		case strings.HasPrefix(sub, "pods/") && strings.HasSuffix(sub, ".log"):
 			// pods/<ns>_<pod>_<uid>/<container>/<n>.log
 			parts := strings.Split(sub, "/")
@@ -213,12 +215,12 @@ func nodeZone(b *gather.Bundle, dir string) *time.Location {
 }
 
 // apiPodLogs reads cluster/pods/<ns>/<pod>/<container>[.previous].log,
-// fetched with timestamps.
+// fetched with timestamps, one file per worker: a cluster bundle holds
+// hundreds of them and each is read on its own.
 func apiPodLogs(b *gather.Bundle) ([]Entry, int) {
-	var out []Entry
-	lines := 0
-	root := b.Path("cluster/pods")
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	type job struct{ path, rel, unit string }
+	var jobs []job
+	_ = filepath.WalkDir(b.Path("cluster/pods"), func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".log") {
 			return nil
 		}
@@ -229,11 +231,34 @@ func apiPodLogs(b *gather.Bundle) ([]Entry, int) {
 			return nil
 		}
 		ctr := strings.TrimSuffix(strings.TrimSuffix(parts[2], ".log"), ".previous")
-		es, n := containerLog(p, rel, "", parts[0]+"/"+parts[1]+"/"+ctr, parseAPI)
-		lines += n
-		out = append(out, es...)
+		jobs = append(jobs, job{p, rel, parts[0] + "/" + parts[1] + "/" + ctr})
 		return nil
 	})
+	var (
+		mu    sync.Mutex
+		out   []Entry
+		lines int
+		wg    sync.WaitGroup
+	)
+	next := make(chan job)
+	for w := 0; w < min(runtime.GOMAXPROCS(0), 8); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range next {
+				es, n := containerLog(j.path, j.rel, "", j.unit, parseAPI)
+				mu.Lock()
+				out = append(out, es...)
+				lines += n
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, j := range jobs {
+		next <- j
+	}
+	close(next)
+	wg.Wait()
 	return out, lines
 }
 
@@ -241,7 +266,7 @@ func apiPodLogs(b *gather.Bundle) ([]Entry, int) {
 // timestamp (CRI files on disk, API logs with timestamps=true).
 func containerLog(path, rel, node, unit string, parse func(string) (time.Time, string)) ([]Entry, int) {
 	var out []Entry
-	ls := readLines(path)
+	ls, nums, total := readCandidates(path)
 	for i, l := range ls {
 		t, body := parse(l)
 		if t.IsZero() {
@@ -251,9 +276,9 @@ func containerLog(path, rel, node, unit string, parse func(string) (time.Time, s
 		if p == nil {
 			continue
 		}
-		out = append(out, Entry{Time: t, Node: node, Kind: "pod", Unit: unit, Class: p.Class, Pattern: p.Name, Text: strings.TrimSpace(body), Ref: Ref{File: rel, Line: i + 1}})
+		out = append(out, Entry{Time: t, Node: node, Kind: "pod", Unit: unit, Class: p.Class, Pattern: p.Name, Text: strings.TrimSpace(body), Ref: Ref{File: rel, Line: nums[i]}})
 	}
-	return out, len(ls)
+	return out, total
 }
 
 // parseCRI reads "2026-09-26T19:35:19.123456789Z stdout F message".
@@ -289,8 +314,7 @@ func parseAPI(l string) (time.Time, string) {
 
 // snapshotEntries turns what the API recorded into timeline points: every
 // event, each container's last termination, and node condition changes.
-func snapshotEntries(r *gather.Replayed) []Entry {
-	s := r.Snap
+func snapshotEntries(s *k8s.Snapshot) []Entry {
 	var out []Entry
 	for i := range s.Events {
 		ev := &s.Events[i]
@@ -342,8 +366,17 @@ func snapshotEntries(r *gather.Replayed) []Entry {
 	}
 	for i := range s.Nodes {
 		n := &s.Nodes[i]
+		// cordoned (kubectl cordon / drain, an upgrade controller): the
+		// unschedulable taint carries when it happened
+		if n.Spec.Unschedulable {
+			for _, tn := range n.Spec.Taints {
+				if tn.Key == "node.kubernetes.io/unschedulable" && tn.TimeAdded != nil {
+					out = append(out, Entry{Time: tn.TimeAdded.Time, Node: n.Name, Kind: "status", Unit: "node " + n.Name, Class: logs.ClassWarn, Pattern: "node-cordoned", Text: "node cordoned: spec.unschedulable (kubectl cordon / drain, or an upgrade controller)", Ref: Ref{File: "cluster/resources/nodes.yaml"}})
+				}
+			}
+		}
 		for _, c := range n.Status.Conditions {
-			bad := (c.Type == corev1.NodeReady && c.Status != corev1.ConditionTrue) || (c.Type != corev1.NodeReady && c.Status == corev1.ConditionTrue)
+			bad := (c.Type == corev1.NodeReady && c.Status != corev1.ConditionTrue) || (badWhenTrue[c.Type] && c.Status == corev1.ConditionTrue)
 			if !bad || c.LastTransitionTime.IsZero() {
 				continue
 			}
@@ -351,6 +384,35 @@ func snapshotEntries(r *gather.Replayed) []Entry {
 		}
 	}
 	return out
+}
+
+// BuildLive is Build for the live TUI: the snapshot's events and states,
+// and the log lines each node's probe classified (logSum, keyed by node).
+// No file references: live entries point at the unit they came from.
+func BuildLive(s *k8s.Snapshot, logSum map[string]*logs.Summary) *Timeline {
+	tl := &Timeline{ClockFix: map[string]time.Duration{}}
+	for node, sum := range logSum {
+		if sum == nil {
+			continue
+		}
+		tl.Lines += sum.Total
+		for _, m := range sum.Matches {
+			if m.Pattern == nil || m.Time.IsZero() {
+				continue
+			}
+			tl.Entries = append(tl.Entries, Entry{Time: m.Time, Node: node, Kind: "journal", Unit: m.Unit, Class: m.Class, Pattern: m.Pattern.Name, Text: strings.TrimSpace(m.Line), Ref: Ref{File: "journal of " + node + " (" + m.Unit + ")"}})
+		}
+	}
+	tl.Entries = append(tl.Entries, snapshotEntries(s)...)
+	tl.Entries = dedupe(tl.Entries)
+	sort.SliceStable(tl.Entries, func(i, j int) bool { return tl.Entries[i].Time.Before(tl.Entries[j].Time) })
+	return tl
+}
+
+// badWhenTrue are the node conditions that report a problem when True;
+// distributions add their own positive ones (k3s's EtcdIsVoter).
+var badWhenTrue = map[corev1.NodeConditionType]bool{
+	corev1.NodeMemoryPressure: true, corev1.NodeDiskPressure: true, corev1.NodePIDPressure: true, corev1.NodeNetworkUnavailable: true,
 }
 
 // dedupe drops repeats of the same line on the same node at the same time
@@ -367,6 +429,29 @@ func dedupe(es []Entry) []Entry {
 		out = append(out, e)
 	}
 	return out
+}
+
+// readCandidates streams a log file and keeps only the lines some
+// knowledge-base pattern could match, with their line numbers: a node's
+// journals run to hundreds of MiB, and the rest would only become
+// unmatched info lines.
+func readCandidates(p string) (lines []string, nums []int, total int) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, nil, 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64<<10), 4<<20)
+	var scratch []byte
+	for sc.Scan() {
+		total++
+		if b := sc.Bytes(); logs.MayMatchBytes(b, &scratch) {
+			lines = append(lines, string(b))
+			nums = append(nums, total)
+		}
+	}
+	return lines, nums, total
 }
 
 func readLines(p string) []string {

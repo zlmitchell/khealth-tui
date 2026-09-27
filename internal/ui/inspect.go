@@ -44,6 +44,9 @@ func (a *App) openInspectRef(ref k8s.ObjRef) tea.Cmd {
 	a.showInspect()
 	a.inspectSeq++
 	seq := a.inspectSeq
+	if a.offline != nil {
+		return a.offlineInspect(ref, seq)
+	}
 	client := a.client
 	snap := a.snap
 	return func() tea.Msg {

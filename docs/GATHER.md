@@ -107,6 +107,39 @@ Only lines the knowledge base recognises become entries; a journal is mostly rou
 Every piece of evidence names its bundle file and line (`nodes/cp-2/journal/rke2-server.log:1830`).
 `--timeline FILE` writes the full timeline: JSON lines for `.jsonl`, text otherwise.
 
+### Incidents, one at a time
+
+Below the probable causes, `--analyze` lists the **incidents**, one line per workload, with the replicas folded into a count:
+
+- OOM kills (a container's limit) and node OOM (the kernel killer)
+- evictions, and the kubelet refusing to admit pods while the node is under pressure
+- restarts, liveness kills, image pulls, unschedulable pods, denied creates, volume and sandbox (CNI) failures
+- NotReady nodes and node pressure
+
+`--incident ID` shows one incident in context:
+
+```sh
+khealth --analyze bundle.tar.gz --incident eviction-2
+khealth --analyze bundle.tar.gz --tui          # the same, browsable: every tab from the bundle, Incidents first
+```
+
+The context has these parts:
+
+- **Who caused it**, ranked, each suspect with its reasons:
+  - **Evictions.** The kubelet evicts one pod at a time and stops as soon as the node is back above its threshold, so **the last eviction of the episode names the pod whose memory the node lacked**. That holds even when the kubelet's message carries no usage for it. Other signals add weight: usage above request (the kubelet's own eviction messages first, metrics otherwise), no memory limit, priority, and how long before the incident a pod was scheduled onto the node. Pods whose requests cover their use are not suspects. Fellow victims of the same episode are not causes.
+  - **Every kind:**
+    - a Deployment revision rolled out within the window before (a first deploy does not count)
+    - a dependency that the container's last log lines name (`cannot connect to db:5432` → the `db` Service's workload) and that failed first
+    - memory pressure, OOM or NotReady on the same node before a restart
+- **The workload:** desired and ready replicas, revisions with their images, pods with restarts and memory.
+- **The node at that moment:** every pod present, with QoS, priority, requests, limits, use and arrival time, the suspects first; plus requests and use against what the node can allocate.
+- **Traffic:** access logs of ingress-nginx, Traefik (common and JSON format; `accessLog` must be enabled) and Envoy (Istio, Gateway API), matched to the Services that select the workload's pods (by upstream name, or pod IP). Shown as requests per minute with 5xx, 4xx and p95, the Ingress/HTTPRoute objects in front, and the 5xx nearest the incident. The gather always collects the controllers' logs, with 4× the per-pod cap.
+- **The timeline around it:** the node, the namespace, and the control plane (etcd, leases).
+- **The last log lines** of the container's previous run.
+- **The cluster:** every node's requests and use.
+
+The same view is the **Incidents tab** of the live TUI (key `7`). There, the incidents come from the events, pod states and node journals khealth already collects, and an opened incident reads pod logs, ReplicaSets, pod metrics and HTTPRoutes through the API in the background.
+
 The rules are checked end to end by the Docker lab in [test/gatherlab](../test/gatherlab/README.md): a k3s cluster with staged incidents and a stand-in node over SSH.
 
 ## Cost and limits
@@ -121,6 +154,11 @@ The rules are checked end to end by the Docker lab in [test/gatherlab](../test/g
 - **On the node**, `gather.sh` stages its outputs in a private directory under `/var/tmp` or `/tmp` and streams them back as one gzipped tar over the existing SSH session. The directory is removed on exit; a run that was killed is cleaned up by the next one after two hours. When neither directory has room (a full disk is a common reason to gather), tmpfs (`/run`, `/dev/shm`) is used only if MemAvailable holds four times the budget, so that the collection does not push a node that is short of memory into the OOM killer.
 - **Resources.** The script runs under the same `renice 19` / `ionice` best-effort-lowest prologue as every probe, and every command has a 120 s timeout. It needs `tar` on the node, and uses `gzip` when present.
 - **Locally**, the bundle is assembled in the system temp directory and packed once at the end, so plan for about `nodes × node_mb` of local disk.
+- **Analysis.** Log files are streamed, and only the lines some knowledge-base pattern could match are kept. For a synthetic bundle of 3 × 250k journal lines, 3,000 pods, 20,000 events, 400 pod logs and 200k access-log lines:
+  - timeline: 3.3 s, 60 MiB peak heap
+  - probable causes: a few ms
+  - one incident's context: a few ms
+  - At four times that size (7M log lines): 13.7 s and 221 MiB. Details in [PERFORMANCE.md](PERFORMANCE.md).
 
 ## What is left out or masked
 

@@ -2,7 +2,6 @@ package rca
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -10,7 +9,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/zlmitchell/khealth-tui/internal/gather"
 	"github.com/zlmitchell/khealth-tui/internal/logs"
 )
 
@@ -38,8 +36,8 @@ func (h Hypothesis) Confidence() string {
 
 // Analyze runs every rule and returns the hypotheses, best supported first
 // (earliest first among equals).
-func Analyze(b *gather.Bundle, r *gather.Replayed, tl *Timeline) []Hypothesis {
-	c := newCtx(b, r, tl)
+func Analyze(src Source, tl *Timeline) []Hypothesis {
+	c := newCtx(src, tl)
 	var hs []Hypothesis
 	for _, rule := range rules {
 		hs = append(hs, rule(c)...)
@@ -69,14 +67,14 @@ var rules = []func(*ctx) []Hypothesis{
 }
 
 type ctx struct {
-	b      *gather.Bundle
-	r      *gather.Replayed
+	src    Source
+	now    time.Time // when the data was taken
 	tl     *Timeline
 	byName map[string][]Entry // by pattern / event reason / status reason
 }
 
-func newCtx(b *gather.Bundle, r *gather.Replayed, tl *Timeline) *ctx {
-	c := &ctx{b: b, r: r, tl: tl, byName: map[string][]Entry{}}
+func newCtx(src Source, tl *Timeline) *ctx {
+	c := &ctx{src: src, tl: tl, now: src.Snap().Taken, byName: map[string][]Entry{}}
 	for _, e := range tl.Entries {
 		c.byName[e.Pattern] = append(c.byName[e.Pattern], e)
 	}
@@ -330,8 +328,8 @@ func memLimit(c *ctx, unit string) string {
 	if len(parts) != 3 {
 		return ""
 	}
-	for i := range c.r.Snap.Pods {
-		p := &c.r.Snap.Pods[i]
+	for i := range c.src.Snap().Pods {
+		p := &c.src.Snap().Pods[i]
 		if p.Namespace != parts[0] || p.Name != parts[1] {
 			continue
 		}
@@ -366,8 +364,8 @@ func imagePull(c *ctx) []Hypothesis {
 		byImage[img] = append(byImage[img], e)
 	}
 	// pods stuck on a pull even without events in the window
-	for i := range c.r.Snap.Pods {
-		p := &c.r.Snap.Pods[i]
+	for i := range c.src.Snap().Pods {
+		p := &c.src.Snap().Pods[i]
 		for j, cs := range p.Status.ContainerStatuses {
 			if w := cs.State.Waiting; w != nil && (w.Reason == "ImagePullBackOff" || w.Reason == "ErrImagePull" || w.Reason == "InvalidImageName") {
 				img := cs.Image
@@ -375,7 +373,7 @@ func imagePull(c *ctx) []Hypothesis {
 					img = p.Spec.Containers[j].Image
 				}
 				if _, ok := byImage[img]; !ok {
-					byImage[img] = []Entry{{Time: c.b.Manifest.Created, Kind: "status", Unit: p.Namespace + "/" + p.Name + "/" + cs.Name, Class: logs.ClassWarn, Pattern: w.Reason, Text: w.Message, Ref: Ref{File: "cluster/resources/pods.yaml"}}}
+					byImage[img] = []Entry{{Time: c.now, Kind: "status", Unit: p.Namespace + "/" + p.Name + "/" + cs.Name, Class: logs.ClassWarn, Pattern: w.Reason, Text: w.Message, Ref: Ref{File: "cluster/resources/pods.yaml"}}}
 				}
 			}
 		}
@@ -432,8 +430,8 @@ func crashLoop(c *ctx) []Hypothesis {
 	}
 	groups := map[string]*group{}
 	var order []string
-	for i := range c.r.Snap.Pods {
-		p := &c.r.Snap.Pods[i]
+	for i := range c.src.Snap().Pods {
+		p := &c.src.Snap().Pods[i]
 		for _, cs := range append(append([]corev1.ContainerStatus{}, p.Status.InitContainerStatuses...), p.Status.ContainerStatuses...) {
 			crash := cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff"
 			t := cs.LastTerminationState.Terminated
@@ -443,7 +441,7 @@ func crashLoop(c *ctx) []Hypothesis {
 			if t != nil && t.Reason == "OOMKilled" {
 				continue
 			}
-			key := p.Namespace + "/" + owner(p) + "/" + cs.Name
+			key := p.Namespace + "/" + OwnerOf(p) + "/" + cs.Name
 			g := groups[key]
 			if g == nil {
 				g = &group{ctr: cs.Name, state: cs}
@@ -545,55 +543,21 @@ func reason(t *corev1.ContainerStateTerminated) string {
 	return t.Reason
 }
 
-// owner names the controller of a pod (ReplicaSet hash dropped), or the pod.
-func owner(p *corev1.Pod) string {
-	for _, o := range p.OwnerReferences {
-		if o.Controller != nil && *o.Controller {
-			name := o.Name
-			if o.Kind == "ReplicaSet" {
-				if i := strings.LastIndex(name, "-"); i > 0 {
-					name = name[:i]
-				}
-				return "deploy/" + name
-			}
-			return strings.ToLower(o.Kind) + "/" + name
-		}
-	}
-	return "pod/" + p.Name
-}
-
-// lastError reads the container's previous log (through the API, else on
-// the node's disk) and returns its last error-looking line.
+// lastError reads the container's previous log (else its current one)
+// and returns its last error-looking line.
 func lastError(c *ctx, p *corev1.Pod, ctr string) (Ref, string) {
-	cands := []string{"cluster/pods/" + p.Namespace + "/" + p.Name + "/" + ctr + ".previous.log", "cluster/pods/" + p.Namespace + "/" + p.Name + "/" + ctr + ".log"}
-	for _, f := range cands {
-		ls := readLines(c.b.Path(f))
+	for _, prev := range []bool{true, false} {
+		ls, file := c.src.PodLog(p.Namespace, p.Name, ctr, prev)
 		for i := len(ls) - 1; i >= 0 && i >= len(ls)-200; i-- {
 			_, body := parseAPI(ls[i])
 			if body == "" {
 				body = ls[i]
 			}
+			if strings.HasPrefix(body, "unable to retrieve container logs") {
+				continue // the kubelet's answer for a log that is gone, not a log line (bundles before 2026-09-27)
+			}
 			if errLine.MatchString(body) {
-				return Ref{File: f, Line: i + 1}, clip(strings.TrimSpace(body), 240)
-			}
-		}
-	}
-	// on-disk logs: nodes/<node>/pods/<ns>_<pod>_<uid>/<ctr>/<n>.log
-	if dir := c.b.Path("nodes/" + safe(p.Spec.NodeName) + "/pods"); p.Spec.NodeName != "" {
-		ents, _ := os.ReadDir(dir)
-		for _, e := range ents {
-			if !strings.HasPrefix(e.Name(), p.Namespace+"_"+p.Name+"_") {
-				continue
-			}
-			files, _ := os.ReadDir(dir + "/" + e.Name() + "/" + ctr)
-			for k := len(files) - 1; k >= 0; k-- {
-				rel := "nodes/" + safe(p.Spec.NodeName) + "/pods/" + e.Name() + "/" + ctr + "/" + files[k].Name()
-				ls := readLines(c.b.Path(rel))
-				for i := len(ls) - 1; i >= 0 && i >= len(ls)-200; i-- {
-					if _, body := parseCRI(ls[i]); errLine.MatchString(body) {
-						return Ref{File: rel, Line: i + 1}, clip(strings.TrimSpace(body), 240)
-					}
-				}
+				return Ref{File: file, Line: i + 1}, clip(strings.TrimSpace(body), 240)
 			}
 		}
 	}
@@ -612,8 +576,8 @@ func clip(s string, n int) string {
 // nodeNotReady looks at what a NotReady node logged just before it turned.
 func nodeNotReady(c *ctx) []Hypothesis {
 	var hs []Hypothesis
-	for i := range c.r.Snap.Nodes {
-		n := &c.r.Snap.Nodes[i]
+	for i := range c.src.Snap().Nodes {
+		n := &c.src.Snap().Nodes[i]
 		var ready *corev1.NodeCondition
 		for j := range n.Status.Conditions {
 			if n.Status.Conditions[j].Type == corev1.NodeReady {
@@ -638,10 +602,10 @@ func nodeNotReady(c *ctx) []Hypothesis {
 				h.Next = append(h.Next, explain(strings.Fields(p)[0])...)
 			}
 		}
-		for _, ne := range c.b.Manifest.Nodes {
-			if ne.Name == n.Name && ne.Logs != "ok" && ne.Logs != "not collected" {
+		if st, ok := c.src.(interface{ SSHStatus(string) string }); ok {
+			if s := st.SSHStatus(n.Name); s != "" && s != "ok" && s != "not collected" {
 				h.Score += 0.1
-				h.Effects = append(h.Effects, "SSH to the node failed too ("+ne.Logs+"): the machine is down, hung or cut off from the network, not only the kubelet")
+				h.Effects = append(h.Effects, "SSH to the node failed too ("+s+"): the machine is down, hung or cut off from the network, not only the kubelet")
 			}
 		}
 		if len(h.Next) == 0 {

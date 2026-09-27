@@ -141,7 +141,20 @@ check that `--analyze` names the cause in its top three, with evidence lines tha
 - [ ] Size: `--analyze` on the largest bundle from section 8. Record the time (the classifier runs at about 24 µs per line, and nodes are read in parallel).
 - [ ] False positives: on a healthy cluster, `--analyze` should report nothing high, or explain every high hypothesis.
 
-## 12. Before calling it done
+## 12. Incidents and the TUI (lab clusters)
+
+Locally, `test/gatherlab` passes (noisy-neighbour eviction, traffic and dependency scenarios included). On the lab clusters:
+
+- [ ] **Noisy neighbour, real kubelet:** on a redhat9 worker, a low-priority Deployment slightly over its request plus a high-priority pod that grows until the kubelet evicts. The eviction's Cause pane names the grower first ("the node stopped evicting once it was evicted"), whatever the kubelet's messages said.
+- [ ] **Node OOM, not eviction:** memory grows faster than the eviction manager's 10 s cycle, so the kernel kills first (a stress pod without a limit on a small node). The node-oom incident names the killed process and pod (kernel log `task_memcg`), and the suspects are the node's largest consumers.
+- [ ] **Traffic:** rke2's ingress-nginx in front of a workload that restarts. The Traffic pane shows the 5xx minute and upstream `ns-svc-port` matching. With an Istio or Envoy Gateway install, if available, the same through Envoy logs.
+- [ ] **Rollout:** `kubectl set image` to a broken tag on a Deployment. The restart/pull incident's Cause lists "rollout … revision N created Xs before".
+- [ ] **Live TUI on each cluster:** key `7` lists incidents within one refresh after the journal tier lands. `enter` opens one, and the context arrives in seconds (pod logs, ReplicaSets and metrics come through the API). `L` tails the pod. The distribution tab shows Config | Addons, and the Addons view looks as the old Addons tab did.
+- [ ] **Offline TUI:** `--analyze <bundle> --tui` on each lab bundle. Every tab renders. Inspect opens objects from the bundle dump. Pod logs show the gathered logs. `r`, `R` and `C` are refused with the "not available on a bundle" status.
+- [ ] **UX at 80×24 and 200×60:** the list, every pane and the footer stay readable, with no wrapped headers and no truncated key hints that matter.
+- [ ] **Timezone and clock:** on a non-UTC node with a skewed clock, the Timeline pane's entries around the incident interleave correctly across the journal, kubelet.log and events.
+
+## 13. Before calling it done
 
 - [ ] Unpack a bundle on Windows (tar in PowerShell or 7-Zip) and on Linux; file names are fine on both.
 - [ ] Update docs/GATHER.md "Tested / supported" with what was run above, and delete this file.

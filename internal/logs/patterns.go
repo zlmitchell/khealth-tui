@@ -323,6 +323,9 @@ type Source struct {
 	Unit  string
 	Lines []string
 	Name  string // where the lines came from (a file in a log bundle); copied to Match.Source
+	// Numbers, when set, are the line numbers of Lines in their file (a
+	// caller that kept only the MayMatch lines); otherwise line i is i+1
+	Numbers []int
 }
 
 // Classify runs journal lines through the knowledge base.
@@ -342,6 +345,9 @@ func ClassifySources(srcs []Source, now time.Time) *Summary {
 			}
 			s.Total++
 			m := Match{Line: line, Class: ClassInfo, Unit: src.Unit, Source: src.Name, LineNo: i + 1}
+			if i < len(src.Numbers) {
+				m.LineNo = src.Numbers[i]
+			}
 			if src.Unit == "" {
 				if g := journalTime.FindStringSubmatch(t); g != nil {
 					m.Unit = g[2]

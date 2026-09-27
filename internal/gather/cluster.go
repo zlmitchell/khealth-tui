@@ -1,6 +1,7 @@
 package gather
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -79,6 +80,9 @@ var resources = []resource{
 	{gvr("k3s.cattle.io", "v1", "addons"), true, nil},
 	{gvr("k3s.cattle.io", "v1", "etcdsnapshotfiles"), false, nil},
 	{gvr("upgrade.cattle.io", "v1", "plans"), true, nil},
+	// Gateway API: which routes send traffic to a workload's Services
+	{gvr("gateway.networking.k8s.io", "v1", "httproutes"), true, nil},
+	{gvr("gateway.networking.k8s.io", "v1", "gateways"), true, nil},
 }
 
 // ResourceEntry records how one type's dump went.
@@ -365,6 +369,14 @@ func podLogs(ctx context.Context, c *k8s.Client, st stage, pods []corev1.Pod, si
 		if err != nil {
 			if len(stats.Errors) < 50 {
 				stats.Errors = append(stats.Errors, fmt.Sprintf("%s/%s %s: %s", p.Namespace, p.Name, name, strutil.FirstLine(err.Error())))
+			}
+			return
+		}
+		// the kubelet answers 200 with this text when the container's log
+		// file is gone (container removed, log rotated away): not a log
+		if bytes.HasPrefix(bytes.TrimSpace(b), []byte("unable to retrieve container logs")) {
+			if len(stats.Errors) < 50 {
+				stats.Errors = append(stats.Errors, fmt.Sprintf("%s/%s %s: %s", p.Namespace, p.Name, name, strutil.FirstLine(string(b))))
 			}
 			return
 		}
