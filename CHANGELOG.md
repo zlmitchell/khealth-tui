@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/zlmitchell/khealth-tui/compare/v1.2.0...v1.3.0) (2026-09-27)
+
+
+### Features
+
+* log bundles, offline analysis and an incident explorer with root-cause attribution ([#5](https://github.com/zlmitchell/khealth-tui/issues/5)) ([ef9914c](https://github.com/zlmitchell/khealth-tui/commit/ef9914c0891c0dbcaef1d17b9fd125ee327c6d9a))
+
 # [1.2.0](https://github.com/zlmitchell/khealth-tui/compare/v1.1.2...v1.2.0) (2026-09-23)
 
 
