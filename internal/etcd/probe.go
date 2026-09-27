@@ -777,6 +777,26 @@ func parseEtcdctl(p *Probe, raw string) {
 			p.Statuses = append(p.Statuses, es)
 		}
 	}
+	// k3s: gRPC through curl (grpc.go)
+	if s := strings.TrimSpace(parts["GRPCMEMBERS"]); s != "" && len(p.Members) == 0 {
+		if ms, err := grpcMembers(s); err == nil {
+			p.Members = ms
+			p.EtcdctlVia = "grpc"
+		} else if p.EtcdctlDiag == "" || strings.HasPrefix(p.EtcdctlDiag, "no etcdctl") {
+			p.EtcdctlDiag = "gRPC member list: " + err.Error()
+		}
+	}
+	if s := strings.TrimSpace(parts["GRPCSTATUS"]); s != "" {
+		if es, err := grpcStatus(s); err == nil {
+			es.Endpoint = p.Endpoint
+			p.Statuses = append(p.Statuses, es)
+		}
+	}
+	if s := strings.TrimSpace(parts["GRPCALARMS"]); s != "" {
+		if as, err := grpcAlarms(s); err == nil {
+			p.Alarms = append(p.Alarms, as...)
+		}
+	}
 	for _, key := range []string{"ALARMS", "GWALARMS"} {
 		s := strings.TrimSpace(parts[key])
 		if s == "" {

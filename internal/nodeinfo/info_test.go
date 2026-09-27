@@ -251,7 +251,7 @@ func TestParse(t *testing.T) {
 	if !info.Heavy || len(info.Images) != 2 || len(info.Containers) != 1 {
 		t.Fatalf("heavy: %v %d %d", info.Heavy, len(info.Images), len(info.Containers))
 	}
-	unused, bytes := info.UnusedImages()
+	unused, bytes := info.NonRunningImages()
 	if len(unused) != 1 || unused[0].ID != "sha256:bbb" || bytes != 90000000 {
 		t.Errorf("unused: %+v %d", unused, bytes)
 	}
@@ -570,7 +570,7 @@ func TestContainerdSandboxImageKeys(t *testing.T) {
 // The images tab and the prune advice separate "nothing runs it" from
 // "nothing can name it": on an airgapped node the first is mostly the
 // preloaded images and the previous release, which must not be pruned.
-func TestDanglingVsUnusedImages(t *testing.T) {
+func TestDanglingVsNonRunningImages(t *testing.T) {
 	i := &Info{
 		Images: []Image{
 			{ID: "sha256:running", Tags: []string{"nginx:1.25"}, Size: 100},
@@ -581,7 +581,7 @@ func TestDanglingVsUnusedImages(t *testing.T) {
 		Containers: []Container{{Image: "nginx:1.25", ImageRef: "sha256:running"}},
 	}
 
-	unused, ub := i.UnusedImages()
+	unused, ub := i.NonRunningImages()
 	if len(unused) != 3 || ub != 650 {
 		t.Errorf("not running: %d images %d bytes, want 3 / 650", len(unused), ub)
 	}
@@ -604,5 +604,35 @@ func TestDanglingVsUnusedImages(t *testing.T) {
 				t.Errorf("a running image was counted as reclaimable")
 			}
 		}
+	}
+}
+
+// The pod sandbox (pause) image is held by every running pod, but crictl
+// lists sandboxes apart from containers: it is running, not non-running.
+// The containerd config names it when the probe read it; otherwise the
+// stock pause images count.
+func TestSandboxImageIsRunning(t *testing.T) {
+	i := &Info{
+		Images: []Image{
+			{ID: "sha256:pause", Tags: []string{"docker.io/rancher/mirrored-pause:3.6"}, Size: 300},
+			{ID: "sha256:app", Tags: []string{"shop/app:1"}, Size: 100},
+			{ID: "sha256:old-pause", Tags: []string{"registry.k8s.io/pause:3.9"}, Size: 300},
+		},
+		Containers: []Container{{Image: "shop/app:1", ImageRef: "sha256:app"}},
+	}
+	nr, _ := i.NonRunningImages()
+	if len(nr) != 0 {
+		t.Errorf("without a sandbox_image setting every stock pause image counts as running: %+v", nr)
+	}
+	// with the setting, only the configured one is the sandbox
+	i.ContainerdConfig = []ConfigFile{{Path: "/var/lib/rancher/k3s/agent/etc/containerd/config.toml", Content: `12:  sandbox_image = "rancher/mirrored-pause:3.6"`}}
+	nr, _ = i.NonRunningImages()
+	if len(nr) != 1 || nr[0].ID != "sha256:old-pause" {
+		t.Errorf("configured sandbox image: non-running %+v, want only the old pause", nr)
+	}
+	// no running pods: nothing holds a sandbox
+	i.Containers = nil
+	if nr, _ = i.NonRunningImages(); len(nr) != 3 {
+		t.Errorf("an idle node runs nothing: %d non-running", len(nr))
 	}
 }

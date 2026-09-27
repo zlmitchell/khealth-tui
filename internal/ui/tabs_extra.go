@@ -36,6 +36,15 @@ func (a *App) etcdContent() content {
 		}
 	}
 	add(styleTitle.Render("etcd") + "  " + kv("distribution", s.Distribution) + "  " + kv("etcd nodes", fmt.Sprint(etcdNodes)) + "  " + kv("probes", fmt.Sprintf("%d done, %d pending", len(a.etcd), len(a.etcdPend))) + "  " + hint("§enter§ = full config dumps   §X§ = rescue (restore a snapshot)   §D§ = defrag all members, one at a time"))
+	if ds := k8s.Datastore(s.Nodes); etcdNodes == 0 && ds != "" {
+		// k3s without --cluster-init: no etcd to show, and saying so beats
+		// an empty member list
+		add("", styleBold.Render("This cluster does not run etcd.")+" k3s keeps its state in "+ds+".")
+		for _, l := range wrap("There are no members, no quorum and no etcd snapshots to check; rescue and defrag do not apply. Back up the datastore instead: for SQLite, copy /var/lib/rancher/k3s/server/db/ (state.db with its -wal and -shm files) while k3s is stopped. To get a highly available control plane, restart the server with --cluster-init: k3s migrates the SQLite data into embedded etcd, and more servers can then join.", a.width-4) {
+			add("  " + l)
+		}
+		return linesContent(out)
+	}
 	add(a.etcdTiles()...)
 	if !a.sshEnabled {
 		add(styleWarn.Render("SSH collection is off - etcd internals need SSH to the control-plane nodes. API-side view only."))
@@ -1313,7 +1322,7 @@ func (a *App) imagesContent() content {
 		for _, im := range ni.Images {
 			total += im.Size
 		}
-		unused, ub := ni.UnusedImages()
+		nonRunning, nb := ni.NonRunningImages()
 		tarImgs := map[string]bool{}
 		for _, t := range ni.Tarballs {
 			for _, im := range t.Images {
@@ -1347,12 +1356,13 @@ func (a *App) imagesContent() content {
 			}
 			tarTxt = fmt.Sprintf("%d files %s, %d images", len(ni.Tarballs), humanBytes(float64(tsize)), len(tarImgs))
 		}
-		// not-running is mostly deliberate here (airgap preloads, the images
+		// non-running is mostly deliberate here (airgap preloads, the images
 		// of the release before this one), so it is not warned on; dangling
 		// is what a prune actually reclaims
-		notRunning := fmt.Sprintf("%d (%s)", len(unused), humanBytes(float64(ub)))
+		running := fmt.Sprintf("%d (%s)", len(ni.Images)-len(nonRunning), humanBytes(float64(total-nb)))
+		notRunning := fmt.Sprintf("%d (%s)", len(nonRunning), humanBytes(float64(nb)))
 		if total > 0 {
-			notRunning = bar(float64(ub)/float64(total), 8, styleDim) + " " + notRunning
+			notRunning = bar(float64(nb)/float64(total), 8, styleDim) + " " + notRunning
 		}
 		dangling, db := ni.DanglingImages()
 		danglingTxt := styleDim.Render("0")
@@ -1362,10 +1372,10 @@ func (a *App) imagesContent() content {
 				danglingTxt = styleWarn.Render(danglingTxt)
 			}
 		}
-		rows = append(rows, []string{n, fmt.Sprint(len(ni.Images)), humanBytes(float64(total)), fmt.Sprint(len(ni.Containers)), notRunning, danglingTxt, tarTxt, fmt.Sprint(notInTar)})
+		rows = append(rows, []string{n, fmt.Sprint(len(ni.Images)), humanBytes(float64(total)), fmt.Sprint(len(ni.Containers)), running, notRunning, danglingTxt, tarTxt, fmt.Sprint(notInTar)})
 		ids = append(ids, n)
 	}
-	h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "IMAGES", right: true}, {title: "SIZE", right: true}, {title: "CONTAINERS", right: true}, {title: "NOT RUNNING"}, {title: "DANGLING"}, {title: "AIRGAP TARBALLS"}, {title: "RUNNING NOT IN TARBALLS", right: true}}, rows)
+	h, lines := renderTable(a.width, []column{{title: "NODE"}, {title: "IMAGES", right: true}, {title: "SIZE", right: true}, {title: "CONTAINERS", right: true}, {title: "RUNNING"}, {title: "NON-RUNNING"}, {title: "DANGLING"}, {title: "AIRGAP TARBALLS"}, {title: "RUNNING NOT IN TARBALLS", right: true}}, rows)
 	hdr = append(hdr, h)
 	c := content{header: hdr, selectable: true, empty: "no SSH data"}
 	for i, l := range lines {
@@ -1390,8 +1400,10 @@ func (a *App) imagesDetail(node string) (string, []string) {
 	var out []string
 	add := func(l ...string) { out = append(out, l...) }
 	add(kv("crictl", ni.CrictlInfo))
-	unused, ub := ni.UnusedImages()
-	add(kv("images", fmt.Sprint(len(ni.Images))) + "  " + kv("running containers", fmt.Sprint(len(ni.Containers))) + "  " + kv("unused", fmt.Sprintf("%d (%s)", len(unused), humanBytes(float64(ub)))))
+	nonRunning, nb := ni.NonRunningImages()
+	dangling, db := ni.DanglingImages()
+	add(kv("images", fmt.Sprint(len(ni.Images))) + "  " + kv("running containers", fmt.Sprint(len(ni.Containers))) + "  " + kv("running", fmt.Sprint(len(ni.Images)-len(nonRunning))) + "  " + kv("non-running", fmt.Sprintf("%d (%s)", len(nonRunning), humanBytes(float64(nb)))) + "  " + kv("dangling", fmt.Sprintf("%d (%s)", len(dangling), humanBytes(float64(db)))))
+	add(styleDim.Render("running = used by a running container or the pod sandbox (pause) image; non-running = nothing running uses it; dangling = non-running and untagged (what crictl rmi --prune removes)"))
 
 	if len(ni.Tarballs) > 0 {
 		add("", styleTitle.Render("Airgap image tarballs"))
@@ -1416,20 +1428,20 @@ func (a *App) imagesDetail(node string) (string, []string) {
 			}
 			sort.Strings(t.Images)
 			for _, im := range t.Images {
-				mark := styleDim.Render("  idle    ")
+				mark := styleDim.Render("  non-running ")
 				if running[normImage(im)] {
-					mark = styleOK.Render("  running ")
+					mark = styleOK.Render("  running     ")
 				}
 				add(mark + im)
 			}
 		}
 	}
-	sort.Slice(unused, func(i, j int) bool { return unused[i].Size > unused[j].Size })
-	add("", styleTitle.Render("Unused images (largest first)"))
-	if len(unused) == 0 {
+	sort.Slice(nonRunning, func(i, j int) bool { return nonRunning[i].Size > nonRunning[j].Size })
+	add("", styleTitle.Render("Non-running images (largest first)"))
+	if len(nonRunning) == 0 {
 		add(styleDim.Render("  none"))
 	}
-	for _, im := range unused {
+	for _, im := range nonRunning {
 		tag := strings.Join(im.Tags, ",")
 		if tag == "" {
 			tag = styleDim.Render("<none> " + trunc(im.ID, 20))

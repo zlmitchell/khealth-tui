@@ -99,4 +99,4 @@ thresholds:
   etcd_db_warn_pct: 80            # db size as % of quota-backend-bytes
   etcd_fsync_warn_ms: 10
   etcd_frag_warn_pct: 50          # (db size - in use) / db size
-  unused_images_gb: 5
+  unused_images_gb: 5            # dangling (non-running and untagged) images above this many GB on a node are an info finding

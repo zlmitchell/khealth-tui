@@ -338,8 +338,8 @@ func Evaluate(in Input) []Finding {
 			// a node ends up unable to start a pod it used to run
 			dangling, bytes := ni.DanglingImages()
 			if float64(bytes)/1e9 >= thr.UnusedImagesGB {
-				unused, ub := ni.UnusedImages()
-				add(SevInfo, "images", name, fmt.Sprintf("%d dangling images (%.1f GB): no tag and no container, left by a rebuild or retag; %d images in total are not running (%.1f GB), which on an airgapped node is usually deliberate", len(dangling), float64(bytes)/1e9, len(unused), float64(ub)/1e9), "crictl rmi --prune removes the untagged ones; check the tagged-but-idle images against your airgap tarballs before touching them")
+				nonRunning, nb := ni.NonRunningImages()
+				add(SevInfo, "images", name, fmt.Sprintf("%d dangling images (%.1f GB): no tag and no container, left by a rebuild or retag; %d images in total are non-running (%.1f GB), which on an airgapped node is usually deliberate", len(dangling), float64(bytes)/1e9, len(nonRunning), float64(nb)/1e9), "crictl rmi --prune removes the untagged ones; check the tagged non-running images against your airgap tarballs before touching them")
 			}
 		}
 	}
@@ -617,6 +617,12 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 		if k8s.IsEtcdNode(s.Nodes, &s.Nodes[i]) {
 			etcdNodes++
 		}
+	}
+	if ds := k8s.Datastore(s.Nodes); etcdNodes == 0 && ds != "" {
+		// k3s without --cluster-init: no etcd, so no etcd findings; the
+		// datastore still needs a backup and is a single point of failure
+		add(SevInfo, "etcd", "datastore", "no etcd: k3s keeps the cluster state in "+ds, "back up /var/lib/rancher/k3s/server/db/ (or the external database); restart the server with --cluster-init to move to embedded etcd and add servers for HA")
+		return
 	}
 	if etcdNodes > 0 && etcdNodes%2 == 0 {
 		add(SevWarn, "etcd", "cluster", fmt.Sprintf("%d etcd nodes (even number gives no extra fault tolerance)", etcdNodes), "use 1, 3 or 5")
