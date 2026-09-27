@@ -48,7 +48,57 @@ AUDIT_POLICY=$(cfgarg kube-apiserver-arg audit-policy-file); [ -n "$AUDIT_POLICY
 AUTHN_WEBHOOK=$(cfgarg kube-apiserver-arg authentication-token-webhook-config-file)
 # secrets in YAML lines (quoted keys included) and, should JSON ever reach
 # it unconverted, in "key":"value" pairs anywhere on the line
-mask() { sed -E 's/^([[:space:]]*"?(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)"?[[:space:]]*:).*/\1 <masked>/; s/"(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/"\1":"<masked>"/g' "$1"; }
+mask() { sed -E 's/^([[:space:]]*"?(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)"?[[:space:]]*:).*/\1 <masked>/; s/"(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/"\1":"<masked>"/g; s/([{,][[:space:]]*(token|agent-token|password|secret-key|access-key|accessKey|secretKey|etcd-s3-access-key|etcd-s3-secret-key)[[:space:]]*:[[:space:]]*)[^,}]+/\1<masked>/g' "$1"; }
+# scrublog: filter for journal and log lines. When the kubelet cannot start
+# a container it logs the whole spec as a Go struct, env values included
+# (EnvVar{Name:DB_PASSWORD,Value:...,ValueFrom:nil,}); every such value is
+# masked, whatever the variable's name - it has no diagnostic worth.
+scrublog() { sed -E 's/(EnvVar\{Name:[^,]*,Value:)([^,]|,[^V]|,V[^a])*,ValueFrom:/\1<masked>,ValueFrom:/g'; }
+# maskmanifest: mask for Kubernetes manifests (server/manifests is where
+# operators keep Secrets and chart values): every Secret's data/stringData
+# values - block or flow style -, the value of env entries whose name looks
+# like a credential, then mask's key rules. Documents are buffered so a
+# Secret is recognized whatever order its keys come in.
+maskmanifest() {
+  awk '
+    function cred(s) { s = tolower(s); return s ~ /(pass|secret|token|key|cred|auth|private)/ }
+    function flush(   i, l, k, blk, ind) {
+      blk = 0
+      for (i = 1; i <= n; i++) {
+        l = buf[i]
+        if (secret) {
+          if (blk && l ~ /^[[:space:]]+[^[:space:]]/ ) {
+            k = l; sub(/:.*/, "", k); print k ": <masked>"; continue
+          }
+          blk = 0
+          if (l ~ /^(data|stringData):[[:space:]]*[{]/) { k = l; sub(/:.*/, "", k); print k ": {<masked>}"; continue }
+          if (l ~ /^(data|stringData):[[:space:]]*$/) { print l; blk = 1; continue }
+        }
+        print l
+      }
+      n = 0; secret = 0
+    }
+    /^---/ { flush(); print; next }
+    {
+      l = $0
+      if (l ~ /^kind:[[:space:]]*"?Secret"?[[:space:]]*$/) secret = 1
+      # flow env entry: {name: DB_PASSWORD, value: x}
+      if (match(l, /name:[[:space:]]*"?[A-Za-z0-9_.-]+"?[[:space:]]*,[[:space:]]*value:/)) {
+        nm = substr(l, RSTART, RLENGTH); sub(/^name:[[:space:]]*"?/, "", nm); sub(/"?[[:space:]]*,.*/, "", nm)
+        if (cred(nm)) sub(/value:[[:space:]]*[^,}]+/, "value: <masked>", l)
+      }
+      # block env entry: - name: DB_PASSWORD / value: x on the next line
+      if (pend && l ~ /^[[:space:]]*value:/) { sub(/value:.*/, "value: <masked>", l) }
+      pend = 0
+      if (l ~ /^[[:space:]]*-?[[:space:]]*name:[[:space:]]*/ && l !~ /value:/) {
+        nm = l; sub(/^[[:space:]]*-?[[:space:]]*name:[[:space:]]*"?/, "", nm); sub(/"?[[:space:]]*$/, "", nm)
+        if (cred(nm)) pend = 1
+      }
+      buf[++n] = l
+    }
+    END { flush() }
+  ' "$1" | mask /dev/stdin
+}
 maskreg() { sed -E 's/^([[:space:]]*"?(password|username|token|auth|identitytoken)"?[[:space:]]*:).*/\1 <masked>/; s/"(password|username|token|auth|identitytoken)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/"\1":"<masked>"/g' "$1"; }
 # crictl and the CRI socket: rke2 ships its own binary, k3s wraps it, kubeadm
 # nodes have the distro package. Used by the heavy tier (images, containers),
@@ -249,7 +299,7 @@ for d in "$RKE2_DD/server/manifests" "$K3S_DD/server/manifests"; do
     echo "--- $f|$sz|$mt|$kinds"
     if [ "${sz:-0}" -le 65536 ] && ! grep -q 'chartContent:' "$f" 2>/dev/null; then
       jsonnote "$f"
-      asyaml "$f" | mask /dev/stdin
+      asyaml "$f" | maskmanifest /dev/stdin
     else
       echo "(content omitted: bundled chart tarball / >64KB)"
     fi

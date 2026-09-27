@@ -64,8 +64,10 @@ put() { n=$1; shift; prep "$n" || return 0; $TO "$@" 2>&1 | capt "$D/$n"; }
 # putf NAME FUNC...: a shell function's output (functions time out inside)
 putf() { n=$1; shift; prep "$n" || return 0; "$@" 2>&1 | capt "$D/$n"; }
 # copyf NAME SRC [CAP]: the tail of a file
-copyf() { [ -f "$2" ] || return 0; prep "$1" || return 0; capt "$D/$1" "${3:-$FILECAP}" < "$2"; }
-jctl() { $TO journalctl --no-pager -o short-iso-precise "$@" 2>/dev/null || $TO journalctl --no-pager -o short-iso "$@"; }
+# logs pass through scrublog (base.sh): the kubelet dumps container specs
+# with their env values into its errors
+copyf() { [ -f "$2" ] || return 0; prep "$1" || return 0; scrublog < "$2" | capt "$D/$1" "${3:-$FILECAP}"; }
+jctl() { { $TO journalctl --no-pager -o short-iso-precise "$@" 2>/dev/null || $TO journalctl --no-pager -o short-iso "$@"; } | scrublog; }
 # args of any flag naming a token or password, and TOKEN=/PASSWORD= env
 # lines (unit files, env files), on top of mask's YAML keys
 maskargs() { sed -E 's/(--?[A-Za-z0-9_-]*(token|password|secret)[A-Za-z0-9_-]*[= ])[^ ",]+/\1<masked>/Ig; s/^([A-Za-z0-9_]*(TOKEN|PASSWORD|SECRET)[A-Za-z0-9_]*=).*/\1<masked>/I'; }

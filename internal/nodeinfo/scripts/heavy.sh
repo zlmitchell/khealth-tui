@@ -51,13 +51,13 @@ done
 fi
 if [ "__JOURNAL__" = 1 ]; then
 sec JOURNAL
-journalctl --no-pager -o short-iso -q -n __LINES__ --since '__SINCE__' -u rke2-server -u rke2-agent -u k3s -u k3s-agent -u kubelet -u containerd -u rancher-system-agent -u etcd 2>/dev/null
+journalctl --no-pager -o short-iso -q -n __LINES__ --since '__SINCE__' -u rke2-server -u rke2-agent -u k3s -u k3s-agent -u kubelet -u containerd -u rancher-system-agent -u etcd 2>/dev/null | scrublog
 sec LOGFILES
 # rke2 runs the kubelet and containerd as child processes that log to files,
 # not to the journal: take the same tail as the journal so they classify alike
 for f in /var/lib/rancher/rke2/agent/logs/kubelet.log /var/lib/rancher/rke2/agent/containerd/containerd.log /var/lib/rancher/k3s/agent/containerd/containerd.log; do
   [ -f "$f" ] || continue
   echo "--- $f"
-  tail -n __LINES__ "$f" 2>/dev/null
+  tail -n __LINES__ "$f" 2>/dev/null | scrublog
 done
 fi
