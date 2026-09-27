@@ -13,12 +13,18 @@ import (
 
 func TestTabNeedsAndPinned(t *testing.T) {
 	a := testApp()
-	for tb, want := range map[tab]string{tabOverview: "", tabLogs: tierJournal, tabImages: tierImages, tabStorage: tierPV, tabRKE2: tierConfig, tabSecurity: tierConfig, tabEtcd: tierEtcdExec, tabAddons: tierImages} {
+	for tb, want := range map[tab]string{tabOverview: "", tabLogs: tierJournal, tabImages: tierImages, tabStorage: tierPV, tabRKE2: tierConfig, tabSecurity: tierConfig, tabEtcd: tierEtcdExec, tabIncidents: tierJournal} {
 		a.tab = tb
 		if got := a.tabNeeds().String(); got != want {
 			t.Errorf("tab %v needs %q, want %q", tb, got, want)
 		}
 	}
+	// the Addons view of the distribution tab shows the registry pull dry run
+	a.tab, a.sub[tabRKE2] = tabRKE2, 1
+	if got := a.tabNeeds().String(); got != "images+config" && got != "config+images" {
+		t.Errorf("Addons needs %q, want config and images", got)
+	}
+	a.sub[tabRKE2] = 0
 	a.tab = tabOverview
 	a.cfg.Collect.Always = []string{"journal", "PV "}
 	if got := a.wanted().String(); got != "journal+pv" {

@@ -1,0 +1,23 @@
+[Unit]
+Description=Lightweight Kubernetes (gatherlab)
+Documentation=https://k3s.io
+Wants=network-online.target
+After=network-online.target lab-setup.service
+Requires=lab-setup.service
+
+[Service]
+Type=notify
+# config: /etc/rancher/k3s/config.yaml, written by lab-setup.sh
+ExecStart=/usr/local/bin/k3s server
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

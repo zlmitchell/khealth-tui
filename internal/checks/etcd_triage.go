@@ -536,7 +536,10 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 		return f, true
 
 	// ---- everything is up but the member is unhealthy / not joined ----
-	case t.known && !t.healthy, t.member == nil:
+	// (not a member only when there is a member list to be missing from:
+	// without one - k3s before the gRPC probe, a probe that failed - a
+	// node whose /health answers is not "unhealthy")
+	case t.known && !t.healthy, t.member == nil && q.haveMembers, t.member == nil && !t.known:
 		if q.lost && cause == "" {
 			// the cluster finding carries the recovery; a per-node entry
 			// without a node-specific cause would only repeat it

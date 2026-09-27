@@ -162,7 +162,7 @@ func (a *App) rke2Content() content {
 		}
 	}
 	if rancher {
-		hdr = append(hdr, kv("bundled HelmCharts", fmt.Sprintf("%d (%d with HelmChartConfig overrides, %s)", len(s.HelmCharts), overrides, colorCount(failed, "failed", styleCrit)))+"  "+kv(voc.Name+" settings on nodes", "see table; Addons tab shows registries/CNI"))
+		hdr = append(hdr, kv("bundled HelmCharts", fmt.Sprintf("%d (%d with HelmChartConfig overrides, %s)", len(s.HelmCharts), overrides, colorCount(failed, "failed", styleCrit)))+"  "+kv(voc.Name+" settings on nodes", "see table; the Addons view (l) shows registries/CNI"))
 	}
 
 	hdr = append(hdr, "", styleTitle.Render("Control-plane isolation")+styleDim.Render("  user pods = non-system namespaces excluding DaemonSets; CP requests = requests set on apiserver/etcd/scheduler/controller static pods"))

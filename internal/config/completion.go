@@ -222,19 +222,20 @@ func InstallCompletion(shell string) (string, error) {
 // ones Load and the SSH runner accept, so completion cannot offer a value
 // that is then rejected.
 var flagValues = map[string][]string{
-	"become":      {"auto", "sudo", "dzdo", "doas", "none"},
-	"theme":       {"auto", "light", "dark"},
-	"ssh-address": {"InternalIP", "ExternalIP", "Hostname"},
-	"completions": {"bash", "zsh", "fish"},
-	"ssh-port":    {"22"},
-	"refresh":     {"10s", "30s", "1m", "5m"},
+	"become":       {"auto", "sudo", "dzdo", "doas", "none"},
+	"theme":        {"auto", "light", "dark"},
+	"ssh-address":  {"InternalIP", "ExternalIP", "Hostname"},
+	"completions":  {"bash", "zsh", "fish"},
+	"ssh-port":     {"22"},
+	"refresh":      {"10s", "30s", "1m", "5m"},
+	"gather-since": {"1h", "6h", "24h", "72h"},
 }
 
 // pathFlags take a file; dirFlags take a directory. The shell completes
 // both (FilesSentinel / DirsSentinel).
 var pathFlags = map[string]bool{
 	"config": true, "kubeconfig": true, "ssh-key": true, "perf-log": true,
-	"export": true, "bootstrap-out": true, "bootstrap-kubeconfig": true,
+	"export": true, "gather": true, "analyze": true, "timeline": true, "bootstrap-out": true, "bootstrap-kubeconfig": true,
 }
 var dirFlags = map[string]bool{"export-dir": true}
 

@@ -1,21 +1,34 @@
-# gitleaks configuration: the default rules plus allowlists for known
-# non-secrets. CI scans the git history (`gitleaks git`); locally, `gitleaks
-# dir .` also walks the gitignored lab directories, hence the path entries.
+# gitleaks configuration: the default rules plus one allowlist of known
+# non-secrets. CI scans the git history (gitleaks-action, gitleaks 8.24);
+# locally, `gitleaks dir .` also walks the gitignored lab directories,
+# hence the path entries.
+#
+# One [allowlist] table on purpose: the [[allowlists]] array arrived in
+# gitleaks 8.25, and the 8.24 that gitleaks-action runs ignores it without
+# a word - every entry below then stops applying in CI while a newer local
+# gitleaks still passes. A path or a regex match allowlists a finding.
 title = "khealth-tui"
 
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "gitignored lab material (vagrant keys, hardening playbooks) and build output"
+[allowlist]
+description = "known non-secrets"
 paths = [
+  # gitignored lab material (vagrant keys, hardening playbooks) and build output
   '''^vagrant/''',
   '''^hardening/''',
   '''^dist/''',
+  # tests: fixtures are fake data by design (component flags such as
+  # --profiling=true trip generic-api-key, redaction tests carry planted
+  # secrets); test/gatherlab plants secrets the lab checks never reach a
+  # bundle and keeps its throwaway SSH key and kubeconfig under the
+  # gitignored out/
+  '''^test/''',
+  '''_test\.go$''',
 ]
-
-[[allowlists]]
-description = "the OS STIG probe greps for the GRUB password prefix; the literal is the pattern, not a hash"
+# the OS STIG probe greps for the GRUB password prefix; the literal is the
+# pattern, not a hash
 regexTarget = "match"
 regexes = [
   '''GRUB2_PASSWORD=grub\.pbkdf2\.sha512''',

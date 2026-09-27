@@ -9,6 +9,7 @@ khealth --helm-updates=false              # skip the chart update check (on by d
 khealth --ssh-user admin --ask-pass       # prompt for a password used when keys fail (and for sudo)
 khealth root@10.0.0.11                   # no kubeconfig yet: fetch the admin kubeconfig over SSH from a server node (below)
 khealth --export ./reports --export-scan  # no TUI: one collection cycle + the security scan, JSON + XLSX written, exit
+khealth --gather ./bundles                # no TUI: log bundle of the cluster for root-cause analysis (GATHER.md)
 ```
 
 Shell completion: `khealth --install-completions` writes the stub where bash (or `zsh` / `fish`) looks for it;

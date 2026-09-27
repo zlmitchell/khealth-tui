@@ -49,12 +49,16 @@ func (a *App) exportDir() string {
 }
 
 // exportReport writes the report in the chosen format(s) and says where.
-func (a *App) exportReport(json, xlsx bool) {
+func (a *App) exportReport(json, xlsx, md bool) {
 	if a.snap == nil {
 		a.setStatus("nothing to export yet: waiting for the first snapshot")
 		return
 	}
-	paths, err := export.WriteFormats(a.cfg.Export.Dir, export.Build(a.exportInput()), json, xlsx)
+	if md && !json && !xlsx && !a.secScanned {
+		a.setStatus("no fix list yet: run the security scan first (Shift+S on the Security tab)")
+		return
+	}
+	paths, err := export.WriteFormats(a.cfg.Export.Dir, export.Build(a.exportInput()), json, xlsx, md)
 	if err != nil {
 		a.setStatus("export failed: " + err.Error())
 		return
@@ -73,7 +77,8 @@ func (a *App) renderExportPrompt() (string, []string) {
 		styleBold.Render("Write the findings report to " + a.exportDir()),
 		"",
 		"  " + styleKey.Render("j") + "  " + export.FileBase(r) + ".json  " + styleDim.Render("(findings, resolved, security benchmarks, nodes - for diffing and alerting)"),
-		"  " + styleKey.Render("x") + "  " + export.FileBase(r) + ".xlsx  " + styleDim.Render("(Summary, Findings, one sheet per benchmark, Nodes)"),
+		"  " + styleKey.Render("x") + "  " + export.FileBase(r) + ".xlsx  " + styleDim.Render("(Summary, Findings, Fix list, one sheet per benchmark, Nodes)"),
+		"  " + styleKey.Render("m") + "  " + export.FileBase(r) + "-fixes.md  " + styleDim.Render("(the security scan's fix list as a markdown checklist, grouped by file / object)"),
 		"  " + styleKey.Render("b") + "  both",
 		"",
 		styleDim.Render("Nothing is re-collected: the report is what the screen shows. ") + styleKey.Render("esc") + styleDim.Render(" cancels."),

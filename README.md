@@ -41,7 +41,7 @@ https://github.com/user-attachments/assets/ec4e8438-a6a4-43bc-9202-92bfdc07e1b2
 - `7` **Addons** - CNI + MTU + node-side network probes, CoreDNS/ingress/metrics-server, Rancher agents, `registries.yaml` vs containerd, upgrade plans, provisioned clusters
 - `8` **Helm** - releases from `sh.helm.release.v1` secrets, values, history, update check; `u` upgrade (helm, or your HelmChart CR's `spec.version`), `b` rollback, `B` roll a failed release back to the last deployed revision
 - `9` **Images** - per node: images, what is not running, dangling (untagged) images, airgap tarballs vs what is running
-- `0` **Security** - opt-in scan (`Shift+S`): Kubernetes / RKE2 / Rancher MCM STIG, CIS, node hardening, full OS STIG per node
+- `0` **Security** - opt-in scan (`Shift+S`): Kubernetes / RKE2 / Rancher MCM STIG, CIS, node hardening, full OS STIG per node, and a fix list grouped by the file or Kubernetes object each fix changes
 - `=` **RKE2** - control-plane isolation, `config.yaml(.d)` per node, manifests, config drift between servers
 - `-` **Logs** - rke2/kubelet/containerd journal classified into noise / warnings / errors with explanations
 
@@ -72,6 +72,10 @@ khealth --ssh-user admin --ask-pass       # prompt for a password used when keys
 khealth root@10.0.0.11                    # no kubeconfig yet: fetch the admin kubeconfig over SSH from a server node
 khealth --theme light                     # a light terminal that does not answer the background query (Windows never does)
 khealth --export ./reports --export-scan  # no TUI: one cycle + the security scan, JSON + XLSX, exit
+khealth --gather ./bundles                # no TUI: log bundle for root-cause analysis (docs/GATHER.md)
+khealth --gather . --gather-workload shop/deploy/web  # one workload: all its pods' logs, its namespace, its nodes
+khealth --analyze bundle.tar.gz           # no cluster: probable root causes, incidents, timeline and findings of a bundle
+khealth --analyze bundle.tar.gz --tui     # the bundle in the TUI: every tab, the Incidents tab first (who caused an eviction, traffic, node shape)
 ```
 
 - **no kubeconfig?** `khealth [user@]server` fetches `rke2.yaml` / `k3s.yaml` / `admin.conf` and rewrites the endpoint to one the apiserver cert is valid for; run with nothing and it lists the clusters it already knows
@@ -89,7 +93,7 @@ khealth --export ./reports --export-scan  # no TUI: one cycle + the security sca
 - [RUNNING.md](docs/RUNNING.md) - kubeconfig bootstrap, config file, cluster menu, SSH auth and `become`, RBAC, collection tiers
 - [ETCD.md](docs/ETCD.md) - triage cases, the rescue overview, S3 snapshots, how etcd is discovered per layout
 - [RESCUE.md](docs/RESCUE.md) - every step, command and check of `X`: rejoin one server, restore a snapshot; what was learned on real clusters
-- [SECURITY.md](docs/SECURITY.md) - STIG / CIS releases applied, scores, running the OS STIG scan
+- [SECURITY.md](docs/SECURITY.md) - STIG / CIS releases applied, scores, running the OS STIG scan, the fix list
 - [STIG.md](docs/STIG.md) - where the rules come from, how the OS tables are generated, adding rules
 - [SUPPORT.md](docs/SUPPORT.md) - support matrix: what was run against a real cluster vs built from schemas
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) - the update loop, tab-driven collection, repository layout

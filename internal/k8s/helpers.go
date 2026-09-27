@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -37,8 +38,11 @@ func IsControlPlane(n *corev1.Node) bool {
 	return false
 }
 
-// IsEtcdNode reports whether the node is expected to run etcd. rke2 labels
-// etcd nodes explicitly; upstream clusters use control-plane nodes.
+// IsEtcdNode reports whether the node is expected to run etcd. rke2 and
+// k3s label every etcd node, so on those the label is the whole answer: a
+// k3s server without the label keeps its state in SQLite or an external
+// database (Datastore), not etcd. Upstream clusters run etcd on the
+// control-plane nodes.
 func IsEtcdNode(nodes []corev1.Node, n *corev1.Node) bool {
 	hasEtcdLabel := false
 	for i := range nodes {
@@ -51,7 +55,60 @@ func IsEtcdNode(nodes []corev1.Node, n *corev1.Node) bool {
 		_, ok := n.Labels["node-role.kubernetes.io/etcd"]
 		return ok
 	}
+	if rancherNodes(nodes) {
+		return false
+	}
 	return IsControlPlane(n)
+}
+
+func rancherNodes(nodes []corev1.Node) bool {
+	for i := range nodes {
+		a := nodes[i].Annotations
+		if _, ok := a["k3s.io/node-args"]; ok {
+			return true
+		}
+		if _, ok := a["rke2.io/node-args"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Datastore names where a k3s cluster without etcd keeps its state: SQLite
+// through kine on a single server (the default without --cluster-init),
+// or the database --datastore-endpoint names (its scheme only, never the
+// credentials in the URL). "" when the cluster runs etcd or is not k3s.
+func Datastore(nodes []corev1.Node) string {
+	for i := range nodes {
+		if _, ok := nodes[i].Labels["node-role.kubernetes.io/etcd"]; ok {
+			return ""
+		}
+	}
+	for i := range nodes {
+		raw, ok := nodes[i].Annotations["k3s.io/node-args"]
+		if !ok {
+			continue
+		}
+		var args []string
+		_ = json.Unmarshal([]byte(raw), &args)
+		for j, a := range args {
+			v, found := strings.CutPrefix(a, "--datastore-endpoint=")
+			if !found && a == "--datastore-endpoint" && j+1 < len(args) {
+				v, found = args[j+1], true
+			}
+			if found {
+				scheme, _, ok := strings.Cut(v, "://")
+				if !ok {
+					return "an external datastore (kine)"
+				}
+				return "an external " + scheme + " datastore (kine)"
+			}
+		}
+		if IsControlPlane(&nodes[i]) {
+			return "SQLite (kine) on " + nodes[i].Name
+		}
+	}
+	return ""
 }
 
 // NodeAddress picks an address of the given type, with fallbacks.
@@ -458,4 +515,23 @@ func (s *Snapshot) ControlPlaneIsolation() []CPIsolation {
 		out = append(out, iso)
 	}
 	return out
+}
+
+// IngressController names the ingress controller or proxy a pod runs
+// (ingress-nginx, traefik, envoy for Istio / Envoy Gateway), "" for any
+// other pod. Their access logs are the traffic view of a log bundle.
+func IngressController(p *corev1.Pod) string {
+	if strings.HasPrefix(p.Name, "svclb-") {
+		return "" // k3s's ServiceLB forwarder in front of a LoadBalancer Service, not the proxy
+	}
+	id := p.Labels["app.kubernetes.io/name"] + " " + p.Labels["app"] + " " + p.Name
+	switch {
+	case strings.Contains(id, "ingress-nginx"):
+		return "ingress-nginx"
+	case strings.Contains(id, "traefik"):
+		return "traefik"
+	case strings.Contains(id, "istio-ingressgateway") || strings.Contains(id, "envoy") || (p.Labels["istio"] != "" && strings.Contains(id, "gateway")):
+		return "envoy"
+	}
+	return ""
 }

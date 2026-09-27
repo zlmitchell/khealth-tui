@@ -25,11 +25,14 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/zlmitchell/khealth-tui/internal/bootstrap"
+	"github.com/zlmitchell/khealth-tui/internal/checks"
 	"github.com/zlmitchell/khealth-tui/internal/config"
 	"github.com/zlmitchell/khealth-tui/internal/etcd"
 	"github.com/zlmitchell/khealth-tui/internal/export"
+	"github.com/zlmitchell/khealth-tui/internal/gather"
 	"github.com/zlmitchell/khealth-tui/internal/headless"
 	"github.com/zlmitchell/khealth-tui/internal/k8s"
+	"github.com/zlmitchell/khealth-tui/internal/rca"
 	"github.com/zlmitchell/khealth-tui/internal/sshrun"
 	"github.com/zlmitchell/khealth-tui/internal/termtheme"
 	"github.com/zlmitchell/khealth-tui/internal/ui"
@@ -43,6 +46,14 @@ func main() {
 	}
 	k8s.SetSystemNamespaces(cfg.Namespaces.System)
 	k8s.SetCNINames(cfg.Namespaces.CNI)
+	if cfg.Analyze != "" {
+		// a bundle stands in for the cluster: no kubeconfig, no SSH
+		if err := analyzeOnce(cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if cfg.Diag {
 		client, err := k8s.New(cfg.Kubeconfig, cfg.Context)
 		if err != nil {
@@ -92,6 +103,13 @@ func main() {
 	// top of the alt-screen; silence it while the TUI owns the terminal.
 	klog.SetOutput(io.Discard)
 	klog.LogToStderr(false)
+	if cfg.Gather.Out != "" {
+		if err := gatherOnce(cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if cfg.Export.Out != "" {
 		if err := exportOnce(cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -103,17 +121,7 @@ func main() {
 		// go tool pprof http://<addr>/debug/pprof/profile?seconds=30
 		go func() { _ = http.ListenAndServe(cfg.Perf.Pprof, nil) }()
 	}
-	// Settle light/dark before bubbletea owns the terminal. Left to lipgloss,
-	// the background query runs on the first render, while bubbletea reads
-	// stdin, and loses the reply; on Windows termenv never asks at all.
-	switch cfg.Theme {
-	case "light":
-		lipgloss.SetHasDarkBackground(false)
-	case "dark":
-		lipgloss.SetHasDarkBackground(true)
-	default:
-		lipgloss.SetHasDarkBackground(termtheme.Dark())
-	}
+	setTheme(cfg)
 	app, err := ui.New(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -145,7 +153,30 @@ func exportOnce(cfg config.Config) error {
 		return err
 	}
 	rep := export.Build(export.Input{Snap: res.Snap, Nodes: res.Input.Nodes, Findings: res.Findings, Stig: res.Stig, StigRun: cfg.Export.Scan, Context: res.Client.Context, Server: res.Client.Host, Version: config.Version, Now: time.Now()})
-	out := cfg.Export.Out
+	if err := writeReport(cfg.Export.Out, rep); err != nil {
+		return err
+	}
+	fmt.Printf("%d nodes, %d findings (%d crit, %d warn, %d info)", rep.Cluster.Nodes, len(rep.Findings), rep.Summary.Crit, rep.Summary.Warn, rep.Summary.Info)
+	if rep.Security != nil {
+		fmt.Printf(", %d benchmarks: ", len(rep.Security.Benchmarks))
+		for i, b := range rep.Security.Benchmarks {
+			if i > 0 {
+				fmt.Print(", ")
+			}
+			score := "n/a"
+			if b.Score != nil {
+				score = fmt.Sprintf("%.1f%%", *b.Score)
+			}
+			fmt.Printf("%s %s (%d rules)", b.Sheet, score, len(b.Rules))
+		}
+	}
+	fmt.Println()
+	return nil
+}
+
+// writeReport writes a findings report where --export points: .json, .xlsx
+// or .md alone, or a directory that gets the JSON and the XLSX.
+func writeReport(out string, rep *export.Report) error {
 	switch strings.ToLower(filepath.Ext(out)) {
 	case ".json":
 		f, err := os.Create(out)
@@ -165,6 +196,19 @@ func exportOnce(cfg config.Config) error {
 			return err
 		}
 		fmt.Println("wrote", out)
+	case ".md":
+		f, err := os.Create(out)
+		if err != nil {
+			return err
+		}
+		if err := export.WriteMarkdown(f, rep); err != nil {
+			f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		fmt.Println("wrote", out)
 	default:
 		jsonPath, xlsxPath, err := export.WriteFiles(out, rep)
 		if err != nil {
@@ -173,21 +217,173 @@ func exportOnce(cfg config.Config) error {
 		fmt.Println("wrote", jsonPath)
 		fmt.Println("wrote", xlsxPath)
 	}
-	fmt.Printf("%d nodes, %d findings (%d crit, %d warn, %d info)", rep.Cluster.Nodes, len(rep.Findings), rep.Summary.Crit, rep.Summary.Warn, rep.Summary.Info)
-	if rep.Security != nil {
-		fmt.Printf(", %d benchmarks: ", len(rep.Security.Benchmarks))
-		for i, b := range rep.Security.Benchmarks {
-			if i > 0 {
-				fmt.Print(", ")
+	return nil
+}
+
+// setTheme settles light/dark before bubbletea owns the terminal. Left to
+// lipgloss, the background query runs on the first render, while
+// bubbletea reads stdin, and loses the reply; on Windows termenv never asks
+// at all.
+func setTheme(cfg config.Config) {
+	switch cfg.Theme {
+	case "light":
+		lipgloss.SetHasDarkBackground(false)
+	case "dark":
+		lipgloss.SetHasDarkBackground(true)
+	default:
+		lipgloss.SetHasDarkBackground(termtheme.Dark())
+	}
+}
+
+// analyzeOnce is --analyze: the findings of a log bundle, recomputed
+// offline as of when it was gathered.
+func analyzeOnce(cfg config.Config) error {
+	b, err := gather.Open(cfg.Analyze)
+	if err != nil {
+		return err
+	}
+	defer b.Close()
+	r, err := b.Replay(cfg)
+	if err != nil {
+		return err
+	}
+	m := b.Manifest
+	fmt.Printf("bundle %s (%s), gathered %s by %s\n", m.Context, m.Server, m.Created.Local().Format("2006-01-02 15:04 MST"), m.Tool)
+	scope := m.Scope
+	if m.Workload != nil {
+		scope += fmt.Sprintf(" %s/%s %s", m.Workload.Namespace, strings.ToLower(m.Workload.Kind), m.Workload.Name)
+	}
+	ok := 0
+	for _, n := range m.Nodes {
+		if n.Logs == "ok" {
+			ok++
+		}
+	}
+	fmt.Printf("%s %s, scope %s, window %s, API reachable %v, node logs %d/%d\n", m.Distribution, m.K8sVersion, scope, m.Since, m.APIReachable, ok, len(m.Nodes))
+	for _, n := range r.Notes {
+		fmt.Println("note:", n)
+	}
+	tl := rca.Build(b, r)
+	if cfg.AnalyzeTUI {
+		klog.SetOutput(io.Discard)
+		klog.LogToStderr(false)
+		setTheme(cfg)
+		app := ui.NewOffline(cfg, &ui.Offline{Bundle: b, Replayed: r, Timeline: tl, Source: rca.NewBundleSource(b, r)})
+		_, err := tea.NewProgram(app, tea.WithAltScreen()).Run()
+		return err
+	}
+	incidents := rca.Extract(tl, r.Snap)
+	if cfg.Incident != "" {
+		for _, in := range incidents {
+			if in.ID == cfg.Incident {
+				fmt.Println()
+				rca.WriteContext(os.Stdout, in.Context(rca.NewBundleSource(b, r), tl, incidents, rca.DefaultWindow))
+				return nil
 			}
-			score := "n/a"
-			if b.Score != nil {
-				score = fmt.Sprintf("%.1f%%", *b.Score)
+		}
+		fmt.Println()
+		rca.WriteIncidents(os.Stdout, incidents)
+		return fmt.Errorf("no incident %q in the bundle (the list is above)", cfg.Incident)
+	}
+	fmt.Println()
+	rca.WriteReport(os.Stdout, rca.Analyze(rca.NewBundleSource(b, r), tl), tl, 60)
+	fmt.Println()
+	rca.WriteIncidents(os.Stdout, incidents)
+	if cfg.Timeline != "" {
+		f, err := os.Create(cfg.Timeline)
+		if err != nil {
+			return err
+		}
+		err = rca.WriteTimeline(f, tl, strings.HasSuffix(cfg.Timeline, ".jsonl"))
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "wrote", cfg.Timeline)
+	}
+	var crit, warn, info int
+	for _, f := range r.Findings {
+		switch f.Severity {
+		case checks.SevCrit:
+			crit++
+		case checks.SevWarn:
+			warn++
+		default:
+			info++
+		}
+	}
+	fmt.Printf("\n%d findings (%d crit, %d warn, %d info)", len(r.Findings), crit, warn, info)
+	if r.AtGather != nil {
+		onlyNow, onlyThen := r.Diff()
+		if len(onlyNow)+len(onlyThen) == 0 {
+			fmt.Print(", the same as at gather time")
+		} else {
+			fmt.Printf(", %d at gather time; differences (+ now only, - then only):", len(r.AtGather))
+			for _, k := range onlyNow {
+				fmt.Print("\n  + ", k)
 			}
-			fmt.Printf("%s %s (%d rules)", b.Sheet, score, len(b.Rules))
+			for _, k := range onlyThen {
+				fmt.Print("\n  - ", k)
+			}
 		}
 	}
 	fmt.Println()
+	for _, f := range r.Findings {
+		obj := f.Object
+		if obj == "" {
+			obj = "-"
+		}
+		fmt.Printf("%-4s %-9s %s: %s\n", f.Severity, f.Area, obj, f.Message)
+	}
+	if cfg.Export.Out != "" {
+		rep := export.Build(export.Input{Snap: r.Snap, Nodes: r.Input.Nodes, Findings: r.Findings, Context: m.Context, Server: m.Server, Version: config.Version, Now: m.Created})
+		return writeReport(cfg.Export.Out, rep)
+	}
+	return nil
+}
+
+// gatherOnce is --gather: the log bundle for a root-cause analysis, no TUI.
+func gatherOnce(cfg config.Config) error {
+	scope := "cluster"
+	if cfg.Gather.Workload != "" {
+		scope = "workload " + cfg.Gather.Workload
+	}
+	fmt.Fprintf(os.Stderr, "gathering a log bundle (%s, last %s) ...\n", scope, cfg.Gather.Since)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	res, err := gather.Run(ctx, cfg, os.Stderr)
+	if err != nil {
+		return err
+	}
+	m := res.Manifest
+	ok := 0
+	for _, n := range m.Nodes {
+		if n.Logs == "ok" {
+			ok++
+		}
+	}
+	fmt.Printf("wrote %s (%.1f MiB)\n", res.Path, float64(res.Size)/(1<<20))
+	if !m.APIReachable {
+		why := "no nodes listed"
+		if len(m.APIErrors) > 0 {
+			why = m.APIErrors[0]
+		}
+		fmt.Printf("API server not usable (%s)\n", why)
+		if len(m.Nodes) == 0 {
+			fmt.Println("  and no node to reach over SSH: list the nodes under ssh.hosts in the config file (node name: address) and gather again")
+		}
+	}
+	fmt.Printf("%d/%d nodes, %d pod logs from %d pods, %d API types, %d findings, in %s\n", ok, len(m.Nodes), m.PodLogs.Containers, m.PodLogs.Pods, len(m.Resources), m.Findings, m.Duration)
+	for _, n := range m.Nodes {
+		if n.Logs != "ok" {
+			fmt.Printf("  %s: %s\n", n.Name, n.Logs)
+		} else if len(n.Skipped) > 0 {
+			fmt.Printf("  %s: %d items skipped past the node budget (--gather-node-mb)\n", n.Name, len(n.Skipped))
+		}
+	}
+	fmt.Println("secrets are masked (Secret/ConfigMap values, Helm values, credential-looking env and config keys); review before sending it outside your organisation")
 	return nil
 }
 

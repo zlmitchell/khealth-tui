@@ -35,7 +35,7 @@ func TestAddonsUpgradeSection(t *testing.T) {
 				{Name: "prod-cp-2-def", Node: "prod-cp-2", Phase: "Running", Version: "v1.35.8+rke2r1", Roles: []string{"control-plane", "etcd"}, Plan: &k8s.MachinePlan{HasPlan: true, Failing: true, Failures: 1, Probes: map[string]bool{"etcd": false}}},
 			}}},
 	}
-	a.tab = tabAddons
+	a.tab, a.sub[tabRKE2] = tabRKE2, 1 // the Addons view of the distribution tab
 	got := ansi.Strip(strings.Join(rowsText(a.currentContent()), "\n"))
 	for _, want := range []string{"Upgrade plans", "system-upgrade/rke2-server", "v1.35.9+rke2r1", "1: w-1", "applying on", "Provisioned clusters", "prod", "v1.35.8+rke2r1 -> v1.35.9", "1 in sync, 1 pending, 1 probes failing", "Reconciled: draining node prod-cp-2"} {
 		if !strings.Contains(got, want) {
@@ -58,9 +58,9 @@ func TestAddonsUpgradeSection(t *testing.T) {
 	}
 	// Enter on the plan row through the key handler
 	for a.selectedID() != "plan:system-upgrade/rke2-server" {
-		before := a.cursor[tabAddons]
+		before := a.cursor[tabRKE2]
 		a.move(1)
-		if a.cursor[tabAddons] == before {
+		if a.cursor[tabRKE2] == before {
 			t.Fatalf("no plan row; last id %q", a.selectedID())
 		}
 	}

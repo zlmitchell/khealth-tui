@@ -191,11 +191,13 @@ type osCheck struct {
 	title string
 	fix   string
 	eval  func(info *nodeinfo.Info) (Status, string)
+	// target is where the fix goes, when it is one file (checklist.go)
+	target *Target
 }
 
 // sysctlEq builds a check for a single kernel parameter value.
 func sysctlEq(key, param, want, id, title, cat string) osCheck {
-	return osCheck{key: key, id: id, cat: cat, title: title, fix: "sysctl -w " + param + "=" + want + " and persist in /etc/sysctl.d/", eval: func(info *nodeinfo.Info) (Status, string) {
+	return osCheck{key: key, id: id, cat: cat, title: title, fix: "sysctl -w " + param + "=" + want + " and persist in /etc/sysctl.d/", target: &Target{Kind: TargetFile, Name: "/etc/sysctl.d/", Change: param + " = " + want}, eval: func(info *nodeinfo.Info) (Status, string) {
 		v, ok := info.Sysctl[param]
 		if !ok || v == "" {
 			return Manual, param + " not collected (older probe or unsupported kernel)"
@@ -388,6 +390,9 @@ func (e *evaluator) osRules() {
 		if b == nil {
 			for _, c := range osChecks {
 				e.perNode(c.id, c.title, c.cat, g, c.fix, members, func(n string) (Status, string) { return c.eval(ni(n)) })
+				if c.target != nil {
+					e.out[len(e.out)-1].Targets = []Target{*c.target}
+				}
 			}
 			continue
 		}
@@ -403,6 +408,9 @@ func (e *evaluator) osRules() {
 				e.perNode(r.ID, c.title, r.Cat, g, c.fix, members, func(n string) (Status, string) { return c.eval(ni(n)) })
 				for i := start; i < len(e.out); i++ {
 					e.out[i].Ref = b.String()
+					if c.target != nil {
+						e.out[i].Targets = []Target{*c.target}
+					}
 				}
 			}
 			continue
@@ -412,7 +420,11 @@ func (e *evaluator) osRules() {
 			rule := rule
 			start := len(e.out)
 			fix := rule.Fix
+			targets := ruleTargets(rule)
 			if oc, ok := override[rule.VID]; ok {
+				if oc.target != nil {
+					targets = []Target{*oc.target}
+				}
 				fix = oc.fix + "\n\nSTIG: " + rule.Fix
 				e.perNode(rule.VID, rule.Title, rule.Cat, g, fix, members, func(n string) (Status, string) { return oc.eval(ni(n)) })
 			} else if templated(rule) {
@@ -432,6 +444,7 @@ func (e *evaluator) osRules() {
 				e.out[i].Ref = b.String()
 				e.out[i].RuleID = rule.STIGID
 				e.out[i].Check = rule.Check
+				e.out[i].Targets = targets
 			}
 		}
 	}

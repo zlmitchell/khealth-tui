@@ -111,6 +111,23 @@ A control-plane node gets two sessions per refresh (node + etcd probe), so on a 
 
 fork+exec itself is 2.7x slower on the FIPS + fapolicyd node (2.1 ms vs 0.8 ms per process): the light probe's ~40 processes cost 0.1 s there before they do anything, which is why the scripts avoid per-item loops that spawn (`systemctl show` once for all units, one `ls` of the `.wants` directories, awk instead of `stat` per file).
 
+## Analyzing a bundle (`--analyze`)
+
+`--analyze` runs locally and touches no cluster. Its cost grows with the log lines in the bundle. Measured with `KHT_PERF=1 go test -run TestPerfLargeBundle -v ./internal/rca` on a synthetic bundle (2026-09-26, 16 cores in the golang container):
+
+| Bundle | Stage | Time | Peak heap |
+|---|---|---|---|
+| 3 nodes × 250k journal lines, 3,000 pods, 20,000 events, 400 pod logs, 200k access-log lines (1.75M lines) | replay (checks) | 0.12 s | 65 MiB |
+| | timeline | 3.3 s | 60 MiB |
+| | probable causes / one incident's context | < 15 ms | < 50 MiB |
+| the same × 4 (7M lines) | timeline | 13.7 s | 221 MiB |
+
+What keeps it there:
+
+- **The log knowledge base prefilters.** Each pattern carries the literals any match must contain, derived from its regexp: adjacent exact parts are joined, so `Start(ing|ed) rke2-…` needs "started rke2-server" rather than "start". A line containing none of them skips the regexp. This took classification from about 260 µs to about 2 µs per line. A test runs every string literal of the repository's tests through both paths and fails if the prefilter ever hides a match.
+- **Files are streamed.** Only candidate lines become strings; the rest are counted and dropped without allocating. Pod logs are read by a worker pool.
+- **What remains** is the literal scan itself, about 200 literals per line. An Aho-Corasick automaton would make it independent of the pattern count; it is not needed at these sizes.
+
 ## Reading the numbers when troubleshooting
 
 - `remote CPU / refresh` is the steady-state share of one core the tool takes on a node. 0.5 s per 30 s is 1.7 %. If a node shows several seconds per cycle, look at which probe: `node+heavy` and the `stig:*` scan stages are expected to be large but rare; `node` should be well under a second.

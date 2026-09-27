@@ -185,10 +185,26 @@ if [ -z "$GW" ]; then
 fi
 if [ -n "$GW" ] && command -v curl >/dev/null 2>&1; then
   # etcd gRPC gateway: same certs as /health, no etcdctl needed
-  echo "---MEMBERS"; $CURL -X POST "$EP/v3/cluster/member/list" -H 'Content-Type: application/json' -d '{}' 2>&1
-  echo; echo "---GWSTATUS"; $CURL -X POST "$EP/v3/maintenance/status" -H 'Content-Type: application/json' -d '{}' 2>&1
-  echo; echo "---GWALARMS"; $CURL -X POST "$EP/v3/maintenance/alarm" -H 'Content-Type: application/json' -d '{"action":"GET"}' 2>&1
-  echo
+  MEMBERS=$($CURL -X POST "$EP/v3/cluster/member/list" -H 'Content-Type: application/json' -d '{}' 2>&1)
+  case "$MEMBERS" in
+  "{"*)
+    echo "---MEMBERS"; echo "$MEMBERS"
+    echo; echo "---GWSTATUS"; $CURL -X POST "$EP/v3/maintenance/status" -H 'Content-Type: application/json' -d '{}' 2>&1
+    echo; echo "---GWALARMS"; $CURL -X POST "$EP/v3/maintenance/alarm" -H 'Content-Type: application/json' -d '{"action":"GET"}' 2>&1
+    echo
+    ;;
+  *)
+    # no JSON gateway (k3s's embedded etcd answers 415): speak gRPC itself,
+    # HTTP/2 with an empty request frame (5 zero bytes: an empty message
+    # is a MemberList/Status request, and an Alarm GET); the replies are
+    # protobuf, decoded on the Go side (etcd/grpc.go)
+    grpc() { printf '\000\000\000\000\000' | $CURL --http2 -X POST -H 'content-type: application/grpc' -H 'te: trailers' --data-binary @- "$EP/$1" 2>/dev/null | base64 | tr -d '\n'; }
+    echo "---GRPCMEMBERS"; grpc etcdserverpb.Cluster/MemberList
+    echo; echo "---GRPCSTATUS"; grpc etcdserverpb.Maintenance/Status
+    echo; echo "---GRPCALARMS"; grpc etcdserverpb.Maintenance/Alarm
+    echo
+    ;;
+  esac
 fi
 fi
 sec LEADERLOG
@@ -289,8 +305,15 @@ for unit in $(systemctl list-timers --all --no-pager --no-legend 2>/dev/null | a
   ex=$(systemctl show -p ExecStart "$svc" 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -1)
   args=$(systemctl show -p ExecStart "$svc" 2>/dev/null | sed -n 's/.*argv\[\]=\([^;]*\).*/\1/p' | head -1)
   env=$(systemctl show -p Environment "$svc" 2>/dev/null | sed 's/^Environment=//')
+  # a "backup" timer is an etcd backup only if its command says so: every
+  # Debian/Ubuntu node has dpkg-db-backup.timer, which is not
+  case "$unit" in
+  *etcd*) ;;
+  *) { printf '%s\n' "$args $env"; [ -n "$ex" ] && [ -r "$ex" ] && [ -f "$ex" ] && head -c 8000 "$ex"; } 2>/dev/null | grep -qiE 'etcdctl|etcdutl|etcd-snapshot|etcd.*snapshot|snapshot save' || continue ;;
+  esac
   when=$(systemctl list-timers --all --no-pager --no-legend 2>/dev/null | grep -F "$unit" | head -1 | sed 's/  */ /g')
-  cand=$(paths_in "$args $env")
+  # the command's own path is not where it writes
+  cand=$(paths_in "$args $env" | grep -vxF "${ex:-/nonexistent}")
   # the command is usually a wrapper: read it (bounded) for its own default
   if [ -n "$ex" ] && [ -r "$ex" ] && [ -f "$ex" ]; then
     cand="$cand $(paths_in "$(head -c 8000 "$ex" 2>/dev/null | grep -i 'snapshot save\|BACKUP_DIR=\|SNAPSHOT_DIR=')")"

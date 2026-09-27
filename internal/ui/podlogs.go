@@ -117,6 +117,11 @@ func (a *App) startLogStream() tea.Cmd {
 	lv.ch = ch
 	lv.streaming = true
 	container := lv.containers[lv.idx]
+	if a.offline != nil {
+		lv.streaming = false
+		a.offlineLogs(lv.ns, lv.pod, container, lv.previous, ch)
+		return waitLogs(ch, seq)
+	}
 	tail := int64(500)
 	opts := &corev1.PodLogOptions{Container: container, TailLines: &tail, Follow: lv.follow, Previous: lv.previous, Timestamps: true}
 	req := a.client.CS.CoreV1().Pods(lv.ns).GetLogs(lv.pod, opts)

@@ -48,7 +48,8 @@ func sampleInput() Input {
 		StigRun:  true,
 		Stig: []stig.Result{
 			{ID: "V-242376", Title: "TLS on the controller manager", Cat: "II", Group: "controller-manager", Status: stig.Pass, Detail: "--tls-min-version=VersionTLS12"},
-			{ID: "V-242378", Title: "TLS on the API server", Cat: "II", Group: "apiserver", Status: stig.Fail, Detail: "flag missing", Fix: "set --tls-min-version"},
+			{ID: "V-242378", Title: "TLS on the API server", Cat: "II", Group: "apiserver", Status: stig.Fail, Detail: "flag missing", Fix: "set --tls-min-version",
+				Targets: []stig.Target{{Kind: stig.TargetFile, Name: "/etc/rancher/rke2/config.yaml", Change: "kube-apiserver-arg: tls-min-version=VersionTLS12"}}},
 			{ID: "CIS-1.2.1", Title: "anonymous auth", Cat: "", Group: "apiserver", Status: stig.Manual, Detail: "review"},
 			{ID: "V-254555", Title: "rke2 profile", Cat: "I", Group: "cluster", Status: stig.NA},
 			{ID: "RHEL-09-211010", RuleID: "SV-257777r1", Ref: "DISA RHEL 9 STIG V2R9 (01 Jul 2026)", Title: "RHEL 9 must be a vendor-supported release", Cat: "I", Group: "os", Status: stig.Fail, Check: "cat /etc/redhat-release", PerNode: map[string]stig.Status{"cp-1": stig.Fail, "w-1": stig.Pass}},
@@ -157,12 +158,16 @@ func TestWriteFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if got := strings.Join(f.GetSheetList(), "|"); got != "Summary|Findings|Kubernetes STIG|RKE2 STIG|CIS Kubernetes|RHEL 9 STIG|Nodes" {
+	if got := strings.Join(f.GetSheetList(), "|"); got != "Summary|Findings|Fix list|Kubernetes STIG|RKE2 STIG|CIS Kubernetes|RHEL 9 STIG|Nodes" {
 		t.Errorf("sheets: %s", got)
 	}
 	rows, _ := f.GetRows("Findings")
 	if len(rows) != 5 || rows[0][0] != "severity" || rows[1][0] != "CRIT" || rows[1][1] != "ongoing" || rows[4][1] != "resolved" || rows[1][6] != "etcdctl defrag\ncompact" {
 		t.Errorf("findings rows: %v", rows)
+	}
+	rows, _ = f.GetRows("Fix list")
+	if len(rows) != 4 || rows[0][5] != "change" || rows[1][0] != "FAIL" || rows[1][4] != "/etc/rancher/rke2/config.yaml" || rows[1][5] != "kube-apiserver-arg: tls-min-version=VersionTLS12" {
+		t.Errorf("fix list rows: %v", rows)
 	}
 	rows, _ = f.GetRows("RHEL 9 STIG")
 	if len(rows) != 3 || rows[0][9] != "cp-1" || rows[0][10] != "w-1" || rows[1][9] != "FAIL" || rows[1][10] != "PASS" || rows[1][3] != "SV-257777r1" || rows[1][8] != "cat /etc/redhat-release" {
@@ -193,6 +198,42 @@ func TestWriteFiles(t *testing.T) {
 	}
 	if panes, err := f.GetPanes("Findings"); err != nil || !panes.Freeze || panes.YSplit != 1 {
 		t.Errorf("panes: %+v %v", panes, err)
+	}
+}
+
+func TestWriteMarkdown(t *testing.T) {
+	r := Build(sampleInput())
+	if len(r.Security.Checklist) != 2 || r.Security.Checklist[0].Target != "/etc/rancher/rke2/config.yaml" || r.Security.Checklist[1].Kind != "review" {
+		t.Fatalf("checklist: %+v", r.Security.Checklist)
+	}
+	var b bytes.Buffer
+	if err := WriteMarkdown(&b, r); err != nil {
+		t.Fatal(err)
+	}
+	md := b.String()
+	for _, want := range []string{
+		"# STIG / CIS fix list: prod/cluster:a (rke2 v1.35.8+rke2r1)",
+		"3 changes (2 FAIL, 1 MANUAL) across 2 targets",
+		"## Files on the nodes\n\n### `/etc/rancher/rke2/config.yaml`",
+		"_or a file under config.yaml.d/",
+		"- [ ] **FAIL** CAT II `kube-apiserver-arg: tls-min-version=VersionTLS12` - V-242378: TLS on the API server",
+		"## Needs review",
+		"- [ ] **FAIL** CAT I RHEL-09-211010: RHEL 9 must be a vendor-supported release",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown lacks %q:\n%s", want, md)
+		}
+	}
+	in := sampleInput()
+	in.StigRun, in.Stig = false, nil
+	b.Reset()
+	_ = WriteMarkdown(&b, Build(in))
+	if !strings.Contains(b.String(), "security scan was not run") {
+		t.Errorf("no scan: %s", b.String())
+	}
+	paths, err := WriteFormats(t.TempDir(), r, false, false, true)
+	if err != nil || len(paths) != 1 || !strings.HasSuffix(paths[0], "-20260920-150405-fixes.md") {
+		t.Errorf("md path: %v %v", paths, err)
 	}
 }
 

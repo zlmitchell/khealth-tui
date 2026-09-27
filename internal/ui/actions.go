@@ -197,6 +197,9 @@ func (a *App) lastGoodOrExplain(rel *k8s.HelmRelease) (k8s.HelmRevision, bool) {
 // owns by patching spec.version on its HelmChart CR (no helm binary
 // needed): the controller re-runs its helm job with the new version.
 func (a *App) startHelmChartUpgrade(rel *k8s.HelmRelease) {
+	if a.readOnly("helm upgrade") {
+		return
+	}
 	if !a.cfg.Actions.Enabled {
 		a.setStatus("mutating actions are disabled (--read-only / actions.enabled: false)")
 		return
@@ -224,7 +227,7 @@ func (a *App) startHelmChartUpgrade(rel *k8s.HelmRelease) {
 	} else {
 		desc = append(desc, "If this HelmChart is applied from a file under server/manifests (or a GitOps repo), update spec.version there too or the next apply reverts it.")
 	}
-	desc = append(desc, "Progress: the Addons tab (rke2 HelmCharts) shows the job; "+fmt.Sprintf("B on the Helm tab rolls back to revision %d if it fails.", rel.Revision))
+	desc = append(desc, "Progress: the Addons view of the distribution tab (rke2 HelmCharts) shows the job; "+fmt.Sprintf("B on the Helm tab rolls back to revision %d if it fails.", rel.Revision))
 	a.pendingAct = &action{
 		title:  fmt.Sprintf("Upgrade HelmChart %s/%s: %s %s -> %s", crNS, name, rel.Chart, rel.Version, version),
 		short:  "HelmChart upgrade",
@@ -464,6 +467,9 @@ func (a *App) renderActionOverlay() (string, []string) {
 // whatever the fragmentation is; the confirmation shows what it will
 // reclaim.
 func (a *App) startEtcdDefrag() {
+	if a.readOnly("etcd defrag") {
+		return
+	}
 	if !a.cfg.Actions.Enabled {
 		a.setStatus("mutating actions are disabled (--read-only / actions.enabled: false)")
 		return

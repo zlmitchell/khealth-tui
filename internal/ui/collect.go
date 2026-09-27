@@ -53,13 +53,17 @@ func (a *App) tabNeeds() tierSet {
 		n[tierPV] = true
 	case tabRKE2:
 		n[tierConfig] = true
+		if a.onAddons() {
+			// registries.yaml vs the pull dry run is an Addons table
+			n[tierImages] = true
+		}
 	case tabSecurity:
 		n[tierConfig] = true
 	case tabEtcd:
 		n[tierEtcdExec] = true
-	case tabAddons:
-		// registries.yaml vs the pull dry run is an Addons table
-		n[tierImages] = true
+	case tabIncidents:
+		// the node journals are part of the incident timeline
+		n[tierJournal] = true
 	}
 	return n
 }

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -498,16 +499,54 @@ func (r *Runner) Run(ctx context.Context, host, script string) Result {
 	if r.cfg.Nice {
 		script = Prologue + script
 	}
-	res := r.runOnce(ctx, host, script)
+	var stdout bytes.Buffer
+	res := r.runOnce(ctx, host, script, &stdout)
 	if res.Err != nil && isConnErr(res.Err) {
 		// stale cached connection: reconnect once
 		r.drop(host)
-		res = r.runOnce(ctx, host, script)
+		stdout.Reset()
+		res = r.runOnce(ctx, host, script, &stdout)
+	}
+	res.Stdout = stdout.String()
+	return res
+}
+
+// Stream is Run for output too large to hold in memory (a log bundle): the
+// script's stdout is copied to w as it arrives and Result.Stdout stays
+// empty. A stale cached connection is retried only while nothing has been
+// written yet, since w cannot take back what it already received.
+func (r *Runner) Stream(ctx context.Context, host, script string, w io.Writer) Result {
+	select {
+	case r.sem <- struct{}{}:
+	case <-ctx.Done():
+		return Result{Err: ctx.Err()}
+	}
+	defer func() { <-r.sem }()
+
+	if r.cfg.Nice {
+		script = Prologue + script
+	}
+	cw := &countWriter{w: w}
+	res := r.runOnce(ctx, host, script, cw)
+	if res.Err != nil && isConnErr(res.Err) && cw.n == 0 {
+		r.drop(host)
+		res = r.runOnce(ctx, host, script, cw)
 	}
 	return res
 }
 
-func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
+type countWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func (r *Runner) runOnce(ctx context.Context, host, script string, stdout io.Writer) Result {
 	res := Result{Started: time.Now(), ScriptSize: len(script)}
 	c, err := r.client(host)
 	res.HostKey = r.HostKey(host)
@@ -542,8 +581,8 @@ func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
 	}
 	cmd, needPass := method.command()
 
-	var stdout, stderr bytes.Buffer
-	sess.Stdout = &stdout
+	var stderr bytes.Buffer
+	sess.Stdout = stdout
 	sess.Stderr = &stderr
 	sess.Stdin = strings.NewReader(script)
 	if needPass {
@@ -563,7 +602,6 @@ func (r *Runner) runOnce(ctx context.Context, host, script string) Result {
 		err = ctx.Err()
 	}
 	res.Finished = time.Now()
-	res.Stdout = stdout.String()
 	res.Stderr = stderr.String()
 	if err != nil {
 		if method.tool != "" && strings.Contains(strings.ToLower(res.Stderr), "password") {

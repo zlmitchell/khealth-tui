@@ -24,7 +24,7 @@ import (
 // only when every source is N/A). A source that was never evaluated
 // leaves the row Unknown.
 func (e *evaluator) rke2Alias(id, stigID, title, cat, fix string, sources ...string) {
-	r := Result{ID: id, RuleID: stigID, Title: title, Cat: cat, Group: "rke2", Fix: fix, PerNode: map[string]Status{}}
+	r := Result{ID: id, RuleID: stigID, Title: title, Cat: cat, Group: "rke2", Fix: fix, PerNode: map[string]Status{}, aliasOf: sources}
 	var details []string
 	count := map[Status]int{}
 	for _, src := range sources {
@@ -196,8 +196,9 @@ func (e *evaluator) rke2STIGRules() {
 	// ---- V-254567: no secrets as literal environment variables ----
 	r = Result{ID: "V-254567", RuleID: "CNTR-R2-000800", Title: "RKE2 stores only cryptographic representations of passwords (no secrets as literal env values)", Cat: "II", Group: g, Status: Pass, Fix: "move the value to a Secret and reference it with valueFrom.secretKeyRef"}
 	var literal []string
+	var literalTargets []Target
 	seen := map[string]bool{}
-	checkContainers := func(ns, kind, name string, cs []corev1.Container) {
+	checkContainers := func(ns, kind, name, owner string, cs []corev1.Container) {
 		for _, c := range cs {
 			for _, env := range c.Env {
 				if env.ValueFrom == nil && env.Value != "" && envSecretName.MatchString(env.Name) {
@@ -205,6 +206,7 @@ func (e *evaluator) rke2STIGRules() {
 					if !seen[key] {
 						seen[key] = true
 						literal = append(literal, key+" ("+env.Name+")")
+						literalTargets = append(literalTargets, Target{Kind: TargetResource, Name: owner, Change: "move " + env.Name + " to a Secret, reference it with valueFrom.secretKeyRef"})
 					}
 				}
 			}
@@ -212,16 +214,17 @@ func (e *evaluator) rke2STIGRules() {
 	}
 	for i := range s.Pods {
 		p := &s.Pods[i]
-		checkContainers(p.Namespace, "pod", p.Name, append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...))
+		checkContainers(p.Namespace, "pod", p.Name, workloadOf(p), append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...))
 	}
 	for i := range s.CronJobs {
 		cj := &s.CronJobs[i]
-		checkContainers(cj.Namespace, "cronjob", cj.Name, cj.Spec.JobTemplate.Spec.Template.Spec.Containers)
+		checkContainers(cj.Namespace, "cronjob", cj.Name, "CronJob "+cj.Namespace+"/"+cj.Name, cj.Spec.JobTemplate.Spec.Template.Spec.Containers)
 	}
 	sort.Strings(literal)
 	if len(literal) > 0 {
 		r.Status = Fail
 		r.Detail = fmt.Sprintf("%d workload(s) carry a password/token/key-named variable as a literal value: %s", len(literal), strutil.TruncList(literal, 5))
+		r.Targets = literalTargets
 	} else {
 		r.Detail = "no PASSWORD/SECRET/TOKEN/KEY-named env var with a literal value in pods or cronjobs"
 	}
@@ -253,12 +256,13 @@ func (e *evaluator) rke2STIGRules() {
 
 	// ---- V-254570: system namespaces reserved ----
 	r = Result{ID: "V-254570", RuleID: "CNTR-R2-000970", Title: "RKE2 system namespaces hold only system workloads (default, kube-public, kube-node-lease empty)", Cat: "II", Group: g, Status: Pass, Fix: "move user workloads out of default / kube-public / kube-node-lease"}
-	var stray []string
+	var stray, strayOwners []string
 	for i := range s.Pods {
 		p := &s.Pods[i]
 		switch p.Namespace {
 		case "default", "kube-public", "kube-node-lease":
 			stray = append(stray, p.Namespace+"/"+p.Name)
+			strayOwners = append(strayOwners, workloadOf(p))
 		}
 	}
 	for i := range s.Deployments {
@@ -266,11 +270,13 @@ func (e *evaluator) rke2STIGRules() {
 		switch d.Namespace {
 		case "default", "kube-public", "kube-node-lease":
 			stray = append(stray, d.Namespace+"/deploy/"+d.Name)
+			strayOwners = append(strayOwners, "Deployment "+d.Namespace+"/"+d.Name)
 		}
 	}
 	if len(stray) > 0 {
 		r.Status = Fail
 		r.Detail = fmt.Sprintf("%d workload(s): %s", len(stray), strutil.TruncList(strutil.Uniq(stray), 5))
+		r.Targets = objectTargets(strayOwners, "move to a dedicated namespace")
 	} else {
 		r.Detail = "only service/kubernetes in default; kube-public and kube-node-lease empty"
 	}

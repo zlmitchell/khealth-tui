@@ -1,0 +1,11 @@
+[Unit]
+Description=gatherlab: SSH key, k3s config (datastore, eviction threshold)
+Before=k3s.service ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/lab-setup.sh
+
+[Install]
+WantedBy=multi-user.target

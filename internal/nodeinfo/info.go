@@ -1500,12 +1500,12 @@ func (i *Info) HardeningItems() []HardeningItem {
 // that carry no repository tag: layers orphaned by a rebuild or a retag,
 // which nothing can pull again by name. These are the ones worth reclaiming.
 //
-// The rest of UnusedImages is usually deliberate on these clusters - the
+// The rest of NonRunningImages is usually deliberate on these clusters - the
 // airgap preloads and the previous release's images are untagged by nobody
 // and would be pulled again after a prune - so the two are counted apart.
 func (i *Info) DanglingImages() (dangling []Image, danglingBytes int64) {
-	unused, _ := i.UnusedImages()
-	for _, im := range unused {
+	nonRunning, _ := i.NonRunningImages()
+	for _, im := range nonRunning {
 		if len(im.Tags) == 0 {
 			dangling = append(dangling, im)
 			danglingBytes += im.Size
@@ -1514,35 +1514,51 @@ func (i *Info) DanglingImages() (dangling []Image, danglingBytes int64) {
 	return
 }
 
-// UnusedImages returns images not referenced by any running container.
-func (i *Info) UnusedImages() (unused []Image, unusedBytes int64) {
+// NonRunningImages returns the images nothing running uses: no running
+// container, and not the pod sandbox ("pause") image - every running pod
+// holds a sandbox, but crictl lists sandboxes apart from containers, so
+// without this the one image every pod needs reads as non-running.
+func (i *Info) NonRunningImages() (nonRunning []Image, bytes int64) {
 	used := map[string]bool{}
 	for _, c := range i.Containers {
 		used[c.Image] = true
 		used[c.ImageRef] = true
 	}
+	sandbox := i.ContainerdSetting("sandbox_image", "sandbox")
 	for _, im := range i.Images {
 		inUse := used[im.ID]
-		if !inUse {
-			for _, t := range im.Tags {
-				if used[t] {
-					inUse = true
-				}
+		for _, t := range im.Tags {
+			if used[t] || (len(i.Containers) > 0 && isSandboxImage(t, sandbox)) {
+				inUse = true
+			}
+		}
+		for _, d := range im.Digests {
+			if used[d] {
+				inUse = true
 			}
 		}
 		if !inUse {
-			for _, d := range im.Digests {
-				if used[d] {
-					inUse = true
-				}
-			}
-		}
-		if !inUse {
-			unused = append(unused, im)
-			unusedBytes += im.Size
+			nonRunning = append(nonRunning, im)
+			bytes += im.Size
 		}
 	}
 	return
+}
+
+// isSandboxImage: the containerd config's sandbox image when the probe read
+// it, else the stock pause images (registry.k8s.io/pause, rke2/k3s's
+// rancher/mirrored-pause, possibly behind a private registry).
+func isSandboxImage(tag, sandbox string) bool {
+	if sandbox != "" {
+		return normTag(tag) == normTag(sandbox)
+	}
+	name, _, _ := strings.Cut(tag[strings.LastIndex(tag, "/")+1:], ":")
+	return name == "pause" || name == "mirrored-pause"
+}
+
+func normTag(t string) string {
+	t = strings.TrimPrefix(t, "docker.io/library/")
+	return strings.TrimPrefix(t, "docker.io/")
 }
 
 // TarballKeys returns "path|size|mtime" cache keys for parsed tarballs.

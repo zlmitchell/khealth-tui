@@ -135,11 +135,13 @@ type seg struct {
 	label string
 }
 
-// stacked renders proportional segments across width; zero segments get no space.
+// stacked renders proportional segments across width; zero (and
+// negative) segments get no space.
 func stacked(width int, segs []seg) string {
 	var total float64
-	for _, s := range segs {
-		total += s.n
+	for i := range segs {
+		segs[i].n = max(segs[i].n, 0)
+		total += segs[i].n
 	}
 	if total <= 0 || width <= 0 {
 		return styleDim.Render(strings.Repeat("░", width))
@@ -168,7 +170,7 @@ func stacked(width int, segs []seg) string {
 	}
 	var b strings.Builder
 	for i, s := range segs {
-		b.WriteString(s.st.Render(strings.Repeat("█", cells[i])))
+		b.WriteString(s.st.Render(strings.Repeat("█", max(cells[i], 0))))
 	}
 	return b.String()
 }

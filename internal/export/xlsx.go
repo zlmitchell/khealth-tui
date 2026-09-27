@@ -144,6 +144,9 @@ func WriteXLSX(path string, r *Report) error {
 		return err
 	}
 	if r.Security != nil {
+		if err := fixListSheet(f, st, r.Security.Checklist); err != nil {
+			return err
+		}
 		used := map[string]int{}
 		for _, b := range r.Security.Benchmarks {
 			name := b.Sheet
@@ -228,6 +231,13 @@ func summarySheet(f *excelize.File, st styles, r *Report) error {
 		}
 		_ = f.SetCellValue(sheet, fmt.Sprintf("A%d", row), "score = not a finding / (not a finding + open), as SCC / OpenSCAP report it (N/A and MANUAL excluded); IDs are a best-effort mapping, confirm against the release you are audited on")
 		_ = f.SetCellStyle(sheet, fmt.Sprintf("A%d", row), fmt.Sprintf("A%d", row), st.dim)
+		row++
+		changes := 0
+		for _, g := range r.Security.Checklist {
+			changes += len(g.Items)
+		}
+		_ = f.SetCellValue(sheet, fmt.Sprintf("A%d", row), fmt.Sprintf("the Fix list sheet regroups the FAIL and MANUAL rules into %d changes across %d files / objects", changes, len(r.Security.Checklist)))
+		_ = f.SetCellStyle(sheet, fmt.Sprintf("A%d", row), fmt.Sprintf("A%d", row), st.dim)
 	}
 	_ = f.SetColWidth(sheet, "A", "A", 44)
 	_ = f.SetColWidth(sheet, "B", "B", 22)
@@ -249,6 +259,27 @@ func findingsSheet(f *excelize.File, st styles, r *Report) error {
 	}
 	return table(f, sheet, st, []string{"severity", "state", "area", "object", "message", "hint", "steps", "first seen", "resolved"},
 		[]float64{9, 9, 10, 30, 80, 70, 50, 18, 18}, rows, 1, map[int]bool{5: true, 6: true, 7: true})
+}
+
+// fixListSheet is the remediation checklist: one row per change, grouped
+// by target, with an empty "done" column to tick off.
+func fixListSheet(f *excelize.File, st styles, groups []FixGroup) error {
+	sheet := "Fix list"
+	if _, err := f.NewSheet(sheet); err != nil {
+		return err
+	}
+	var rows [][]string
+	for _, g := range groups {
+		for _, it := range g.Items {
+			nodes := it.Nodes
+			if len(nodes) == 0 {
+				nodes = g.Nodes
+			}
+			rows = append(rows, []string{it.Status, "", it.Cat, g.Kind, g.Target, it.Change, strings.Join(it.IDs, ", "), it.Title, strings.Join(nodes, ", "), g.Hint})
+		}
+	}
+	return table(f, sheet, st, []string{"status", "done", "cat", "kind", "target", "change", "rules", "title", "nodes", "then"},
+		[]float64{9, 6, 5, 9, 40, 70, 22, 50, 30, 50}, rows, 1, map[int]bool{6: true, 8: true, 10: true})
 }
 
 func benchmarkSheet(f *excelize.File, st styles, sheet string, b Benchmark) error {

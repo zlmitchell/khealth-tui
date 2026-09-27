@@ -73,7 +73,9 @@ func (a *App) overviewContent() content {
 	if len(s.Nodes) > 0 {
 		readyPct = float64(ready) * 100 / float64(len(s.Nodes))
 	}
-	podSegs := []seg{{float64(running - unhealthy), styleOK, "ok"}, {float64(unhealthy), styleCrit, "bad"}, {float64(pending), styleWarn, "pend"}, {float64(failed), styleCrit, "fail"}}
+	// unhealthy also counts pods that are not Running (crash loops in
+	// Waiting, pending): ok cannot go below zero
+	podSegs := []seg{{float64(max(running-unhealthy, 0)), styleOK, "ok"}, {float64(unhealthy), styleCrit, "bad"}, {float64(pending), styleWarn, "pend"}, {float64(failed), styleCrit, "fail"}}
 	notReady := 100 - readyPct
 	tiles := []string{
 		tile(tw, "Nodes",
@@ -805,8 +807,8 @@ func (a *App) detailFor(t tab, id string) (string, []string) {
 		return a.etcdDetail()
 	case tabStorage:
 		return a.storageDetail(id)
-	case tabAddons:
-		return a.addonsDetail(id)
+	case tabIncidents:
+		return a.incidentDetail(id)
 	case tabHelm:
 		return a.helmDetail(id)
 	case tabImages:
@@ -816,6 +818,9 @@ func (a *App) detailFor(t tab, id string) (string, []string) {
 	case tabLogs:
 		return a.logsDetail(id)
 	case tabRKE2:
+		if a.onAddons() {
+			return a.addonsDetail(id)
+		}
 		return a.rke2Detail(id)
 	}
 	return "", nil

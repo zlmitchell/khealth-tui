@@ -38,6 +38,7 @@ internal/stig/          rule engine, one file per reference
   cis.go                CIS Kubernetes Benchmark recommendations not covered by a DISA ID
   os.go                 OS STIG driver: matches nodes to a table, applies overrides / templates / MANUAL
   ostemplates.go        evaluators for the ComplianceAsCode template kinds (sysctl, package_installed, ...)
+  checklist.go          fix list: Result.Targets (file / object / package / unit a fix changes), Checklist() regroups the open results by target
   osnamed.go            evaluators keyed by CAC rule name for CAC's hand-written (custom OVAL) checks: accounts, PAM, sudo, GNOME, packages
   osnamed_system.go     same, part 2: audit, rsyslog, chrony, crypto/SSH, firewall, filesystem sweep, AIDE, boot, SSSD/PKI
   osnamed_test.go       hardened fixture every named evaluator must pass, plus broken-config cases
@@ -143,7 +144,8 @@ Then:
 1. Take the ID, title and severity from the XCCDF (`Group id`, `Rule severity`, `title`) or the CIS section number. Read the check text - the title alone is often ambiguous (V-242424 is a kubelet rule, not etcd).
 2. Add the check in the file for that document. Per-node checks use `e.perNode(id, title, cat, group, fix, nodes, func(n string) (Status, string))`, which aggregates node results (any Fail -> FAIL, any Manual -> MANUAL) and fills `Result.PerNode`; cluster-wide checks build a `Result` and call `e.add`. Available facts: control-plane flags (`e.apiserver`, `e.cm`, `e.sched`, `e.etcdArgs`), kubelet configz (`e.kubeletCfg`), the API snapshot (`e.in.Snap`) and node facts over SSH (`e.in.Nodes[n]`).
 3. If the ID has a new prefix, add it to `stig.Benchmarks` so the detail view names the right document.
-4. Extend the expectations in `stig_test.go` (`TestEvaluate`, `TestRancherRules`).
+4. Give the fix list a target when the rule does not get one on its own. Flag rules need nothing: a `fix` starting with `kube-apiserver-arg:` / `kubelet-arg:` / `config.yaml:` (or a rule in the apiserver / controller-manager / scheduler / etcd / kubelet group) is placed in `config.yaml` or the kubeadm manifest by `componentTarget`, and RKE2 alias rows inherit their source's targets. Rules about cluster objects should set `Result.Targets` to the objects they found - `objectTargets(names, change)`, with `workloadOf(pod)` to name the owning Deployment / StatefulSet / DaemonSet rather than the pod - and a rule about one host file a `TargetFile`. Without a target a rule lands in "Needs review".
+5. Extend the expectations in `stig_test.go` (`TestEvaluate`, `TestRancherRules`) and, for targets, `checklist_test.go`.
 
 Some rules combine sources: V-274882 (secrets encrypted at rest) reads the apiserver flag from the mirror pod, the provider order from the running apiserver's config (the etcd probe prints only the provider / resource token names, never key material) and a Secret sampled from etcd (first 24 bytes; `k8s:enc:<provider>:` proves the stored value is encrypted, raw protobuf proves it is not). The flag alone is Manual, because secrets written before encryption was enabled stay plaintext until rewritten.
 
@@ -153,7 +155,7 @@ Use `Manual` when the rule needs judgment or data we do not collect; `NA` when i
 
 When the probe can see something CAC only checks with custom OVAL (FIPS mode, SELinux state, service runtime-vs-boot), add it as an override:
 
-1. add an `osCheck` to `osChecks` in `os.go` with a unique `key`, a generic `OS-*` fallback ID and an `eval(info *nodeinfo.Info)`;
+1. add an `osCheck` to `osChecks` in `os.go` with a unique `key`, a generic `OS-*` fallback ID and an `eval(info *nodeinfo.Info)` (plus `target` when the fix is one file; otherwise the rule keeps the targets of the CAC checks behind it);
 2. map the key to the release's vulnerability ID and category in `rhel.go` / `ubuntu.go` (`"fips": {"V-258230", "I"}`) - look the ID up in the XCCDF or the generated table (`stigid`/`vid` fields);
 3. if the fact is new, add it to the probe (`internal/nodeinfo/script.go`, HARDENING section) and its parser in `info.go`.
 
@@ -173,7 +175,8 @@ When `TestEmbeddedTables` or the OS STIG sub-tab shows a rule as "custom OVAL on
 1. Read `shared/templates/<name>/template.py` (parameter preprocessing) and `oval.template` (semantics) in CAC.
 2. Add `func evalX(info *nodeinfo.Info, c stigdata.Check, id string) (Status, string)` to `ostemplates.go` and register it in `templateEvals`. Parameters come from `c.Str/Bool/List`; values backed by XCCDF variables come from `c.Value("VALUE", "XCCDF_VARIABLE")` / `c.Resolved`.
 3. If it needs a fact the probe does not collect, add a section to `osStigScript` (generic facts) or extend `stigdata.Derive()` (per-rule stat / find / file dump targets computed from the tables) and parse it in `nodeinfo.parseOSStig`. Keep output bounded (`head`, `-maxdepth`, `head -c`) and pass dumps through `mask`.
-4. Add cases to `TestTemplateEvaluators` (synthetic `nodeinfo.Info`) - one pass, one fail, and the "fact missing" path, which must be Manual/NA.
+4. Add a case to `checkTargets` in `checklist.go` naming the file (or package / unit / boot argument) the template's setting lives in and the line to write, so its rules appear in the fix list under that file rather than "Needs review"; cover it in `TestCheckTargets`.
+5. Add cases to `TestTemplateEvaluators` (synthetic `nodeinfo.Info`) - one pass, one fail, and the "fact missing" path, which must be Manual/NA.
 
 ### 4.5 A new operating system release
 
@@ -187,6 +190,7 @@ When `TestEmbeddedTables` or the OS STIG sub-tab shows a rule as "custom OVAL on
 
 - The node script runs as root via `sudo`, `dzdo` or `doas` (`ssh.become`, probed per host; see [RUNNING.md](RUNNING.md) "What SSH needs on the nodes"); `sshd -T`, `auditctl -l`, the account-database facts (`/etc/shadow` is reduced to hash type and aging fields, never the hash), the filesystem sweep (one `find` over the local filesystems, 120 s cap, 200 hits max), `stat` of `/etc/shadow` and the recursive `find` scans need root. Without it those rules report MANUAL, never FAIL.
 - Runtime state is what is graded (`sysctl -a`, loaded audit rules, mounted options, `sshd -T`); where the STIG also requires the setting to be persisted (fstab, grub, sysctl.d) the evaluator reports FAIL with a "lost on reboot" detail when only one side is set.
+- `sshd_lineinfile` rules are graded from `sshd -T`, so `sshd_config.d/*.conf` drop-ins, `Include`s and first-value-wins are already applied. On a FAIL, `sshdSource` walks the dumped `sshd_config` in sshd's read order (the drop-ins where its `Include` line stands, sorted, `Match` blocks skipped) and the detail ends `in <file>`; the fix list uses that to point the fix at the drop-in instead of `sshd_config`. The named SSH evaluators that grep files read `sshd_config` and `sshd_config.d/` both.
 - The Security tab is opt-in (`Shift+S` runs the scan); the OS STIG facts are collected by that same key over SSH, in four stages per node (system facts, file modes, accounts, filesystem sweep) with per-node progress on the tab. Until then a node has no OS STIG rows at all rather than hundreds of MANUAL ones, and the Node hardening column reads "not collected".
 - The union of all products' stat/find/dump targets is sent to every node; results are matched back by `V-ID:index` so a RHEL scan running on an Ubuntu node is simply ignored.
 
