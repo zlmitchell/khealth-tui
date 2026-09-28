@@ -1,5 +1,5 @@
 # Lab for --gather / --analyze and the TUI: a one-node k3s cluster with
-# staged incidents. The node is a systemd container (node/Dockerfile) with
+# staged incidents. The node is a systemd container (k3s/Dockerfile) with
 # k3s as a unit and sshd, so khealth reaches the same node over the API and
 # over SSH. See README.md.
 #
@@ -13,7 +13,7 @@ name: khealth-gatherlab
 
 services:
   k3s:
-    build: ./node
+    build: ./k3s
     hostname: lab-node
     # systemd as PID 1, like kind's node image; a private cgroup namespace
     # (kind's default on cgroup v2) so the kubelet counts the node's memory
@@ -39,6 +39,7 @@ services:
       - ./manifests/shop.yaml:/var/lib/rancher/k3s/server/manifests/lab-shop.yaml:ro
       - ./manifests/incidents.yaml:/var/lib/rancher/k3s/server/manifests/lab-incidents.yaml:ro
       - ./manifests/noisy.yaml:/var/lib/rancher/k3s/server/manifests/lab-noisy.yaml:ro
+      - ./manifests/k3s-ingress.yaml:/var/lib/rancher/k3s/server/manifests/lab-ingress.yaml:ro
     healthcheck:
       test: ["CMD-SHELL", "k3s kubectl --kubeconfig /out/kubeconfig.yaml get --raw /readyz >/dev/null 2>&1 && systemctl is-active ssh >/dev/null"]
       interval: 5s

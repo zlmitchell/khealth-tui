@@ -1,0 +1,11 @@
+[Unit]
+Description=gatherlab: SSH key, rke2 config (eviction threshold)
+Before=rke2-server.service ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/lab-setup.sh
+
+[Install]
+WantedBy=multi-user.target

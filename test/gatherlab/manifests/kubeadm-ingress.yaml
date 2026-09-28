@@ -1,0 +1,11 @@
+# The kubeadm lab installs ingress-nginx (kubeadm/lab-kubeadm.sh), which logs
+# every request by default: point the traffic generator's edge
+# (noisy.yaml) at it
+apiVersion: v1
+kind: Namespace
+metadata: {name: shop}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: edge, namespace: shop}
+spec: {type: ExternalName, externalName: ingress-nginx-controller.ingress-nginx.svc.cluster.local}

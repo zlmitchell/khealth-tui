@@ -1,0 +1,24 @@
+# rke2's ingress is its bundled ingress-nginx, a hostPort DaemonSet with no
+# Service by default: give it a ClusterIP Service and the default
+# IngressClass, and point the traffic generator's edge (noisy.yaml) at it.
+# ingress-nginx logs every request by default.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata: {name: rke2-ingress-nginx, namespace: kube-system}
+spec:
+  valuesContent: |-
+    controller:
+      service:
+        enabled: true
+        type: ClusterIP
+      ingressClassResource:
+        default: true
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: shop}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: edge, namespace: shop}
+spec: {type: ExternalName, externalName: rke2-ingress-nginx-controller.kube-system.svc.cluster.local}

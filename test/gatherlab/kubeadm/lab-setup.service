@@ -1,0 +1,11 @@
+[Unit]
+Description=gatherlab: SSH key, kubeadm config (eviction threshold)
+Before=ssh.service lab-kubeadm.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/lab-setup.sh
+
+[Install]
+WantedBy=multi-user.target

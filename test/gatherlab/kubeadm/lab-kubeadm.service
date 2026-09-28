@@ -1,0 +1,14 @@
+[Unit]
+Description=gatherlab: kubeadm init, CNI, ingress-nginx and the lab workloads
+Wants=containerd.service
+After=containerd.service lab-setup.service
+Requires=lab-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=0
+ExecStart=/usr/local/bin/lab-kubeadm.sh
+
+[Install]
+WantedBy=multi-user.target

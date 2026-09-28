@@ -1,0 +1,60 @@
+# The gatherlab on rke2: the same staged incidents (manifests/) and the
+# same check (check.sh), on a one-node rke2 server. rke2-server runs as a
+# systemd unit in a systemd container, as in the k3s lab (rke2/). So the
+# lab covers rke2's layout: its own containerd, agent/logs/kubelet.log,
+# static-pod control plane and etcd under agent/pod-manifests, Canal and
+# the bundled ingress-nginx. See README.md.
+#
+#   docker compose -f test/gatherlab/compose.rke2.yaml up -d --build
+#   docker compose -f test/gatherlab/compose.rke2.yaml --profile test run --rm check
+#   docker compose -f test/gatherlab/compose.rke2.yaml down -v
+#
+# Its own ports and out/rke2/, so it can run beside the other labs (given
+# the memory: each noisy neighbour takes 4 GiB).
+name: khealth-gatherlab-rke2
+
+services:
+  rke2:
+    build: {context: ., dockerfile: rke2/Dockerfile}
+    hostname: lab-node
+    # as the k3s lab (compose.yaml)
+    privileged: true
+    cgroup: private
+    tmpfs: [/run, /run/lock, /tmp]
+    environment:
+      # see compose.yaml; rke2 itself takes about 1 GiB more than k3s
+      LAB_EVICT_HEADROOM_MI: ${LAB_EVICT_HEADROOM_MI:-4608}
+    ports: ["36443:6443", "2224:22"]
+    volumes:
+      - ./out/rke2:/out
+      - /var/lib/rancher
+      - /var/lib/kubelet
+      - /lib/modules:/lib/modules:ro
+      # lab-setup.sh copies them into rke2's manifests directory, which
+      # rke2 applies (and rewrites: a read-only mount there stops it)
+      - ./manifests:/lab/manifests:ro
+    healthcheck:
+      test: ["CMD-SHELL", "systemctl is-active lab-ready >/dev/null && systemctl is-active ssh >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 240
+
+  check:
+    profiles: [test]
+    image: golang:1.26
+    depends_on:
+      rke2: {condition: service_healthy}
+    working_dir: /src
+    environment:
+      CGO_ENABLED: "0"
+      LAB_SETTLE: ${LAB_SETTLE:-180}
+      LAB_DISTRO: rke2
+    volumes:
+      - ../..:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+    entrypoint: ["sh", "/src/test/gatherlab/check.sh"]
+
+volumes:
+  gomod: {}
+  gocache: {}

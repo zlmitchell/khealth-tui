@@ -1,0 +1,19 @@
+# k3s's ingress is Traefik: log every request (the traffic view of the
+# analysis), and point the traffic generator's edge (noisy.yaml) at it
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata: {name: traefik, namespace: kube-system}
+spec:
+  valuesContent: |-
+    logs:
+      access:
+        enabled: true
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: shop}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: edge, namespace: shop}
+spec: {type: ExternalName, externalName: traefik.kube-system.svc.cluster.local}

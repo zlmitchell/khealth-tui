@@ -3,25 +3,33 @@
 # compose "check" service from the repository root): build khealth, wait
 # for the incidents to play out, gather over the API and SSH, analyze the
 # bundle offline, and assert the root causes and that no secret leaked.
-# Outputs land in test/gatherlab/out/ (bundle, analysis, timeline).
+# Outputs land in test/gatherlab/out/ (bundle, analysis, timeline);
+# LAB_DISTRO=kubeadm (compose.kubeadm.yaml) checks the kubeadm lab, whose
+# outputs land in out/kubeadm/.
 set -e
 L=test/gatherlab
-OUT=$L/out
+LAB_DISTRO=${LAB_DISTRO:-k3s}
+case $LAB_DISTRO in
+  k3s)     OUT=$L/out;         API=https://k3s:16443;    HOSTAPI='https://127.0.0.1:16443'; NODE=k3s ;;
+  kubeadm) OUT=$L/out/kubeadm; API=https://kubeadm:6443; HOSTAPI='https://127.0.0.1:26443'; NODE=kubeadm ;;
+  rke2)    OUT=$L/out/rke2;    API=https://rke2:6443;    HOSTAPI='https://127.0.0.1:36443'; NODE=rke2 ;;
+  *) echo "LAB_DISTRO: k3s, kubeadm or rke2, not $LAB_DISTRO"; exit 2 ;;
+esac
 fail=0
 
 echo "building khealth ..."
 go build -o /tmp/khealth ./cmd/khealth
 
-# the kubeconfig k3s wrote points at 127.0.0.1 (for the host); from here
-# the server is the k3s service
-sed 's#https://127.0.0.1:16443#https://k3s:16443#' $OUT/kubeconfig.yaml > /tmp/kubeconfig.yaml
+# the kubeconfig the lab wrote points at 127.0.0.1 (for the host); from
+# here the server is the lab's service
+sed "s#$HOSTAPI#$API#" $OUT/kubeconfig.yaml > /tmp/kubeconfig.yaml
 cat > /tmp/khealth.yaml <<EOF
 ssh:
   user: root
   key: $OUT/id_lab
   strict_host_key: false
   hosts:
-    lab-node: "k3s:22"
+    lab-node: "$NODE:22"
 helm:
   check_updates: false
 EOF
@@ -38,7 +46,16 @@ expect() {
   if grep -qF -- "$1" $OUT/analyze.txt; then echo "ok    $1"; else echo "FAIL  $1"; fail=1; fi
 }
 echo
-echo "=== expected root causes"
+echo "=== expected root causes ($LAB_DISTRO)"
+reject() {
+  if grep -qF -- "$1" $OUT/analyze.txt; then echo "FAIL  another distribution's wording: $1"; grep -nF -- "$1" $OUT/analyze.txt | cut -c1-200; fail=1; else echo "ok    no \"$1\""; fi
+}
+# the advice names this distribution's paths, not another's
+case $LAB_DISTRO in
+  k3s)     expect "etcd's data is in /var/lib/rancher/k3s/server/db/etcd"; reject /var/lib/rancher/rke2 ;;
+  kubeadm) expect "kubeadm v1."; expect "etcd's data is in /var/lib/etcd"; reject rke2; reject /var/lib/rancher ;;
+  rke2)    expect "+rke2r"; expect "etcd's data is in /var/lib/rancher/rke2/server/db/etcd"; reject /var/lib/rancher/k3s ;;
+esac
 expect "etcd disk latency on lab-node"
 if [ "$LAB_DATASTORE" = sqlite ]; then
   expect "no etcd: k3s keeps the cluster state in SQLite (kine) on lab-node"

@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/zlmitchell/khealth-tui/internal/distro"
 	"github.com/zlmitchell/khealth-tui/internal/logs"
 )
 
@@ -210,7 +211,7 @@ func etcdLatency(c *ctx) []Hypothesis {
 		h = Hypothesis{
 			Title: "etcd disk latency on " + nodes(slow),
 			Cause: fmt.Sprintf("%d slow fsync / apply warnings from etcd, the first at %s", len(slow), clock(t0)),
-			Score: 0.45, Next: explain("etcd-slow-fsync"),
+			Score: 0.45, Next: append(explain("etcd-slow-fsync"), etcdWhere(c.src.Snap().Distribution)),
 		}
 		h.Evidence = sample(slow, 3)
 	} else {
@@ -244,6 +245,17 @@ func etcdLatency(c *ctx) []Hypothesis {
 	}
 	h.First = t0
 	return []Hypothesis{h}
+}
+
+// etcdWhere names the etcd data dir and where etcd's flags are set, in the
+// cluster's own layout.
+func etcdWhere(dist string) string {
+	v := distro.For(dist)
+	flags := "the etcd static pod's command (" + v.Manifests + "/etcd.yaml; kubelet restarts it)"
+	if distro.IsRancher(v.Name) {
+		flags = "etcd-arg in " + v.ConfigFile + ", then " + v.RestartServer
+	}
+	return "on " + v.Label + ": etcd's data is in " + v.EtcdDataDir + "; its flags go in " + flags
 }
 
 // ---- node resources --------------------------------------------------------
@@ -705,7 +717,11 @@ func admission(c *ctx) []Hypothesis {
 		var k kind
 		switch {
 		case strings.Contains(l, "violates podsecurity"):
-			k = kind{"Pods rejected by Pod Security admission", "label the namespace with the pod-security level it needs (pod-security.kubernetes.io/enforce) or fix the pod's securityContext; rke2's cis profile enforces restricted by default"}
+			next := "label the namespace with the pod-security level it needs (pod-security.kubernetes.io/enforce) or fix the pod's securityContext"
+			if strings.EqualFold(c.src.Snap().Distribution, "rke2") {
+				next += "; rke2's cis profile enforces restricted by default"
+			}
+			k = kind{"Pods rejected by Pod Security admission", next}
 		case strings.Contains(l, "exceeded quota"):
 			k = kind{"Pods rejected by a ResourceQuota", "raise the quota or the pods' requests (cluster/resources/resourcequotas.yaml)"}
 		case strings.Contains(l, "failed calling webhook"):

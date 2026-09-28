@@ -83,6 +83,24 @@ func TestS3UploadFailPattern(t *testing.T) {
 	}
 }
 
+// containerd-down is the runtime dying, not a container exiting: on a
+// kubeadm node containerd logs to the journal as containerd[pid], and every
+// container exit event carries exited_at.
+func TestContainerdDownPattern(t *testing.T) {
+	s := Classify([]string{
+		`2026-09-27T20:07:44.422117+00:00 lab-node containerd[139]: time="2026-09-27T20:07:44.422072860Z" level=info msg="received container exit event container_id:\"8c95\"  id:\"8c95\"  pid:1932  exit_status:1  exited_at:{seconds:1790539664  nanos:421618508}"`,
+		`2026-09-27T20:08:01.000000+00:00 cp-1 rke2[100]: time="2026-09-27T20:08:01Z" level=fatal msg="containerd exited: exit status 255"`,
+	}, time.Date(2026, 9, 27, 21, 0, 0, 0, time.UTC))
+	if n := s.ByName["containerd-down"]; n != 1 {
+		t.Errorf("containerd-down=%d, want the rke2 line only; byName=%v", n, s.ByName)
+	}
+	for _, m := range s.Matches {
+		if m.Pattern != nil && m.Pattern.Name == "containerd-down" && m.Unit != "rke2" {
+			t.Errorf("a container exit event read as containerd down: %s", m.Line)
+		}
+	}
+}
+
 // The log bundle collects the journal with -o short-iso-precise.
 func TestClassifyPreciseTimestamps(t *testing.T) {
 	now := time.Date(2024, 9, 18, 12, 0, 0, 0, time.UTC)

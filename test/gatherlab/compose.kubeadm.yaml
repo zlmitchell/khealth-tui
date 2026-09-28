@@ -1,0 +1,61 @@
+# The gatherlab on kubeadm: the same staged incidents (manifests/) and the
+# same check (check.sh), on a one-node kubeadm cluster instead of k3s. The
+# node is kind's node image (what kind and Cluster API's Docker provider
+# boot) with sshd and a `kubeadm init` unit (kubeadm/). So the lab covers
+# the upstream layout: kubelet and containerd units, static-pod control
+# plane and etcd, ingress-nginx instead of Traefik. See README.md.
+#
+#   docker compose -f test/gatherlab/compose.kubeadm.yaml up -d --build
+#   docker compose -f test/gatherlab/compose.kubeadm.yaml --profile test run --rm check
+#   docker compose -f test/gatherlab/compose.kubeadm.yaml down -v
+#
+# Its own ports and out/kubeadm/, so it can run beside the k3s lab (given
+# the memory: each noisy neighbour takes 4 GiB).
+name: khealth-gatherlab-kubeadm
+
+services:
+  kubeadm:
+    build: ./kubeadm
+    hostname: lab-node
+    # as kind runs its nodes: systemd behind kind's entrypoint, privileged,
+    # a private cgroup namespace, tmpfs /run and /tmp, /var on a volume
+    # (containerd's overlay snapshots cannot sit on the overlay root)
+    privileged: true
+    cgroup: private
+    security_opt: [seccomp=unconfined, apparmor=unconfined]
+    tty: true
+    tmpfs: [/run, /tmp]
+    environment:
+      # see compose.yaml
+      LAB_EVICT_HEADROOM_MI: ${LAB_EVICT_HEADROOM_MI:-3584}
+    ports: ["26443:6443", "2223:22"]
+    volumes:
+      - ./out/kubeadm:/out
+      - ./manifests:/lab/manifests:ro
+      - /var
+      - /lib/modules:/lib/modules:ro
+    healthcheck:
+      test: ["CMD-SHELL", "systemctl is-active lab-kubeadm >/dev/null && systemctl is-active ssh >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 240
+
+  check:
+    profiles: [test]
+    image: golang:1.26
+    depends_on:
+      kubeadm: {condition: service_healthy}
+    working_dir: /src
+    environment:
+      CGO_ENABLED: "0"
+      LAB_SETTLE: ${LAB_SETTLE:-180}
+      LAB_DISTRO: kubeadm
+    volumes:
+      - ../..:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+    entrypoint: ["sh", "/src/test/gatherlab/check.sh"]
+
+volumes:
+  gomod: {}
+  gocache: {}
