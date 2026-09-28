@@ -1,3 +1,10 @@
+## [1.3.2](https://github.com/zlmitchell/khealth-tui/compare/v1.3.1...v1.3.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* RCA and gather fixes from live skeleton and Rancher runs ([#6](https://github.com/zlmitchell/khealth-tui/issues/6)) ([906b82e](https://github.com/zlmitchell/khealth-tui/commit/906b82e5531883e7eb7f3772d341cad54bc91d39))
+
 ## [1.3.1](https://github.com/zlmitchell/khealth-tui/compare/v1.3.0...v1.3.1) (2026-09-28)
 
 
