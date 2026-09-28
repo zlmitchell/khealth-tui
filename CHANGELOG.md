@@ -1,3 +1,10 @@
+## [1.3.1](https://github.com/zlmitchell/khealth-tui/compare/v1.3.0...v1.3.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* distro-correct etcd and Pod Security advice, no containerd alarm on container exits ([c81528c](https://github.com/zlmitchell/khealth-tui/commit/c81528c7775eb5d5671912770533031c9e177e24))
+
 # [1.3.0](https://github.com/zlmitchell/khealth-tui/compare/v1.2.0...v1.3.0) (2026-09-27)
 
 
