@@ -66,6 +66,14 @@ func (a *App) incRefresh() {
 	}
 	a.inc.builtOf = key
 	a.inc.tl = rca.BuildLive(a.snap, a.logSum)
+	for name, ni := range a.nodes {
+		if ni != nil && ni.Hardening["container"] != "" {
+			a.inc.tl.Containerized[name] = ni.Hardening["container"]
+		}
+		if ni != nil && ni.Uptime > 0 && !ni.Collected.IsZero() {
+			a.inc.tl.Boots[name] = ni.Collected.Add(-ni.Uptime)
+		}
+	}
 	a.inc.list = rca.Extract(a.inc.tl, a.snap)
 	// the probable causes without pod logs: reading them is the API
 	// round trip an opened incident pays for, not the list
@@ -107,7 +115,7 @@ func (a *App) incidentsContent() content {
 
 func incKindStyle(k rca.Kind) interface{ Render(...string) string } {
 	switch k {
-	case rca.KindOOM, rca.KindNodeOOM, rca.KindEviction, rca.KindNotReady:
+	case rca.KindReboot, rca.KindOOM, rca.KindNodeOOM, rca.KindEviction, rca.KindNotReady:
 		return styleCrit
 	case rca.KindRestart, rca.KindProbe, rca.KindPull, rca.KindSchedule, rca.KindPressure, rca.KindRejected, rca.KindDrain:
 		return styleWarn

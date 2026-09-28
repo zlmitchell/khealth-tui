@@ -91,6 +91,15 @@ type Result struct {
 }
 
 // Run collects the bundle and writes it where cfg.Gather.Out points.
+// Label names the cluster a bundle came from: its kubeconfig context, or
+// the API server's host when that is rke2/k3s's generic "default".
+func (m Manifest) Label() string {
+	if m.Context == "" || m.Context == "default" {
+		return strutil.FirstNonEmpty(strutil.URLHost(m.Server), m.Context)
+	}
+	return m.Context
+}
+
 func Run(ctx context.Context, cfg config.Config, log io.Writer) (*Result, error) {
 	if log == nil {
 		log = io.Discard
@@ -290,7 +299,7 @@ func Run(ctx context.Context, cfg config.Config, log io.Writer) (*Result, error)
 		return nil, err
 	}
 
-	out := outPath(g.Out, m.Context, start)
+	out := outPath(g.Out, m.Label(), start)
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return nil, err
 	}

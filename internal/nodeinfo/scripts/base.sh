@@ -234,6 +234,15 @@ echo "selinux=$(getenforce 2>/dev/null)"
 echo "selinux_config=$(grep -E '^SELINUX=' /etc/selinux/config 2>/dev/null | cut -d= -f2)"
 echo "fips=$(cat /proc/sys/crypto/fips_enabled 2>/dev/null)"
 [ -f /sys/module/apparmor/parameters/enabled ] && echo "apparmor=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)"
+# a node in a container (kind, k3d, rke2 in docker) shares the host's kernel:
+# its kernel log, OOM killer and LSM state are the host's. The runtime's
+# marker first: under Docker Desktop systemd-detect-virt -c says "wsl"
+# (which is a shared kernel too, so it still counts when nothing else does)
+ctr=
+[ -f /.dockerenv ] && ctr=docker
+[ -z "$ctr" ] && [ -f /run/.containerenv ] && ctr=podman
+[ -z "$ctr" ] && ctr=$(systemd-detect-virt -c 2>/dev/null)
+[ -n "$ctr" ] && [ "$ctr" != none ] && echo "container=$ctr"
 echo "$UNITS_OUT" | awk -F'|' '$1=="fapolicyd"||$1=="auditd"||$1=="firewalld"||$1=="ufw"||$1=="apparmor"||$1=="unattended-upgrades"||$1=="dnf-automatic.timer"||$1=="usbguard"||$1=="sssd"||$1=="chronyd"||$1=="chrony"||$1=="systemd-timesyncd"{print "svc_"$1"="$2" "$3" "$8" "}'
 echo "cmdline=$(cat /proc/cmdline 2>/dev/null)"
 [ -f /sys/kernel/security/lockdown ] && echo "lockdown=$(cat /sys/kernel/security/lockdown 2>/dev/null)"

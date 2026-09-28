@@ -70,3 +70,18 @@ func TestURLHost(t *testing.T) {
 		t.Error("URLHost")
 	}
 }
+
+func TestYAMLScalar(t *testing.T) {
+	for in, want := range map[string]string{
+		` "172.25.0.2"`:           "172.25.0.2",
+		` '172.25.0.2' # pinned`:  "172.25.0.2",
+		` 172.25.0.2 # was .143`:  "172.25.0.2",
+		` https://10.0.0.1:9345 `: "https://10.0.0.1:9345",
+		` # nothing set`:          "",
+		` "a#b"`:                  "a#b",
+	} {
+		if got := YAMLScalar(in); got != want {
+			t.Errorf("YAMLScalar(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

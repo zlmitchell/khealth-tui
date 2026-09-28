@@ -20,20 +20,20 @@ func WriteIncidents(w io.Writer, ins []Incident) {
 			parts = append(parts, fmt.Sprintf("%s %d", k.Label(), count[k]))
 		}
 	}
-	fmt.Fprintf(w, "Incidents (%d): %s   (--incident ID for one in context)\n", len(ins), strings.Join(parts, ", "))
+	fmt.Fprintf(w, "%s (%d): %s   (--incident ID for one in context)\n", paint(cBold, "Incidents"), len(ins), strings.Join(parts, ", "))
 	for _, in := range ins {
 		n := ""
 		if in.Count > 1 {
 			n = fmt.Sprintf(" x%d", in.Count)
 		}
-		fmt.Fprintf(w, "  %-12s %-19s %-14s %-44s %s\n", in.ID, stamp(in.Time)+n, clip(in.Kind.Label(), 14), clip(in.Object(), 44), clip(oneLine(in.Summary), 80))
+		fmt.Fprintf(w, "  %-12s %-19s %s %-44s %s\n", in.ID, stamp(in.Time)+n, paint(kindColor(in.Kind), fmt.Sprintf("%-14s", clip(in.Kind.Label(), 14))), clip(in.Object(), 44), clip(oneLine(in.Summary), 80))
 	}
 }
 
 // WriteContext prints one incident in context.
 func WriteContext(w io.Writer, c *Context) {
 	in := c.Incident
-	fmt.Fprintf(w, "%s  %s  %s\n", in.ID, in.Kind.Label(), in.Object())
+	fmt.Fprintf(w, "%s  %s  %s\n", paint(cBold, in.ID), paint(kindColor(in.Kind), in.Kind.Label()), in.Object())
 	fmt.Fprintf(w, "  when:     %s", stamp(in.Time))
 	if in.Count > 1 {
 		fmt.Fprintf(w, " .. %s (x%d)", stamp(in.Last), in.Count)
@@ -41,22 +41,22 @@ func WriteContext(w io.Writer, c *Context) {
 	fmt.Fprintf(w, "   node %s   workload %s\n", orDefault(in.Node, "-"), orDefault(in.Workload, "-"))
 	fmt.Fprintf(w, "  what:     %s\n", oneLine(in.Summary))
 
-	fmt.Fprintf(w, "\nWho caused it\n")
+	fmt.Fprintf(w, "\n%s\n", paint(cBold, "Who caused it"))
 	if c.Verdict != "" {
-		fmt.Fprintf(w, "  %s\n", c.Verdict)
+		fmt.Fprintf(w, "  %s\n", clean(c.Verdict))
 	}
 	if len(c.Suspects) == 0 {
 		fmt.Fprintln(w, "  no other workload or event points at it")
 	}
 	for _, s := range c.Suspects {
-		fmt.Fprintf(w, "  %3.0f%%  %s\n", s.Score*100, s.Who)
+		fmt.Fprintf(w, "  %s  %s\n", paint(scoreColor(s.Score), fmt.Sprintf("%3.0f%%", s.Score*100)), s.Who)
 		for _, r := range s.Reasons {
-			fmt.Fprintf(w, "        - %s\n", r)
+			fmt.Fprintf(w, "        - %s\n", clean(r))
 		}
 	}
 
 	if wv := c.Workload; wv != nil {
-		fmt.Fprintf(w, "\nWorkload %s/%s in %s", wv.Kind, wv.Name, wv.Namespace)
+		fmt.Fprintf(w, "\n%s", paint(cBold, fmt.Sprintf("Workload %s/%s in %s", wv.Kind, wv.Name, wv.Namespace)))
 		if wv.Desired > 0 {
 			fmt.Fprintf(w, "  ready %d/%d", wv.Ready, wv.Desired)
 		}
@@ -74,7 +74,7 @@ func WriteContext(w io.Writer, c *Context) {
 	}
 
 	if sh := c.Node; sh != nil {
-		fmt.Fprintf(w, "\nNode %s at %s  [%s]", sh.Name, stamp(in.Time), strings.Join(sh.Roles, ","))
+		fmt.Fprintf(w, "\n%s", paint(cBold, fmt.Sprintf("Node %s at %s  [%s]", sh.Name, stamp(in.Time), strings.Join(sh.Roles, ","))))
 		if len(sh.Conditions) > 0 {
 			fmt.Fprintf(w, "  %s", strings.Join(sh.Conditions, " "))
 		}
@@ -101,7 +101,7 @@ func WriteContext(w io.Writer, c *Context) {
 	}
 
 	if iv := c.Ingress; iv != nil {
-		fmt.Fprintf(w, "\nTraffic")
+		fmt.Fprintf(w, "\n%s", paint(cBold, "Traffic"))
 		if len(iv.Services) > 0 {
 			fmt.Fprintf(w, " to %s", strings.Join(iv.Services, ", "))
 		}
@@ -128,19 +128,19 @@ func WriteContext(w io.Writer, c *Context) {
 	}
 
 	if len(c.Related) > 0 {
-		fmt.Fprintf(w, "\nAround it (+/- %s)\n", c.Window)
+		fmt.Fprintf(w, "\n%s\n", paint(cBold, fmt.Sprintf("Around it (+/- %s)", c.Window)))
 		for _, o := range c.Related {
 			fmt.Fprintf(w, "  %s %-14s %-12s %s\n", stamp(o.Time), clip(o.Kind.Label(), 14), o.ID, o.Object())
 		}
 	}
 	if len(c.LogTail) > 0 {
-		fmt.Fprintf(w, "\nLast lines of %s (%s)\n", in.Container, c.LogRef)
+		fmt.Fprintf(w, "\n%s\n", paint(cBold, fmt.Sprintf("Last lines of %s (%s)", in.Container, c.LogRef)))
 		for _, l := range tail(c.LogTail, 10) {
-			fmt.Fprintf(w, "  %s\n", clip(l, 160))
+			fmt.Fprintf(w, "  %s\n", clip(clean(l), 160))
 		}
 	}
 	if len(c.Timeline) > 0 {
-		fmt.Fprintf(w, "\nTimeline (node %s, namespace %s, control plane)\n", orDefault(in.Node, "-"), orDefault(in.Namespace, "-"))
+		fmt.Fprintf(w, "\n%s\n", paint(cBold, fmt.Sprintf("Timeline (node %s, namespace %s, control plane)", orDefault(in.Node, "-"), orDefault(in.Namespace, "-"))))
 		for _, g := range Collapse(c.Timeline) {
 			when := stamp(g.First)
 			if g.Count > 1 {
@@ -149,7 +149,7 @@ func WriteContext(w io.Writer, c *Context) {
 			fmt.Fprintf(w, "  %-22s %-5s %-20s %-30s %s\n", when, g.Entry.Class, clip(g.Entry.Pattern, 20), clip(g.Entry.Unit, 30), clip(oneLine(g.Entry.Text), 90))
 		}
 	}
-	fmt.Fprintf(w, "\nCluster\n")
+	fmt.Fprintf(w, "\n%s\n", paint(cBold, "Cluster"))
 	for _, n := range c.Cluster {
 		use := "  -"
 		if n.MemUsePct >= 0 {

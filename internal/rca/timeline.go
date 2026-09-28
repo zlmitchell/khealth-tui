@@ -58,7 +58,16 @@ type Timeline struct {
 	// ClockFix is the correction applied to each node's log times: the
 	// node's clock offset measured by its probe, when over clockTolerance.
 	ClockFix map[string]time.Duration
-	Lines    int // log lines read
+	// Containerized is the nodes that run in a container (the node's
+	// probe says docker, podman, ...): their kernel log is the host's
+	Containerized map[string]string
+	// Boots is when each node last booted, from its probe's uptime.
+	Boots map[string]time.Time
+	Lines int // log lines read
+}
+
+func newTimeline() *Timeline {
+	return &Timeline{ClockFix: map[string]time.Duration{}, Containerized: map[string]string{}, Boots: map[string]time.Time{}}
 }
 
 // clockTolerance: offsets below it are probe latency, not a wrong clock.
@@ -68,7 +77,7 @@ const clockTolerance = 2 * time.Second
 // recognizes become entries (a journal is mostly routine); events, container
 // terminations and node condition changes always do.
 func Build(b *gather.Bundle, r *gather.Replayed) *Timeline {
-	tl := &Timeline{ClockFix: map[string]time.Duration{}}
+	tl := newTimeline()
 	now := b.Manifest.Created
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -90,6 +99,12 @@ func Build(b *gather.Bundle, r *gather.Replayed) *Timeline {
 			fix = ni.ClockOffset
 			tl.ClockFix[node] = fix
 		}
+		if ni := r.Input.Nodes[node]; ni != nil && ni.Hardening["container"] != "" {
+			tl.Containerized[node] = ni.Hardening["container"]
+		}
+		if ni := r.Input.Nodes[node]; ni != nil && ni.Uptime > 0 && !ni.Collected.IsZero() {
+			tl.Boots[node] = ni.Collected.Add(-ni.Uptime)
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -107,6 +122,19 @@ func Build(b *gather.Bundle, r *gather.Replayed) *Timeline {
 		add(es, n)
 	}()
 	wg.Wait()
+	// API container logs carry no node; give them the pod's, so a line the
+	// node's own CRI log also holds is one entry, not one per source
+	podNode := map[string]string{}
+	for i := range r.Snap.Pods {
+		p := &r.Snap.Pods[i]
+		podNode[p.Namespace+"/"+p.Name] = p.Spec.NodeName
+	}
+	for i := range tl.Entries {
+		if e := &tl.Entries[i]; e.Kind == "pod" && e.Node == "" {
+			ns, pod, _ := splitUnit(e.Unit)
+			e.Node = podNode[ns+"/"+pod]
+		}
+	}
 	tl.Entries = append(tl.Entries, snapshotEntries(r.Snap)...)
 	tl.Entries = dedupe(tl.Entries)
 	sort.SliceStable(tl.Entries, func(i, j int) bool { return tl.Entries[i].Time.Before(tl.Entries[j].Time) })
@@ -147,6 +175,16 @@ func nodeEntries(b *gather.Bundle, dir, node string, now time.Time) ([]Entry, in
 	var out []Entry
 	lines := 0
 	root := b.Path(dir)
+	zone := nodeZone(b, dir)
+	// the syslog file carries the boots before this one; with a persistent
+	// journal previous-boot.log already does
+	prevJournal := false
+	if st, err := os.Stat(b.Path(dir + "/journal/previous-boot.log")); err == nil && st.Size() > 0 {
+		prevJournal = true
+		if e, ok := lastLineEntry(b.Path(dir+"/journal/previous-boot.log"), dir+"/journal/previous-boot.log", node); ok {
+			out = append(out, e)
+		}
+	}
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
@@ -163,6 +201,10 @@ func nodeEntries(b *gather.Bundle, dir, node string, now time.Time) ([]Entry, in
 			ls, nums, n := readCandidates(p)
 			lines += n
 			srcs = append(srcs, logs.Source{Name: rel, Unit: nodeinfo.LogFileUnit(sub), Lines: ls, Numbers: nums})
+		case sub == "files/messages" || sub == "files/syslog":
+			es, n := syslogEntries(p, rel, node, now.In(zone), !prevJournal)
+			lines += n
+			out = append(out, es...)
 		case strings.HasPrefix(sub, "pods/") && strings.HasSuffix(sub, ".log"):
 			// pods/<ns>_<pod>_<uid>/<container>/<n>.log
 			parts := strings.Split(sub, "/")
@@ -178,7 +220,7 @@ func nodeEntries(b *gather.Bundle, dir, node string, now time.Time) ([]Entry, in
 		return nil
 	})
 	// log files with klog / logfmt stamps are read in the node's zone
-	sum := logs.ClassifySources(srcs, now.In(nodeZone(b, dir)))
+	sum := logs.ClassifySources(srcs, now.In(zone))
 	for _, m := range sum.Matches {
 		if m.Pattern == nil || m.Time.IsZero() {
 			continue
@@ -390,7 +432,7 @@ func snapshotEntries(s *k8s.Snapshot) []Entry {
 // and the log lines each node's probe classified (logSum, keyed by node).
 // No file references: live entries point at the unit they came from.
 func BuildLive(s *k8s.Snapshot, logSum map[string]*logs.Summary) *Timeline {
-	tl := &Timeline{ClockFix: map[string]time.Duration{}}
+	tl := newTimeline()
 	for node, sum := range logSum {
 		if sum == nil {
 			continue

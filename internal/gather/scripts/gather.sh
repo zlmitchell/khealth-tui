@@ -59,10 +59,13 @@ capt() {
   fi
 }
 prep() { room || { echo "$1" >> "$S/skipped"; return 1; }; pf=$D/$1; mkdir -p "${pf%/*}"; }
-# put NAME CMD...: an external command's output (with a timeout)
-put() { n=$1; shift; prep "$n" || return 0; $TO "$@" 2>&1 | capt "$D/$n"; }
+# put NAME CMD...: an external command's output (with a timeout). stdin is
+# closed: the script itself arrives on stdin (sh -s), and a tool that reads
+# a pipe there (ausearch does) would swallow the rest of it - the shell then
+# ends at EOF with exit 0 and nothing packed
+put() { n=$1; shift; prep "$n" || return 0; $TO "$@" </dev/null 2>&1 | capt "$D/$n"; }
 # putf NAME FUNC...: a shell function's output (functions time out inside)
-putf() { n=$1; shift; prep "$n" || return 0; "$@" 2>&1 | capt "$D/$n"; }
+putf() { n=$1; shift; prep "$n" || return 0; "$@" </dev/null 2>&1 | capt "$D/$n"; }
 # copyf NAME SRC [CAP]: the tail of a file
 # logs pass through scrublog (base.sh): the kubelet dumps container specs
 # with their env values into its errors
@@ -270,7 +273,7 @@ if [ "$(journalctl --list-boots --no-pager 2>/dev/null | grep -c .)" -gt 1 ]; th
 fi
 if command -v ausearch >/dev/null 2>&1; then
   TS=yesterday; [ "$MIN" -gt 1440 ] && TS=week-ago
-  put system/denials.txt ausearch -m AVC,USER_AVC,SELINUX_ERR,FANOTIFY -ts "$TS" -i
+  put system/denials.txt ausearch -m AVC,USER_AVC,SELINUX_ERR,FANOTIFY -ts "$TS" -i --input-logs
 fi
 for f in /var/log/messages /var/log/syslog; do
   copyf "files/${f##*/}" "$f"

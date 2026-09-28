@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // YAMLList reads a key from an rke2/k3s config file as a list: a block or
@@ -50,7 +52,7 @@ func scanList(body, key string) []string {
 			continue
 		}
 		if inList && strings.HasPrefix(t, "-") {
-			if v := yamlScalar(strings.TrimPrefix(t, "-")); v != "" {
+			if v := strutil.YAMLScalar(strings.TrimPrefix(t, "-")); v != "" {
 				*target = append(*target, v)
 			}
 			continue
@@ -72,13 +74,13 @@ func scanList(body, key string) []string {
 		default:
 			continue
 		}
-		v = yamlScalar(v)
+		v = strutil.YAMLScalar(v)
 		switch {
 		case v == "":
 			inList = true
 		case strings.HasPrefix(v, "["):
 			for _, e := range strings.Split(strings.Trim(v, "[]"), ",") {
-				if e = yamlScalar(e); e != "" {
+				if e = strutil.YAMLScalar(e); e != "" {
 					*target = append(*target, e)
 				}
 			}
@@ -87,18 +89,6 @@ func scanList(body, key string) []string {
 		}
 	}
 	return append(base, extra...)
-}
-
-// yamlScalar trims a scalar's whitespace, trailing comment and quotes.
-func yamlScalar(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.Index(s, " #"); i >= 0 {
-		s = strings.TrimSpace(s[:i])
-	}
-	if len(s) >= 2 && (s[0] == '"' && s[len(s)-1] == '"' || s[0] == '\'' && s[len(s)-1] == '\'') {
-		s = s[1 : len(s)-1]
-	}
-	return s
 }
 
 // splitCommas splits an rke2 slice value given as one scalar ("a,b").

@@ -21,6 +21,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"golang.org/x/term"
 	"k8s.io/klog/v2"
 
@@ -237,6 +238,17 @@ func setTheme(cfg config.Config) {
 
 // analyzeOnce is --analyze: the findings of a log bundle, recomputed
 // offline as of when it was gathered.
+// useColor: the reports get colors on a terminal only, unless --no-color,
+// NO_COLOR (https://no-color.org) or TERM=dumb say otherwise; a Windows
+// console that cannot take escape codes gets none.
+func useColor(cfg config.Config) bool {
+	if cfg.NoColor || os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" || !term.IsTerminal(int(os.Stdout.Fd())) {
+		return false
+	}
+	_, err := termenv.EnableVirtualTerminalProcessing(termenv.DefaultOutput())
+	return err == nil
+}
+
 func analyzeOnce(cfg config.Config) error {
 	b, err := gather.Open(cfg.Analyze)
 	if err != nil {
@@ -248,7 +260,7 @@ func analyzeOnce(cfg config.Config) error {
 		return err
 	}
 	m := b.Manifest
-	fmt.Printf("bundle %s (%s), gathered %s by %s\n", m.Context, m.Server, m.Created.Local().Format("2006-01-02 15:04 MST"), m.Tool)
+	fmt.Printf("bundle %s (%s), gathered %s by %s\n", m.Label(), m.Server, m.Created.Local().Format("2006-01-02 15:04 MST"), m.Tool)
 	scope := m.Scope
 	if m.Workload != nil {
 		scope += fmt.Sprintf(" %s/%s %s", m.Workload.Namespace, strings.ToLower(m.Workload.Kind), m.Workload.Name)
@@ -272,6 +284,7 @@ func analyzeOnce(cfg config.Config) error {
 		_, err := tea.NewProgram(app, tea.WithAltScreen()).Run()
 		return err
 	}
+	rca.Color = useColor(cfg)
 	incidents := rca.Extract(tl, r.Snap)
 	if cfg.Incident != "" {
 		for _, in := range incidents {

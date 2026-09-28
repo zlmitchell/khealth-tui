@@ -130,3 +130,20 @@ func URLHost(raw string) string {
 	}
 	return u.Host
 }
+
+// YAMLScalar is a plain YAML scalar as a line-by-line reader sees it: the
+// whitespace, a trailing comment and one pair of enclosing quotes trimmed,
+// so `node-ip: "10.0.0.5" # moved` reads as 10.0.0.5.
+func YAMLScalar(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "#") {
+		return ""
+	}
+	if i := strings.Index(s, " #"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	if len(s) >= 2 && (s[0] == '"' && s[len(s)-1] == '"' || s[0] == '\'' && s[len(s)-1] == '\'') {
+		s = s[1 : len(s)-1]
+	}
+	return s
+}

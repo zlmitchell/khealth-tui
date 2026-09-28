@@ -82,6 +82,18 @@ func newRunner(t *testing.T, cfg config.SSH) *Runner {
 	return r
 }
 
+// accept-new on a fresh runner (no ~/.ssh yet) starts an empty known_hosts
+// instead of failing, as ssh -o StrictHostKeyChecking=accept-new does.
+func TestAcceptNewCreatesKnownHosts(t *testing.T) {
+	kh := filepath.Join(t.TempDir(), ".ssh", "known_hosts")
+	if _, err := New(config.SSH{User: "ops", Password: "pw", StrictHostKey: true, AcceptNewHostKeys: true, KnownHosts: kh, Concurrency: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(kh); err != nil || st.Size() != 0 {
+		t.Errorf("known_hosts not created empty: %v", err)
+	}
+}
+
 func TestNewAuthSetup(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "")
 	t.Setenv("HOME", t.TempDir()) // no ~/.ssh keys

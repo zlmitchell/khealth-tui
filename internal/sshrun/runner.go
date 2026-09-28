@@ -96,6 +96,17 @@ func New(cfg config.SSH) (*Runner, error) {
 			home, _ := os.UserHomeDir()
 			path = filepath.Join(home, ".ssh", "known_hosts")
 		}
+		if cfg.AcceptNewHostKeys {
+			// a fresh runner or CI container has no known_hosts yet: start an
+			// empty one, as ssh with StrictHostKeyChecking=accept-new does
+			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err == nil {
+					if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+						f.Close()
+					}
+				}
+			}
+		}
 		cb, err := knownhosts.New(path)
 		if err != nil {
 			return nil, fmt.Errorf("known_hosts %s: %w (set ssh.strict_host_key: false or --insecure-host-key to skip)", path, err)
