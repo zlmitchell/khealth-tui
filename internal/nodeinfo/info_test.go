@@ -102,6 +102,8 @@ cni: canal
 etcd-snapshot-retention: 10
 etcd-s3: true
 etcd-s3-config-secret: rke2-s3
+# node-ip: 10.0.0.9
+node-ip: "10.0.0.5" # pinned
 tls-san:
   - lb.example.com
 --- /etc/rancher/rke2/config.yaml.d/50-rancher.yaml
@@ -232,6 +234,9 @@ func TestParse(t *testing.T) {
 	}
 	if info.Settings["profile"] != "cis" || info.Settings["server"] != "https://10.0.0.1:9345" || info.Settings["etcd-s3-config-secret"] != "rke2-s3" {
 		t.Errorf("settings: %v", info.Settings)
+	}
+	if info.Settings["node-ip"] != "10.0.0.5" {
+		t.Errorf("node-ip must lose its quotes and comment: %q", info.Settings["node-ip"])
 	}
 	if info.Settings["token"] != "<masked>" {
 		t.Errorf("token should be masked: %q", info.Settings["token"])

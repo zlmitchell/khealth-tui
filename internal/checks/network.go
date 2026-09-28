@@ -157,9 +157,13 @@ func evalNetwork(in Input, add func(Severity, string, string, string, string)) {
 		}
 		var pingFail, pingOK, dnsPodOK, dnsPodFail, dnsSvcOK, dnsSvcFail, tcpFail []string
 		dnsSvc := s.ClusterDNSIP()
+		skipped := map[string]bool{} // a missing tool skips every target of that kind
 		for _, p := range ni.NetProbes {
 			if p.Skip {
-				add(SevInfo, "network", name, p.Kind+" probe skipped: "+p.Detail, "")
+				if msg := p.Kind + " probe skipped: " + p.Detail; !skipped[msg] {
+					skipped[msg] = true
+					add(SevInfo, "network", name, msg, "")
+				}
 				continue
 			}
 			switch p.Kind {

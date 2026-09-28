@@ -121,6 +121,14 @@ func (in Incident) Context(src Source, tl *Timeline, all []Incident, window time
 	}
 	sort.SliceStable(c.Related, func(i, j int) bool { return c.Related[i].Time.Before(c.Related[j].Time) })
 	c.Suspects, c.Verdict = attribute(c, deps)
+	if in.Kind == KindReboot {
+		// the restart's phases are the explanation, one per line
+		for _, r := range Restarts(tl, s) {
+			if r.Node == in.Node && r.Start().Equal(in.Time) {
+				c.Verdict = strings.Join(r.Phases(), "\n  ")
+			}
+		}
+	}
 	return c
 }
 
@@ -529,6 +537,10 @@ func attribute(c *Context, deps map[string]bool) ([]Suspect, string) {
 			add("node drain "+o.Node, score, why)
 			continue
 		}
+		if o.Kind == KindReboot && o.Node != "" && o.Node == in.Node && !in.Time.Before(o.Time) && !in.Time.After(o.Last) {
+			add("node restart "+o.Node, 0.9, fmt.Sprintf("it happened while node %s was restarting (%s to %s)", o.Node, clock(o.Time), clock(o.Last)))
+			continue
+		}
 		dep := deps[o.Namespace+"/"+workloadName(o.Workload)]
 		switch {
 		case dep:
@@ -555,6 +567,11 @@ func attribute(c *Context, deps map[string]bool) ([]Suspect, string) {
 			}
 		}
 		add("control plane (etcd latency)", 0.15, "etcd / lease trouble in the window: "+strings.Join(parts, ", "))
+	}
+	if in.Kind == KindReboot {
+		// the restart's phases are the explanation; its effects are the
+		// incidents folded into it
+		return nil, in.Summary
 	}
 	if in.Kind == KindDrain {
 		// an operator action (or an upgrade / autoscaler): nothing in the

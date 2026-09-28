@@ -40,16 +40,19 @@ func init() {
 
 // klogMark reports whether line holds \b<sev>[0-9]{4}<space> (a klog
 // header such as "E0926 ").
-func klogMark(line string, sev byte) bool {
+func klogMark(line string, sev byte) bool { return klogIndex(line, sev) >= 0 }
+
+// klogIndex is where klogMark's header starts in line, or -1.
+func klogIndex(line string, sev byte) int {
 	for i := 0; i+5 < len(line); i++ {
 		if line[i] != sev || (i > 0 && isWord(line[i-1])) {
 			continue
 		}
 		if isDigit(line[i+1]) && isDigit(line[i+2]) && isDigit(line[i+3]) && isDigit(line[i+4]) && line[i+5] == ' ' {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }

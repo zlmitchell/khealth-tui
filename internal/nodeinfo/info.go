@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/zlmitchell/khealth-tui/internal/perf"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // Info is everything collected from one node.
@@ -536,15 +537,15 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 			continue // kubeadm-flags.env / systemd drop-ins are not key: value files
 		}
 		for _, l := range strings.Split(cf.Content, "\n") {
-			if strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t") || strings.HasPrefix(l, "-") {
+			if strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t") || strings.HasPrefix(l, "-") || strings.HasPrefix(l, "#") {
 				continue
 			}
 			if k, v, ok := strings.Cut(l, ":"); ok {
-				k = strings.TrimSpace(k)
-				v = strings.TrimSpace(v)
+				// node-ip: "10.0.0.5" # moved must compare equal to the node's addresses
+				k = strutil.YAMLScalar(k)
+				v = strutil.YAMLScalar(v)
 				if k != "" {
-					if prev, exists := info.Settings[k]; exists && v == "" {
-						_ = prev
+					if _, exists := info.Settings[k]; exists && v == "" {
 						continue
 					}
 					info.Settings[k] = v
@@ -1413,7 +1414,11 @@ func (i *Info) HardeningItems() []HardeningItem {
 		if has("apparmor=0") || strings.Contains(cmdline, "security=selinux") || i.ServiceEnabled("apparmor") == "disabled" || i.ServiceEnabled("apparmor") == "masked" {
 			boot = "disabled"
 		}
-		out = append(out, HardeningItem{Name: "AppArmor", Runtime: rt, Boot: boot, OK: h["apparmor"] == "Y" && h["apparmor_enforced"] != "0", Mismatch: (h["apparmor"] == "Y") != (boot == "enabled")})
+		mismatch := (h["apparmor"] == "Y") != (boot == "enabled")
+		if h["container"] != "" {
+			boot, mismatch = "host kernel ("+h["container"]+" node)", false // the kernel and its cmdline are the host's
+		}
+		out = append(out, HardeningItem{Name: "AppArmor", Runtime: rt, Boot: boot, OK: h["apparmor"] == "Y" && h["apparmor_enforced"] != "0", Mismatch: mismatch})
 	default:
 		out = append(out, HardeningItem{Name: "MAC", Runtime: "none", Boot: "none", OK: false})
 	}

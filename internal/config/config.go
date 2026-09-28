@@ -64,6 +64,9 @@ type Config struct {
 	// AnalyzeTUI (--tui) opens the analyzed bundle in the TUI instead of
 	// printing it: every tab from the bundle, the Incidents tab first.
 	AnalyzeTUI bool `yaml:"-"`
+	// NoColor (--no-color, or NO_COLOR in the environment) prints the
+	// --analyze reports without ANSI colors, even on a terminal.
+	NoColor bool `yaml:"-"`
 
 	// Namespaces names what this deployment treats as infrastructure.
 	Namespaces Namespaces `yaml:"namespaces"`
@@ -375,6 +378,7 @@ func Load(args []string) (Config, error) {
 		analyze      = fs.String("analyze", "", "no TUI, no cluster: evaluate a log bundle (.tar.gz or unpacked directory) written by --gather and print the findings as of when it was gathered; with --export also write the report")
 		analyzeTUI   = fs.Bool("tui", false, "with --analyze: open the bundle in the TUI (every tab from the bundle, Incidents first) instead of printing the analysis")
 		incidentID   = fs.String("incident", "", "with --analyze: show one incident (an ID from the incident list, e.g. eviction-1) in context: suspects, workload, node shape, ingress traffic, timeline")
+		noColor      = fs.Bool("no-color", false, "print the --analyze reports without colors (also NO_COLOR; a pipe or a file never gets them)")
 		timelineOut  = fs.String("timeline", "", "with --analyze: write the full classified timeline of the bundle here (JSON lines for .jsonl, text otherwise)")
 		gatherSince  = fs.Duration("gather-since", 0, "with --gather: how far back logs go (default 24h)")
 		gatherWl     = fs.String("gather-workload", "", "with --gather: one workload instead of the whole cluster, as namespace/kind/name (deploy, sts, ds, job, cronjob, rs, pod): every pod's logs healthy or not, the namespace's objects and events, its nodes and the control plane")
@@ -565,6 +569,8 @@ func Load(args []string) (Config, error) {
 			cfg.Incident = *incidentID
 		case "tui":
 			cfg.AnalyzeTUI = *analyzeTUI
+		case "no-color":
+			cfg.NoColor = *noColor
 		case "gather-since":
 			cfg.Gather.Since = *gatherSince
 		case "gather-workload":

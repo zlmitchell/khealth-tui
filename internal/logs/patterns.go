@@ -72,6 +72,10 @@ type Summary struct {
 }
 
 var patterns = []Pattern{
+	// ---- node shutdown and boot (rca.Restarts reads a restart's phases from them) ----
+	{Name: "shutdown-requested", Class: ClassInfo, Re: regexp.MustCompile(`guest-shutdown called, mode: |System is (rebooting|powering down|powering off|halting)|Power key pressed|The system will (reboot|power off|halt) now|Shutdown scheduled for|shutdown\[[0-9]+\]: Shutting down`), Explain: "Something asked the node to shut down or reboot: the hypervisor through its guest agent (qemu-ga guest-shutdown), systemd-logind (a reboot / shutdown command, with the reason in brackets), the power button (ACPI), or a scheduled shutdown. What follows until the next boot is the shutdown."},
+	{Name: "shutdown-clean", Class: ClassInfo, Re: regexp.MustCompile(`rsyslogd.*exiting on signal 15|Reached target .*(Reboot|Power-Off|Final Step|System Halt)|systemd-shutdown\[[0-9]+\]: |Journal stopped`), Explain: "The node's shutdown reached its last steps (the logger stopped, the reboot / power-off target was reached): the old boot ended cleanly."},
+	{Name: "kernel-boot", Class: ClassInfo, Re: regexp.MustCompile(`kernel: Linux version [0-9]`), Explain: "The kernel started: the node booted here."},
 	// ---- completion markers ----
 	{Name: "rke2-up", Class: ClassInfo, Re: regexp.MustCompile(`(rke2|k3s) is up and running`), Explain: "Startup completed: the supervisor finished bootstrapping."},
 	{Name: "rke2-start", Class: ClassInfo, Re: regexp.MustCompile(`Starting (rke2|k3s) v|Starting rke2-(server|agent)|Started rke2-(server|agent)`), Explain: "The supervisor process started (boot, restart, upgrade). The minutes after it are the startup window: unmatched errors in it that do not recur are reported as startup noise."},
@@ -90,6 +94,12 @@ var patterns = []Pattern{
 	{Name: "rancher-connect", Class: ClassStartup, Re: regexp.MustCompile(`error while connecting to Rancher|\[K8s\] error while (listing|watching)|Waiting for (Rancher|the cattle)|cattle-cluster-agent .*(error|failed)|rancher2_connection_info`), Explain: "rancher-system-agent (re)connecting to Rancher to fetch plans. Brief at start; persistent = the node cannot reach the Rancher URL (agent-url on the RKE2 tab): proxy, DNS, CA or the cattle-cluster-agent tunnel.", Persist: 5 * time.Minute},
 
 	// ---- rke2 supervisor (rke2-server / rke2-agent journal) ----
+	// the supervisor refusing the join token: ahead of wait-apiserver and
+	// registry-auth, which would otherwise claim its "... 401 Unauthorized"
+	{Name: "token-mismatch", Class: ClassError, Re: regexp.MustCompile(`token does not match|Failed to validate token|bootstrap data already found and encrypted with different token|/(v1-(rke2|k3s)/|cacerts)[^ ]*: 401 Unauthorized`), Explain: "Join token mismatch: the node's `token:` does not match the server's /var/lib/rancher/rke2/server/token (or the cluster was re-initialized). Fix the token in config.yaml."},
+	// a client of the apiserver with an expired or revoked token (a deleted
+	// ServiceAccount token, a Rancher token that was invalidated): not the join token
+	{Name: "apiserver-auth-reject", Class: ClassWarn, Re: regexp.MustCompile(`Unable to authenticate the request`), Explain: "kube-apiserver rejected a client's credentials: an expired or revoked bearer token (a deleted ServiceAccount token, an invalidated Rancher token), or a client certificate from another CA. The apiserver's audit log names the client (its user agent and source IP); the client keeps retrying until it is given new credentials."},
 	// The supervisor on 9345 fronts the embedded controllers and proxies
 	// kubectl logs/exec and metrics traffic to the kubelets. Its errors at
 	// boot are almost all "the thing behind me is not up yet"; the same
@@ -124,11 +134,14 @@ var patterns = []Pattern{
 	{Name: "snapshot-ok", Class: ClassInfo, Re: regexp.MustCompile(`Saving etcd snapshot|Snapshot .* saved|etcd snapshot .* (complete|created)`), Explain: "Scheduled etcd snapshot ran."},
 
 	// ---- warnings ----
-	{Name: "etcd-slow-fsync", Class: ClassWarn, Re: regexp.MustCompile(`slow fdatasync|took too long|apply request took too long|waiting for ReadIndex response took too long|wal: sync duration`), Explain: "etcd disk latency: a WAL fsync or backend commit took longer than etcd expects (p99 should stay under 10 ms). Sustained values mean the datastore disk is too slow: put etcd's data dir on SSD/NVMe-backed storage with host cache off, keep etcd off disks shared with images and logs, and on VMs check CPU steal. As a stop-gap on a lab cluster raise etcd's heartbeat-interval=500 and election-timeout=5000 so the members stop losing leadership over it."},
+	{Name: "etcd-slow-fsync", Class: ClassWarn, Re: regexp.MustCompile(`slow fdatasync|apply request took too long|waiting for ReadIndex response took too long|wal: sync duration|failed to send out heartbeat on time`), Explain: "etcd disk latency: a WAL fsync or backend commit took longer than etcd expects (p99 should stay under 10 ms). Sustained values mean the datastore disk is too slow: put etcd's data dir on SSD/NVMe-backed storage with host cache off, keep etcd off disks shared with images and logs, and on VMs check CPU steal. As a stop-gap on a lab cluster raise etcd's heartbeat-interval=500 and election-timeout=5000 so the members stop losing leadership over it."},
 	{Name: "leader-change", Class: ClassWarn, Re: regexp.MustCompile(`elected leader|lost leader|raft.node: .* (changed|lost) leader|became (leader|follower|candidate) at term`), Explain: "etcd leader election. Frequent elections indicate network or disk latency between control-plane nodes."},
 	{Name: "s3-upload-fail", Class: ClassError, Re: regexp.MustCompile(`(?i)(failed|error|unable).{0,60}(upload|s3 client|s3 config|snapshot to s3|s3 bucket)|s3.{0,80}(AccessDenied|SignatureDoesNotMatch|NoSuchBucket|InvalidAccessKeyId|certificate signed by unknown authority|no such host|connection refused|RequestTimeTooSkewed)`), Explain: "etcd snapshot upload to S3 failed. Local snapshots continue; check etcd-s3-* settings (endpoint, bucket, credentials, CA) and that the bucket accepts writes."},
 	{Name: "etcd-nospace", Class: ClassError, Re: regexp.MustCompile(`mvcc: database space exceeded|etcdserver: no space|alarm:NOSPACE|NOSPACE`), Explain: "etcd database hit its quota. Cluster is read-only until you compact, defrag and disarm the alarm."},
 	{Name: "pleg", Class: ClassWarn, Re: regexp.MustCompile(`PLEG is not healthy|skipping pod synchronization`), Explain: "kubelet's pod lifecycle event generator is slow: containerd overloaded, too many containers, or disk IO issues. Node may flap NotReady."},
+	// the kubelet probing its image filesystem at start, logged as E... by the
+	// eviction manager: ahead of "eviction", which would count it as pressure
+	{Name: "eviction-fs-check", Class: ClassInfo, Re: regexp.MustCompile(`failed to check if we have separate container filesystem`), Explain: "The kubelet's eviction manager checked at start whether the image filesystem is separate from the root one and could not tell yet (the container runtime's stats were not ready). It assumes one filesystem and carries on: no pressure, no eviction."},
 	{Name: "eviction", Class: ClassWarn, Re: regexp.MustCompile(`eviction manager|attempting to reclaim|Evicting pod|The node was low on resource`), Explain: "Node pressure (disk/memory/pid). kubelet is evicting pods. Check disk and memory usage on the Nodes tab."},
 	{Name: "oom", Class: ClassWarn, Re: regexp.MustCompile(`Out of memory: Killed process|oom-kill|OOMKilling|OOMKilled`), Explain: "Kernel OOM killer fired. Check memory limits/requests and node memory."},
 	{Name: "clock-skew", Class: ClassWarn, Re: regexp.MustCompile(`clock (skew|difference)|x509: certificate has expired or is not yet valid|time is (ahead|behind)`), Explain: "Clock skew or cert validity window. Ensure NTP/chrony is synchronized on all nodes."},
@@ -146,16 +159,17 @@ var patterns = []Pattern{
 	{Name: "generic-warn", Class: ClassWarn, Re: regexp.MustCompile(`level=warn(ing)?|\bW[0-9]{4} `), Explain: "Warning-level log line not matched by a specific rule."},
 
 	// ---- errors ----
-	{Name: "token-mismatch", Class: ClassError, Re: regexp.MustCompile(`token does not match|Failed to validate token|bootstrap data already found and encrypted with different token|invalid bearer token|Unauthorized`), Explain: "Join token mismatch: the node's `token:` does not match the server's /var/lib/rancher/rke2/server/token (or the cluster was re-initialized). Fix the token in config.yaml."},
 	{Name: "ca-mismatch", Class: ClassError, Re: regexp.MustCompile(`failed to get CA certs|certificate signed by unknown authority|x509: certificate is valid for|certificate verify failed`), Explain: "TLS trust failure between agent and server. Usually a rebuilt server with a new CA, a `server:` URL pointing at a different cluster, or a proxy intercepting TLS."},
 	{Name: "cluster-id", Class: ClassError, Re: regexp.MustCompile(`cluster ID mismatch|cluster-id mismatch|member .* has already been bootstrapped|etcd cluster join failed|failed to join etcd cluster`), Explain: "This etcd member's data belongs to a different cluster. Remove the node from the cluster and wipe /var/lib/rancher/rke2/server/db before rejoining."},
 	{Name: "etcd-member-missing", Class: ClassError, Re: regexp.MustCompile(`unable to find etcd member|etcdserver: member not found|etcd member .* is not in cluster|failed to (add|remove) member`), Explain: "etcd membership is out of sync with the nodes (stale member after a node was removed). Use etcdctl member list / member remove."},
-	{Name: "port-in-use", Class: ClassError, Re: regexp.MustCompile(`address already in use|bind: address already in use`), Explain: "A required port (6443, 9345, 2379/2380, 10250) is taken by another process."},
+	{Name: "port-in-use", Class: ClassError, Re: regexp.MustCompile(`:(6443|6444|9345|2379|2380|2381|10248|10250|10256|10257|10259): bind: address already in use`), Explain: "A required port (6443, 9345, 2379/2380, 10250) is taken by another process."},
 	{Name: "disk-full", Class: ClassError, Re: regexp.MustCompile(`no space left on device`), Explain: "Filesystem is full. Check the Nodes tab disk usage (containerd images, logs, etcd)."},
 	{Name: "containerd-down", Class: ClassError, Re: regexp.MustCompile(`Failed to start containerd|containerd.*(failed to start|\bexited\b)|failed to (connect|dial) .*containerd\.sock|failed to get sandbox image`), Explain: "Container runtime failure. Nothing can start until containerd is healthy (check journalctl -u containerd, or agent/containerd/containerd.log under the rke2/k3s data dir)."},
-	{Name: "kubelet-exit", Class: ClassError, Re: regexp.MustCompile(`kubelet exited|kubelet .* exited: exit status|Failed to start ContainerManager|failed to run Kubelet`), Explain: "kubelet crashed. Common causes: swap enabled, cgroup driver mismatch, protect-kernel-defaults with wrong sysctls, invalid kubelet args."},
+	// swap and kernel-defaults ahead of kubelet-exit: the kubelet reports both
+	// as "failed to run Kubelet: ..."
 	{Name: "swap", Class: ClassError, Re: regexp.MustCompile(`running with swap on is not supported|failSwapOn`), Explain: "kubelet refuses to run with swap enabled. Disable swap or set failSwapOn=false."},
-	{Name: "kernel-defaults", Class: ClassError, Re: regexp.MustCompile(`protect-kernel-defaults|kernel defaults|invalid kernel flag|vm.overcommit_memory|kernel.panic`), Explain: "kubelet --protect-kernel-defaults is on but sysctls do not match (vm.overcommit_memory=1, vm.panic_on_oom=0, kernel.panic=10, kernel.panic_on_oops=1, kernel.keys.root_maxbytes/root_maxkeys). Apply rke2's rke2-cis-sysctl.conf."},
+	{Name: "kernel-defaults", Class: ClassError, Re: regexp.MustCompile(`invalid kernel flag: |invalid kernel parameter value|failed to validate kernel (flags|parameters)`), Explain: "kubelet --protect-kernel-defaults is on but sysctls do not match (vm.overcommit_memory=1, vm.panic_on_oom=0, kernel.panic=10, kernel.panic_on_oops=1, kernel.keys.root_maxbytes/root_maxkeys). Apply rke2's rke2-cis-sysctl.conf."},
+	{Name: "kubelet-exit", Class: ClassError, Re: regexp.MustCompile(`kubelet exited|kubelet .* exited: exit status|Failed to start ContainerManager|failed to run Kubelet`), Explain: "kubelet crashed. Common causes: swap enabled, cgroup driver mismatch, protect-kernel-defaults with wrong sysctls, invalid kubelet args."},
 	{Name: "etcd-user", Class: ClassError, Re: regexp.MustCompile(`etcd user .* (does not exist|not found)|profile.*cis.*etcd`), Explain: "CIS profile requires an `etcd` user/group on the host: useradd -r -c 'etcd user' -s /sbin/nologin -M etcd -U."},
 	{Name: "cis-precheck", Class: ClassError, Re: regexp.MustCompile(`CIS profile|host is not configured|failed CIS`), Explain: "CIS/STIG profile pre-flight check failed (sysctls, etcd user, or file permissions)."},
 	{Name: "selinux", Class: ClassWarn, Re: regexp.MustCompile(`SELinux .* (denied|denial)|avc:.*denied`), Explain: "SELinux denials. Install rke2-selinux / container-selinux, or check custom policies."},
@@ -412,25 +426,21 @@ func fileTime(t string, now time.Time) time.Time {
 func (s *Summary) classify(m *Match) {
 	t := strings.TrimSpace(m.Line)
 	lower := strings.ToLower(t)
-	for i := range patterns {
-		p := &patterns[i]
-		if p.matches(t, lower) {
-			m.Pattern = p
-			m.Class = p.Class
-			switch p.Name {
-			case "rke2-up":
-				if m.Time.After(s.Startup) {
-					s.Startup = m.Time
-				}
-				if !m.Time.IsZero() {
-					s.Ups = append(s.Ups, m.Time)
-				}
-			case "rke2-start", "kubelet-started":
-				if !m.Time.IsZero() {
-					s.Starts = append(s.Starts, m.Time)
-				}
+	if p := match(t, lower); p != nil {
+		m.Pattern = p
+		m.Class = p.Class
+		switch p.Name {
+		case "rke2-up":
+			if m.Time.After(s.Startup) {
+				s.Startup = m.Time
 			}
-			break
+			if !m.Time.IsZero() {
+				s.Ups = append(s.Ups, m.Time)
+			}
+		case "rke2-start", "kubelet-started":
+			if !m.Time.IsZero() {
+				s.Starts = append(s.Starts, m.Time)
+			}
 		}
 	}
 	if m.Pattern != nil {
@@ -501,13 +511,62 @@ func (s *Summary) Last(name string) Match {
 // nil when no pattern matches.
 func Lookup(line string) *Pattern {
 	t := strings.TrimSpace(line)
-	lower := strings.ToLower(t)
+	return match(t, strings.ToLower(t))
+}
+
+// match is the first pattern the line matches. The catch-alls defer to the
+// line's own level: Calico's "[INFO][9] ... Error getting resource ...
+// error=..." is an info line, and a [WARNING] line is at most a warning.
+func match(t, lower string) *Pattern {
 	for i := range patterns {
-		if patterns[i].matches(t, lower) {
-			return &patterns[i]
+		p := &patterns[i]
+		if !p.matches(t, lower) {
+			continue
 		}
+		if isGeneric(p) {
+			switch ownLevel(t, lower) {
+			case ClassInfo:
+				continue // a specific rule further down may still claim it
+			case ClassWarn:
+				if p.Name == "generic-error" {
+					return Find("generic-warn")
+				}
+			}
+		}
+		return p
 	}
 	return nil
+}
+
+// levelMarks are the level markers of the log formats a node carries:
+// logrus/logfmt, Calico and other bracketed loggers.
+var levelMarks = []struct {
+	mark  string
+	class Class
+}{
+	{"level=info", ClassInfo}, {"level=debug", ClassInfo}, {"level=trace", ClassInfo},
+	{"level=warn", ClassWarn}, {"level=error", ClassError},
+	{"[info]", ClassInfo}, {"[debug]", ClassInfo}, {"[warning]", ClassWarn}, {"[warn]", ClassWarn}, {"[error]", ClassError},
+}
+
+// ownLevel is the level the line's first marker gives it (a line can quote
+// another log's line after its own marker), ClassError when it has none.
+func ownLevel(t, lower string) Class {
+	first, c := len(lower), ClassError
+	for _, lm := range levelMarks {
+		if i := strings.Index(lower, lm.mark); i >= 0 && i < first {
+			first, c = i, lm.class
+		}
+	}
+	for _, k := range [...]struct {
+		sev   byte
+		class Class
+	}{{'I', ClassInfo}, {'W', ClassWarn}, {'E', ClassError}} {
+		if i := klogIndex(t, k.sev); i >= 0 && i < first {
+			first, c = i, k.class
+		}
+	}
+	return c
 }
 
 // Find returns the pattern by name.

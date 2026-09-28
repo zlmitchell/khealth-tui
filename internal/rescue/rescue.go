@@ -456,7 +456,7 @@ func parseFacts(out string) Facts {
 			c := strings.TrimPrefix(l, "config: ")
 			f.Config = append(f.Config, c)
 			k, v, _ := strings.Cut(c, ":")
-			v = strings.Trim(strings.TrimSpace(v), `"'`)
+			v = strutil.YAMLScalar(v)
 			switch strings.TrimSpace(k) {
 			case "server":
 				f.HasServer = v != ""

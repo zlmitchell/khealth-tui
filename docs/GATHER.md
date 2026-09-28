@@ -94,7 +94,8 @@ Only lines the knowledge base recognises become entries; a journal is mostly rou
 | disk | `no space left on device`, DiskPressure | evictions, image GC failures |
 | memory | OOMKilled containers (with their limit); the kernel OOM killer, MemoryPressure | evictions for memory |
 | image pull | failed pulls grouped by image | the cause, from the registry's answer: credentials, TLS, unreachable, missing tag, rate limit |
-| crash loop | restarting containers: exit code, reason and the last error line of the previous run | exits with 0 (the command does not stay in the foreground) |
+| node restart | a node restart, in phases: what asked for it (the hypervisor's guest agent, a reboot command, the power button, or nothing: a crash / power loss), the old boot's last log line (a clean shutdown, or one that hung), the boot, rke2/k3s up, the node Ready, and settled (the last pod that lived through it Ready again; pods that never came back are listed) | the containers it ended (exit 255, Unknown), the ones that exited once while the node came back, what the node logged in the 30 minutes before |
+| crash loop | restarting containers: exit code, reason and the last error line of the previous run - not the ones a node restart ended or that exited while it settled | exits with 0 (the command does not stay in the foreground) |
 | liveness | failing liveness probes | the kubelet killing the container |
 | NotReady node | the node's own warnings and errors in the 15 minutes before it turned | SSH failing too (the machine is down or cut off, not only the kubelet) |
 | scheduling | FailedScheduling, grouped by reason | the pending pods |
@@ -106,11 +107,13 @@ Only lines the knowledge base recognises become entries; a journal is mostly rou
 
 Every piece of evidence names its bundle file and line (`nodes/cp-2/journal/rke2-server.log:1830`).
 `--timeline FILE` writes the full timeline: JSON lines for `.jsonl`, text otherwise.
+On a terminal the report is colored: the confidence (high red, medium yellow, low cyan), each timeline line's class (error red, warn yellow) and each incident's kind. A pipe or a file gets plain text, and so does `--no-color` or `NO_COLOR` in the environment. Escape codes that apps write into their own logs are stripped either way.
 
 ### Incidents, one at a time
 
 Below the probable causes, `--analyze` lists the **incidents**, one line per workload, with the replicas folded into a count:
 
+- node restarts, from the request (or the last sign of life) to the node settled; the restarts, NotReady, liveness, scheduling and sandbox incidents inside that span are folded into it. The earlier boots come from `files/messages` (or `syslog`) when the journal is kept in memory only
 - OOM kills (a container's limit) and node OOM (the kernel killer)
 - evictions, and the kubelet refusing to admit pods while the node is under pressure
 - restarts, liveness kills, image pulls, unschedulable pods, denied creates, volume and sandbox (CNI) failures

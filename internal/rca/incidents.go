@@ -18,6 +18,7 @@ type Kind string
 
 // Incident kinds, in the order the explorer lists them.
 const (
+	KindReboot    Kind = "reboot"    // a node restarted: requested, down, booted, settled
 	KindOOM       Kind = "oom"       // a container hit its memory limit (OOMKilled)
 	KindNodeOOM   Kind = "node-oom"  // the kernel OOM killer on a node short of memory
 	KindEviction  Kind = "eviction"  // the kubelet evicted a pod for node pressure
@@ -35,11 +36,13 @@ const (
 )
 
 // Kinds lists every kind in display order.
-var Kinds = []Kind{KindOOM, KindNodeOOM, KindEviction, KindRejected, KindRestart, KindProbe, KindPull, KindSchedule, KindAdmission, KindVolume, KindSandbox, KindNotReady, KindDrain, KindPressure}
+var Kinds = []Kind{KindReboot, KindOOM, KindNodeOOM, KindEviction, KindRejected, KindRestart, KindProbe, KindPull, KindSchedule, KindAdmission, KindVolume, KindSandbox, KindNotReady, KindDrain, KindPressure}
 
 // Label is a short human name for the kind.
 func (k Kind) Label() string {
 	switch k {
+	case KindReboot:
+		return "node restart"
 	case KindOOM:
 		return "OOMKilled"
 	case KindNodeOOM:
@@ -235,10 +238,16 @@ func Extract(tl *Timeline, snap *k8s.Snapshot) []Incident {
 				add(KindVolume, e, ns, pod, "", e.Node, "", e.Text)
 			case "FailedCreatePodSandBox":
 				add(KindSandbox, e, ns, pod, "", e.Node, "", e.Text)
+			// the node lifecycle controller also posts NodeNotReady on every
+			// pod of the node; only the Node's own event names the node
 			case "NodeNotReady":
-				add(KindNotReady, e, "", "", "", name, "node/"+name, e.Text)
+				if kind == "node" {
+					add(KindNotReady, e, "", "", "", name, "node/"+name, e.Text)
+				}
 			case "NodeNotSchedulable":
-				add(KindDrain, e, "", "", "", name, "node/"+name, "node cordoned: "+e.Text)
+				if kind == "node" {
+					add(KindDrain, e, "", "", "", name, "node/"+name, "node cordoned: "+e.Text)
+				}
 			}
 		default:
 			if e.Pattern == "oom" && e.Class >= logs.ClassWarn {
@@ -259,9 +268,26 @@ func Extract(tl *Timeline, snap *k8s.Snapshot) []Incident {
 		add(KindEviction, Entry{Time: t, Node: p.Spec.NodeName, Kind: "status", Unit: p.Namespace + "/" + p.Name, Class: logs.ClassWarn, Pattern: "Evicted", Text: p.Status.Message, Ref: Ref{File: "cluster/resources/pods.yaml"}},
 			p.Namespace, p.Name, "", p.Spec.NodeName, "", p.Status.Message)
 	}
+	born, first := nodeBirths(snap)
+	restarts := Restarts(tl, snap)
 	var out []Incident
+	for _, r := range restarts {
+		in := Incident{Kind: KindReboot, Time: r.Start(), Last: r.End(), Count: 1, Node: r.Node, Workload: "node/" + r.Node,
+			Summary: r.Headline(), Entries: r.Evidence}
+		for _, u := range r.Lost {
+			ns, pod, _ := splitUnit(u)
+			in.Pods = appendOnce(in.Pods, ns+"/"+pod)
+		}
+		out = append(out, in)
+	}
 	for _, k := range order {
 		in := byKey[k]
+		if bootstrapNoise(in, born, first) || inRestart(in, restarts) {
+			continue
+		}
+		if in.Kind == KindNodeOOM && tl.Containerized[in.Node] != "" {
+			continue // the host's OOM kills (the kubelet's SystemOOM reads the same /dev/kmsg), not this node's
+		}
 		if in.Kind == KindDrain {
 			drained(in, tl)
 		}
@@ -283,6 +309,60 @@ func Extract(tl *Timeline, snap *k8s.Snapshot) []Incident {
 		out[i].ID = fmt.Sprintf("%s-%d", out[i].Kind, n[out[i].Kind])
 	}
 	return out
+}
+
+// bootstrapWindow is how long a new node (or a new cluster) takes to
+// settle: pods wait for the not-ready taint to lift, sandboxes fail until
+// the CNI is up, the node itself starts NotReady, liveness probes fail
+// before the node's components listen.
+const bootstrapWindow = 10 * time.Minute
+
+// nodeBirths is each node's creation time and the earliest of them (the
+// cluster's).
+func nodeBirths(snap *k8s.Snapshot) (map[string]time.Time, time.Time) {
+	born := map[string]time.Time{}
+	var first time.Time
+	for i := range snap.Nodes {
+		t := snap.Nodes[i].CreationTimestamp.Time
+		born[snap.Nodes[i].Name] = t
+		if first.IsZero() || t.Before(first) {
+			first = t
+		}
+	}
+	return born, first
+}
+
+// bootstrapNoise: an incident of the kinds a node coming up produces that
+// began and ended inside its bootstrap window (the cluster's, for a pod
+// never placed) - it cleared on its own as the node came up. One still
+// happening after the window is kept whole.
+func bootstrapNoise(in *Incident, born map[string]time.Time, first time.Time) bool {
+	switch in.Kind {
+	case KindSchedule, KindSandbox, KindRestart, KindNotReady, KindProbe:
+	default:
+		return false
+	}
+	start := first
+	if t, ok := born[in.Node]; ok {
+		start = t
+	}
+	return !start.IsZero() && in.Last.Before(start.Add(bootstrapWindow))
+}
+
+// inRestart: an incident of the kinds a node restart produces that began
+// and ended inside one of its node's restarts - part of that restart.
+func inRestart(in *Incident, restarts []Restart) bool {
+	switch in.Kind {
+	case KindSchedule, KindSandbox, KindRestart, KindNotReady, KindProbe, KindDrain:
+	default:
+		return false
+	}
+	for _, r := range restarts {
+		if r.Node == in.Node && r.Covers(in.Time) && r.Covers(in.Last) {
+			return true
+		}
+	}
+	return false
 }
 
 // drained adds to a cordon what followed it on the node: the pods stopped

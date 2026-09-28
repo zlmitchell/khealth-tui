@@ -3,6 +3,7 @@ package rca
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -10,7 +11,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/zlmitchell/khealth-tui/internal/distro"
+	"github.com/zlmitchell/khealth-tui/internal/k8s"
 	"github.com/zlmitchell/khealth-tui/internal/logs"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // Hypothesis is one candidate root cause with the effects seen after it.
@@ -63,23 +66,62 @@ func Analyze(src Source, tl *Timeline) []Hypothesis {
 func band(s float64) int { return int(s * 10) }
 
 var rules = []func(*ctx) []Hypothesis{
-	etcdLatency, diskFull, memory, imagePull, crashLoop, livenessKills, nodeNotReady,
+	etcdLatency, diskFull, memory, imagePull, nodeRestarts, crashLoop, livenessKills, nodeNotReady,
 	scheduling, admission, sandboxAndVolumes, accessDenied, trustAndJoin, unitRestarts,
 }
 
 type ctx struct {
-	src    Source
-	now    time.Time // when the data was taken
-	tl     *Timeline
-	byName map[string][]Entry // by pattern / event reason / status reason
+	src      Source
+	now      time.Time // when the data was taken
+	tl       *Timeline
+	byName   map[string][]Entry // by pattern / event reason / status reason
+	born     map[string]time.Time
+	first    time.Time // the cluster's first node
+	pods     map[string]*corev1.Pod
+	restarts []Restart
 }
 
 func newCtx(src Source, tl *Timeline) *ctx {
 	c := &ctx{src: src, tl: tl, now: src.Snap().Taken, byName: map[string][]Entry{}}
+	c.born, c.first = nodeBirths(src.Snap())
+	c.pods = podIndex(src.Snap())
+	c.restarts = Restarts(tl, src.Snap())
 	for _, e := range tl.Entries {
 		c.byName[e.Pattern] = append(c.byName[e.Pattern], e)
 	}
 	return c
+}
+
+// bootstrap: every entry fell inside its node's bootstrap window (the
+// node its pod runs on, the cluster's first node for neither) - what a node
+// coming up produces and what cleared on its own, as bootstrapNoise does
+// for incidents.
+func (c *ctx) bootstrap(es []Entry) bool {
+	for _, e := range es {
+		node := e.Node
+		if node == "" {
+			if kind, ns, name := eventObject(e.Unit); kind == "pod" {
+				if p := c.pods[ns+"/"+name]; p != nil {
+					node = p.Spec.NodeName
+				}
+			}
+		}
+		start := c.first
+		if t, ok := c.born[node]; ok {
+			start = t
+		}
+		if start.IsZero() || !e.Time.Before(start.Add(bootstrapWindow)) {
+			return false
+		}
+	}
+	return len(es) > 0
+}
+
+// onHost drops the entries of nodes that run in a container: their kernel
+// log (and the kubelet's SystemOOM, read from the same /dev/kmsg) is the
+// shared host's, not theirs.
+func (c *ctx) onHost(es []Entry) []Entry {
+	return where(es, func(e Entry) bool { return c.tl.Containerized[e.Node] == "" })
 }
 
 // p returns the entries of the named patterns / reasons, in time order,
@@ -200,7 +242,8 @@ func etcdLatency(c *ctx) []Hypothesis {
 	leader := c.p("leader-change")
 	lease := c.all("lease-lost")
 	nodeLease := c.all("node-lease")
-	notReady := c.all("NodeNotReady", "node-ready-false", "node-ready-unknown")
+	// the NodeNotReady events posted on the node's pods carry no node
+	notReady := where(c.all("NodeNotReady", "node-ready-false", "node-ready-unknown"), func(e Entry) bool { return e.Node != "" })
 	if len(slow) < 3 && len(leader) < 3 {
 		return nil
 	}
@@ -215,6 +258,11 @@ func etcdLatency(c *ctx) []Hypothesis {
 		}
 		h.Evidence = sample(slow, 3)
 	} else {
+		// one member elects itself at every start (nothing between peers to
+		// blame), and a new cluster's members elect while they come up
+		if c.etcdMembers() == 1 || c.bootstrap(leader) {
+			return nil
+		}
 		t0 = leader[0].Time
 		h = Hypothesis{
 			Title: "Repeated etcd leader elections",
@@ -245,6 +293,18 @@ func etcdLatency(c *ctx) []Hypothesis {
 	}
 	h.First = t0
 	return []Hypothesis{h}
+}
+
+// etcdMembers is how many nodes run etcd, 0 when the snapshot has no nodes.
+func (c *ctx) etcdMembers() int {
+	nodes := c.src.Snap().Nodes
+	n := 0
+	for i := range nodes {
+		if k8s.IsEtcdNode(nodes, &nodes[i]) {
+			n++
+		}
+	}
+	return n
 }
 
 // etcdWhere names the etcd data dir and where etcd's flags are set, in the
@@ -294,10 +354,10 @@ func diskFull(c *ctx) []Hypothesis {
 
 func memory(c *ctx) []Hypothesis {
 	killed := c.p("terminated-oomkilled")
-	kernel := c.p("oom")
+	kernel := c.onHost(c.p("oom"))
 	pressure := c.p("node-memorypressure-true")
 	evict := where(c.p("Evicted", "EvictionThresholdMet"), func(e Entry) bool { return strings.Contains(strings.ToLower(e.Text), "memory") })
-	sysOOM := c.p("SystemOOM", "OOMKilling")
+	sysOOM := c.onHost(c.p("SystemOOM", "OOMKilling"))
 	if len(killed)+len(kernel)+len(pressure)+len(evict)+len(sysOOM) == 0 {
 		return nil
 	}
@@ -434,6 +494,102 @@ var errLine = regexp.MustCompile(`(?i)\b(error|fatal|panic|exception|failed|cann
 
 // crashLoop explains restarting containers by how they ended and what they
 // logged last. OOMKilled is left to memory.
+// ---- node restarts --------------------------------------------------------
+
+// restartAt is the node's restart that t falls in, nil if none.
+func (c *ctx) restartAt(node string, t time.Time) *Restart {
+	for i := range c.restarts {
+		if r := &c.restarts[i]; r.Node == node && r.Covers(t) {
+			return r
+		}
+	}
+	return nil
+}
+
+// afterBoot: t falls inside one of the node's restarts, from the request
+// to the node settled.
+func (c *ctx) afterBoot(node string, t time.Time) bool { return c.restartAt(node, t) != nil }
+
+// settling: the container's last exit came while its node was restarting
+// and it is not crash-looping now - it lost a race with the apiserver or a
+// lease while the node settled, as its node restart's effect.
+func (c *ctx) settling(p *corev1.Pod, cs corev1.ContainerStatus) bool {
+	t := cs.LastTerminationState.Terminated
+	if t == nil || (cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff") {
+		return false
+	}
+	return c.afterBoot(p.Spec.NodeName, t.FinishedAt.Time)
+}
+
+// lostTo is the restart that ended the container's last run, nil if none.
+func (c *ctx) lostTo(p *corev1.Pod, ctr string) *Restart {
+	unit := p.Namespace + "/" + p.Name + "/" + ctr
+	for i := range c.restarts {
+		if slices.Contains(c.restarts[i].Lost, unit) {
+			return &c.restarts[i]
+		}
+	}
+	return nil
+}
+
+// nodeRestarts: one cause per node restart, told in its phases, for every
+// container it ended and every one that exited while the node came back -
+// not a "container restarting" per container.
+func nodeRestarts(c *ctx) []Hypothesis {
+	var hs []Hypothesis
+	for _, r := range c.restarts {
+		if len(r.Lost) == 0 && r.Requested.IsZero() && r.LastLine.IsZero() && r.Boot.Before(c.now.Add(-24*time.Hour)) {
+			continue // an old boot with nothing to tell
+		}
+		verb := "rebooted"
+		if r.How != "reboot" {
+			verb = "restarted"
+		}
+		h := Hypothesis{Title: fmt.Sprintf("Node %s %s at %s: %s", r.Node, verb, clock(r.Boot), r.Headline()), Score: 0.6, First: r.Start(),
+			Cause: strings.Join(r.Phases(), "; "), Evidence: r.Evidence}
+		switch {
+		case r.Hung():
+			h.Score = 0.85
+			h.Next = []string{"the node hung stopping its containers: the hypervisor's task log shows whether it was reset or left off; the old boot's last errors before the request are in files/messages; a shutdown that waits on a container or a mount longer than systemd's timeout needs that unit fixed (or DefaultTimeoutStopSec lowered)"}
+		case r.How == "reboot" && r.Requested.IsZero():
+			h.Score = 0.8
+			h.Next = []string{"nothing asked for this reboot: the hypervisor's event log (a host crash, an HA restart), the BMC/IPMI log (power, watchdog), and the old boot's last lines in files/messages for a kernel panic"}
+		case r.How == "reboot":
+			h.Next = []string{"a planned reboot: drain the node first next time (kubectl drain) so its pods move instead of being killed"}
+		default:
+			h.Score = 0.7
+			h.Next = []string{"journalctl -u rke2-server/rke2-agent/k3s and containerd around that time on the node: rke2-killall.sh, or containerd restarted with its shims"}
+		}
+		if len(r.Lost) > 0 {
+			h.Effects = append(h.Effects, fmt.Sprintf("%d containers ended by it (exit 255, Unknown - they did not crash): %s", len(r.Lost), strutil.TruncList(r.Lost, 4)))
+		}
+		var settled []string
+		for i := range c.src.Snap().Pods {
+			p := &c.src.Snap().Pods[i]
+			if p.Spec.NodeName != r.Node {
+				continue
+			}
+			for _, cs := range append(append([]corev1.ContainerStatus{}, p.Status.InitContainerStatuses...), p.Status.ContainerStatuses...) {
+				if t := cs.LastTerminationState.Terminated; c.lostTo(p, cs.Name) == nil && c.settling(p, cs) && r.Covers(t.FinishedAt.Time) {
+					settled = append(settled, p.Namespace+"/"+p.Name+"/"+cs.Name)
+				}
+			}
+		}
+		if len(settled) > 0 {
+			h.Effects = append(h.Effects, fmt.Sprintf("%d more exited once while the node came back and run now (the apiserver not answering yet, a lost lease): %s", len(settled), strutil.TruncList(settled, 4)))
+		}
+		// what the old boot logged before it went down
+		before := where(c.tl.Entries, func(e Entry) bool {
+			return e.Node == r.Node && e.Class >= logs.ClassWarn && e.Time.Before(r.Start()) && !e.Time.Before(r.Start().Add(-30*time.Minute))
+		})
+		if len(before) > 0 {
+			h.Effects = append(h.Effects, "in the 30 minutes before, the node logged mostly "+strings.Join(topPatterns(before, 3), ", "))
+		}
+		hs = append(hs, h)
+	}
+	return hs
+}
+
 func crashLoop(c *ctx) []Hypothesis {
 	type group struct {
 		pods  []*corev1.Pod
@@ -452,6 +608,9 @@ func crashLoop(c *ctx) []Hypothesis {
 			}
 			if t != nil && t.Reason == "OOMKilled" {
 				continue
+			}
+			if c.lostTo(p, cs.Name) != nil || c.settling(p, cs) {
+				continue // stopped by its node's restart, or while the node came back: nodeRestarts
 			}
 			key := p.Namespace + "/" + OwnerOf(p) + "/" + cs.Name
 			g := groups[key]
@@ -532,8 +691,8 @@ func livenessKills(c *ctx) []Hypothesis {
 				probe = append(probe, e)
 			}
 		}
-		if len(probe) == 0 {
-			continue
+		if len(probe) == 0 || c.bootstrap(es) {
+			continue // no failure, or one before the node's components listened
 		}
 		h := Hypothesis{Title: "Liveness probe failing: " + strings.TrimPrefix(obj, "pod "), Score: 0.6, First: probe[0].Time,
 			Cause:    "the probe fails: " + firstLine(probe[len(probe)-1].Text),
@@ -681,6 +840,9 @@ func scheduling(c *ctx) []Hypothesis {
 	}
 	var hs []Hypothesis
 	for msg, es := range groups {
+		if c.bootstrap(es) {
+			continue // pods waiting for a new node's not-ready taint to lift
+		}
 		next := "compare the pods' requests, nodeSelector/affinity and tolerations with the nodes (cluster/resources/nodes.yaml)"
 		l := strings.ToLower(msg)
 		switch {
@@ -748,7 +910,8 @@ func admission(c *ctx) []Hypothesis {
 // CNI cannot set up their network or their volumes do not attach.
 func sandboxAndVolumes(c *ctx) []Hypothesis {
 	var hs []Hypothesis
-	if es := c.p("FailedCreatePodSandBox"); len(es) > 0 {
+	// sandboxes fail on a new node until its CNI pod is up
+	if es := c.p("FailedCreatePodSandBox"); len(es) > 0 && !c.bootstrap(es) {
 		hs = append(hs, Hypothesis{Title: "Pod sandboxes fail (CNI) on " + nodes(es), Score: 0.75, First: es[0].Time,
 			Cause: firstLine(es[len(es)-1].Text), Effects: []string{"pods stuck in ContainerCreating: " + units(es)},
 			Evidence: sample(es, 3), Next: []string{"the CNI pods on those nodes (kube-system canal/calico/cilium) and /etc/cni/net.d (network/cni.txt in the bundle)"}})
@@ -778,6 +941,8 @@ func accessDenied(c *ctx) []Hypothesis {
 
 // trustAndJoin: identity and trust errors that stop nodes from joining or
 // components from talking, when they persist past a restart.
+var parens = regexp.MustCompile(` ?\([^)]*\)`)
+
 func trustAndJoin(c *ctx) []Hypothesis {
 	var hs []Hypothesis
 	for _, name := range []string{"token-mismatch", "ca-mismatch", "cluster-id", "etcd-member-missing", "clock-skew", "port-in-use", "swap", "kernel-defaults", "containerd-down", "kubelet-exit"} {
@@ -788,7 +953,10 @@ func trustAndJoin(c *ctx) []Hypothesis {
 		p := logs.Find(name)
 		title := name
 		if p != nil {
-			title = strings.SplitN(p.Explain, ".", 2)[0]
+			// the first sentence without its parentheses ("vm.overcommit_memory"
+			// has a dot of its own)
+			title, _, _ = strings.Cut(p.Explain, ". ")
+			title = strings.TrimSuffix(parens.ReplaceAllString(title, ""), ".")
 		}
 		hs = append(hs, Hypothesis{Title: title + " (" + nodes(es) + ")", Score: 0.7, First: es[0].Time,
 			Cause: fmt.Sprintf("%s logged %d times by %s, first at %s", name, len(es), units(es), clock(es[0].Time)), Evidence: sample(es, 3), Next: explain(name)})
@@ -798,11 +966,20 @@ func trustAndJoin(c *ctx) []Hypothesis {
 
 // unitRestarts: systemd restarted a service; the errors just before the
 // restart in the same log are what made it exit.
+var unitName = regexp.MustCompile(`([A-Za-z0-9@._:\-]+\.(?:service|timer|socket|mount|scope)): `)
+
 func unitRestarts(c *ctx) []Hypothesis {
 	restarts := c.p("unit-restart")
 	byUnit := map[string][]Entry{}
 	var order []string
 	for _, e := range restarts {
+		// systemd logs as systemd[1]; the unit is in the message
+		if m := unitName.FindStringSubmatch(e.Text); m != nil {
+			e.Unit = m[1]
+		}
+		if c.afterBoot(e.Node, e.Time) {
+			continue // units restarted while the node came up
+		}
 		k := e.Node + " " + e.Unit
 		if byUnit[k] == nil {
 			order = append(order, k)
@@ -813,8 +990,15 @@ func unitRestarts(c *ctx) []Hypothesis {
 	for _, k := range order {
 		es := byUnit[k]
 		first := es[0]
-		h := Hypothesis{Title: "Service " + first.Unit + " restarting on " + first.Node, Score: 0.45, First: first.Time,
-			Cause: fmt.Sprintf("systemd restarted it %d times", len(es)), Evidence: sample(es, 2)}
+		verb := "failing"
+		if slices.ContainsFunc(es, func(e Entry) bool { return strings.Contains(e.Text, "Scheduled restart job") }) {
+			verb = "restarting"
+		}
+		h := Hypothesis{Title: "Service " + first.Unit + " " + verb + " on " + first.Node, Score: 0.45, First: first.Time,
+			Cause: fmt.Sprintf("systemd reported it failed %d time(s)", len(es)), Evidence: sample(es, 2)}
+		if verb == "restarting" {
+			h.Cause = fmt.Sprintf("systemd restarted it %d times", len(es))
+		}
 		if len(es) >= 3 {
 			h.Score += 0.1
 		}
