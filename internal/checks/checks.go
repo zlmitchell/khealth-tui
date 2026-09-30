@@ -388,11 +388,16 @@ func Evaluate(in Input) []Finding {
 		ref := p.Namespace + "/" + p.Name
 		st := k8s.PodStatus(p)
 		restarts, lastRestart := k8s.PodRestarts(p)
+		// every container's own state: the pod's status string is one
+		// container's, and between two back-offs a crash-looping one is
+		// Running or Terminated, not CrashLoopBackOff
+		troubled := false
+		for _, t := range containerTrouble(p, in.Now) {
+			add(t.sev, "workload", ref, t.msg, t.hint)
+			troubled = true
+		}
 		switch {
-		case st == "CrashLoopBackOff":
-			add(SevCrit, "workload", ref, "CrashLoopBackOff", "kubectl logs --previous")
-		case st == "ImagePullBackOff" || st == "ErrImagePull" || st == "InvalidImageName":
-			add(SevCrit, "workload", ref, st, "check image name/tag, registry credentials, registries.yaml")
+		case troubled:
 		case st == "CreateContainerConfigError" || st == "CreateContainerError" || strings.HasPrefix(st, "Init:") && st != "Init:Running":
 			add(SevWarn, "workload", ref, st, "kubectl describe pod")
 		case st == "Evicted":
@@ -406,7 +411,7 @@ func Evaluate(in Input) []Finding {
 		case st == "Terminating" && p.DeletionTimestamp != nil && in.Now.Sub(p.DeletionTimestamp.Time) > 10*time.Minute:
 			add(SevWarn, "workload", ref, "Terminating for "+strutil.HumanDur(in.Now.Sub(p.DeletionTimestamp.Time)), "stuck finalizer or unreachable node")
 		}
-		if restarts >= thr.RestartWarn && !lastRestart.IsZero() && in.Now.Sub(lastRestart) < 24*time.Hour {
+		if !troubled && restarts >= thr.RestartWarn && !lastRestart.IsZero() && in.Now.Sub(lastRestart) < 24*time.Hour {
 			add(SevWarn, "workload", ref, fmt.Sprintf("%d restarts (last %s ago)", restarts, strutil.HumanDur(in.Now.Sub(lastRestart))), "")
 		}
 		for _, cs := range p.Status.ContainerStatuses {
@@ -414,7 +419,7 @@ func Evaluate(in Input) []Finding {
 				add(SevWarn, "workload", ref, "container "+cs.Name+" was OOMKilled", "raise memory limit")
 			}
 		}
-		if p.Status.Phase == corev1.PodRunning && st == "Running" && p.DeletionTimestamp == nil {
+		if !troubled && p.Status.Phase == corev1.PodRunning && st == "Running" && p.DeletionTimestamp == nil {
 			if r, t := k8s.PodReady(p); r < t && in.Now.Sub(p.CreationTimestamp.Time) > thr.PendingPodAge {
 				add(SevWarn, "workload", ref, fmt.Sprintf("%d/%d containers ready", r, t), "readiness probe failing")
 			}
@@ -914,4 +919,63 @@ func helmReleaseFix(rel k8s.HelmRelease) string {
 		return fmt.Sprintf("B on the Helm tab rolls back to revision %d (last deployed); helm rollback %s %d -n %s", g.Revision, rel.Name, g.Revision, rel.Namespace)
 	}
 	return fmt.Sprintf("no revision ever deployed: helm history %s -n %s for the error, then helm uninstall and reinstall", rel.Name, rel.Namespace)
+}
+
+type trouble struct {
+	sev       Severity
+	msg, hint string
+}
+
+// crashWindow: a container that restarted this recently, at least
+// crashMinRestarts times, with a failing exit, is crash-looping even while
+// it runs between two back-offs (they grow to 5 minutes).
+const (
+	crashWindow      = 15 * time.Minute
+	crashMinRestarts = 3
+)
+
+// containerTrouble is what keeps each of the pod's containers (init ones
+// included) from running: crash loops, image pulls that fail, containers
+// that cannot be created.
+func containerTrouble(p *corev1.Pod, now time.Time) []trouble {
+	var out []trouble
+	check := func(cs corev1.ContainerStatus, image, kind string) {
+		name := kind + " " + cs.Name
+		last := cs.LastTerminationState.Terminated
+		exit := ""
+		if last != nil {
+			exit = fmt.Sprintf(", last exit %d (%s) %s ago", last.ExitCode, strutil.FirstNonEmpty(last.Reason, "no reason"), strutil.HumanDur(now.Sub(last.FinishedAt.Time)))
+		}
+		logs := "kubectl logs " + p.Name + " -n " + p.Namespace + " -c " + cs.Name + " --previous"
+		if w := cs.State.Waiting; w != nil {
+			switch w.Reason {
+			case "CrashLoopBackOff":
+				out = append(out, trouble{SevCrit, fmt.Sprintf("CrashLoopBackOff: %s, %d restarts%s", name, cs.RestartCount, exit), logs})
+				return
+			case "ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull":
+				out = append(out, trouble{SevCrit, fmt.Sprintf("%s: %s cannot pull %s%s", w.Reason, name, image, strutil.PrefixIf(": ", strutil.TruncStr(w.Message, 160))),
+					"check the image name and tag, the registry's credentials (imagePullSecrets, registries.yaml) and that the node reaches the registry"})
+				return
+			case "CreateContainerConfigError", "CreateContainerError", "RunContainerError":
+				out = append(out, trouble{SevWarn, fmt.Sprintf("%s: %s%s", w.Reason, name, strutil.PrefixIf(": ", strutil.TruncStr(w.Message, 160))), "kubectl describe pod " + p.Name + " -n " + p.Namespace})
+				return
+			}
+		}
+		// between two back-offs: running again, or just exited
+		if last != nil && last.ExitCode != 0 && cs.RestartCount >= crashMinRestarts && now.Sub(last.FinishedAt.Time) < crashWindow &&
+			!(last.Reason == "Unknown" && last.ExitCode == 255) { // a node restart, not the container
+			out = append(out, trouble{SevCrit, fmt.Sprintf("CrashLoopBackOff: %s keeps failing, %d restarts%s", name, cs.RestartCount, exit), logs})
+		}
+	}
+	images := map[string]string{}
+	for _, c := range append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
+		images[c.Name] = c.Image
+	}
+	for _, cs := range p.Status.InitContainerStatuses {
+		check(cs, strutil.FirstNonEmpty(images[cs.Name], cs.Image), "init container")
+	}
+	for _, cs := range p.Status.ContainerStatuses {
+		check(cs, strutil.FirstNonEmpty(images[cs.Name], cs.Image), "container")
+	}
+	return out
 }

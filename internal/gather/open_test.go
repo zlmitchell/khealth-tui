@@ -35,7 +35,7 @@ func TestOpenReplay(t *testing.T) {
 	must(t, st.writeJSON("manifest.json", Manifest{Format: FormatVersion, Created: created, Context: "lab", Server: "https://10.0.0.1:6443", Scope: "cluster"}))
 	must(t, st.write("nodes/n1/probe/node.txt", []byte("\n===HOST\nn1\n5.14.0\nx86_64\n===END\n")))
 	must(t, st.writeJSON("nodes/n1/probe/node.meta.json", ProbeMeta{Node: "n1", Host: "10.0.0.1", Started: created, Finished: created, Status: "ok"}))
-	must(t, st.write("report.json", []byte(`{"findings":[{"severity":"CRIT","area":"workload","object":"shop/crashy-1","message":"CrashLoopBackOff"}]}`)))
+	must(t, st.write("report.json", []byte(`{"findings":[{"severity":"CRIT","area":"workload","object":"shop/crashy-1","message":"CrashLoopBackOff: container app, 7 restarts"}]}`)))
 
 	out := filepath.Join(t.TempDir(), "b.tar.gz")
 	if _, err := st.pack(out, "khealth-bundle-lab"); err != nil {
