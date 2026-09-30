@@ -1,3 +1,10 @@
+## [1.3.3](https://github.com/zlmitchell/khealth-tui/compare/v1.3.2...v1.3.3) (2026-09-30)
+
+
+### Bug Fixes
+
+* health checks catch crash loops between back-offs and init-container image pulls ([#7](https://github.com/zlmitchell/khealth-tui/issues/7)) ([8b4d1e6](https://github.com/zlmitchell/khealth-tui/commit/8b4d1e60ec206d85118fc947334f46abe246480f))
+
 ## [1.3.2](https://github.com/zlmitchell/khealth-tui/compare/v1.3.1...v1.3.2) (2026-09-28)
 
 
