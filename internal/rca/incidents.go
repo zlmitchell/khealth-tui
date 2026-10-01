@@ -18,6 +18,7 @@ type Kind string
 
 // Incident kinds, in the order the explorer lists them.
 const (
+	KindAPI       Kind = "api"       // the Kubernetes API did not answer
 	KindReboot    Kind = "reboot"    // a node restarted: requested, down, booted, settled
 	KindOOM       Kind = "oom"       // a container hit its memory limit (OOMKilled)
 	KindNodeOOM   Kind = "node-oom"  // the kernel OOM killer on a node short of memory
@@ -31,16 +32,19 @@ const (
 	KindVolume    Kind = "volume"    // volumes did not attach or mount
 	KindSandbox   Kind = "sandbox"   // the pod sandbox (CNI) failed
 	KindNotReady  Kind = "notready"  // a node went NotReady
+	KindSSH       Kind = "ssh"       // a node the cluster lists that khealth cannot reach over SSH
 	KindDrain     Kind = "drain"     // a node was cordoned (and drained: its pods stopped after)
 	KindPressure  Kind = "pressure"  // a node reported memory / disk / PID pressure
 )
 
 // Kinds lists every kind in display order.
-var Kinds = []Kind{KindReboot, KindOOM, KindNodeOOM, KindEviction, KindRejected, KindRestart, KindProbe, KindPull, KindSchedule, KindAdmission, KindVolume, KindSandbox, KindNotReady, KindDrain, KindPressure}
+var Kinds = []Kind{KindAPI, KindReboot, KindOOM, KindNodeOOM, KindEviction, KindRejected, KindRestart, KindProbe, KindPull, KindSchedule, KindAdmission, KindVolume, KindSandbox, KindNotReady, KindSSH, KindDrain, KindPressure}
 
 // Label is a short human name for the kind.
 func (k Kind) Label() string {
 	switch k {
+	case KindAPI:
+		return "API unavailable"
 	case KindReboot:
 		return "node restart"
 	case KindOOM:
@@ -67,6 +71,8 @@ func (k Kind) Label() string {
 		return "sandbox/CNI"
 	case KindNotReady:
 		return "node NotReady"
+	case KindSSH:
+		return "SSH failure"
 	case KindDrain:
 		return "node drain"
 	case KindPressure:
@@ -204,6 +210,10 @@ func Extract(tl *Timeline, snap *k8s.Snapshot) []Incident {
 				add(KindDrain, e, "", "", "", e.Node, "node/"+e.Node, e.Text)
 			} else if strings.HasPrefix(e.Pattern, "node-ready-") {
 				add(KindNotReady, e, "", "", "", e.Node, "node/"+e.Node, e.Text)
+			} else if e.Pattern == "ssh-failed" {
+				add(KindSSH, e, "", "", "", e.Node, "node/"+e.Node, e.Text)
+			} else if e.Pattern == "api-unreachable" {
+				add(KindAPI, e, "", "", "", "", "apiserver", e.Text)
 			} else if strings.HasPrefix(e.Pattern, "node-") && strings.HasSuffix(e.Pattern, "pressure-true") {
 				add(KindPressure, e, "", "", "", e.Node, "node/"+e.Node, e.Text)
 			}

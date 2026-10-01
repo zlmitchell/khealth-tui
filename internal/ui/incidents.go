@@ -20,6 +20,7 @@ import (
 	"github.com/zlmitchell/khealth-tui/internal/logs"
 	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
 	"github.com/zlmitchell/khealth-tui/internal/rca"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // incidentPanes are the Incidents tab's views: the list, then one
@@ -60,12 +61,27 @@ func (a *App) incRefresh() {
 			lines += s.Total
 		}
 	}
-	key := fmt.Sprintf("%d/%d", a.snap.Taken.UnixNano(), lines)
+	var reach rca.Reach
+	if a.sshEnabled {
+		reach.SSH = a.sshDown
+	}
+	if a.apiDown != nil {
+		f := *a.apiDown
+		if a.sshEnabled {
+			for _, name := range strutil.SortedKeys(a.nodes) {
+				if a.nodes[name].Err == nil {
+					f.SSHUp = append(f.SSHUp, name)
+				}
+			}
+		}
+		reach.API = &f
+	}
+	key := fmt.Sprintf("%d/%d/%d/%v", a.snap.Taken.UnixNano(), lines, len(reach.SSH), reach.API != nil)
 	if key == a.inc.builtOf {
 		return
 	}
 	a.inc.builtOf = key
-	a.inc.tl = rca.BuildLive(a.snap, a.logSum)
+	a.inc.tl = rca.BuildLive(a.snap, a.logSum, reach)
 	for name, ni := range a.nodes {
 		if ni != nil && ni.Hardening["container"] != "" {
 			a.inc.tl.Containerized[name] = ni.Hardening["container"]
@@ -79,6 +95,43 @@ func (a *App) incRefresh() {
 	// round trip an opened incident pays for, not the list
 	a.inc.hyps = rca.Analyze(a.liveSource(false), a.inc.tl)
 	a.inc.ctx = map[string]*rca.Context{}
+}
+
+// noteSSH keeps when a node's probes started failing and the latest error;
+// a probe that answers clears it.
+func (a *App) noteSSH(info *nodeinfo.Info) {
+	if info.Err == nil {
+		delete(a.sshDown, info.Node)
+		return
+	}
+	if a.sshDown == nil {
+		a.sshDown = map[string]rca.SSHFailure{}
+	}
+	f, ok := a.sshDown[info.Node]
+	if !ok {
+		f.Since = info.Collected
+		if f.Since.IsZero() {
+			f.Since = time.Now()
+		}
+	}
+	f.Err = info.Err.Error()
+	a.sshDown[info.Node] = f
+}
+
+// noteAPI keeps when the API stopped answering (no nodes listed, errors
+// that say it did not answer) and the latest error; an answer clears it.
+func (a *App) noteAPI(s *k8s.Snapshot) {
+	if s == nil || len(s.Nodes) > 0 || !k8s.Unreachable(s.Errors) {
+		a.apiDown = nil
+		return
+	}
+	if a.apiDown == nil {
+		a.apiDown = &rca.APIFailure{Since: s.Taken}
+		if a.apiDown.Since.IsZero() {
+			a.apiDown.Since = time.Now()
+		}
+	}
+	a.apiDown.Err = rca.FirstUnreachable(s.Errors)
 }
 
 func (a *App) incFiltered() []rca.Incident {
@@ -115,7 +168,7 @@ func (a *App) incidentsContent() content {
 
 func incKindStyle(k rca.Kind) interface{ Render(...string) string } {
 	switch k {
-	case rca.KindReboot, rca.KindOOM, rca.KindNodeOOM, rca.KindEviction, rca.KindNotReady:
+	case rca.KindAPI, rca.KindReboot, rca.KindOOM, rca.KindNodeOOM, rca.KindEviction, rca.KindNotReady, rca.KindSSH:
 		return styleCrit
 	case rca.KindRestart, rca.KindProbe, rca.KindPull, rca.KindSchedule, rca.KindPressure, rca.KindRejected, rca.KindDrain:
 		return styleWarn

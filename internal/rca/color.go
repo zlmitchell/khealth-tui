@@ -49,7 +49,7 @@ func classColor(c logs.Class) string {
 // down in red, what held a workload back in yellow.
 func kindColor(k Kind) string {
 	switch k {
-	case KindReboot, KindOOM, KindNodeOOM, KindEviction, KindNotReady:
+	case KindAPI, KindReboot, KindOOM, KindNodeOOM, KindEviction, KindNotReady, KindSSH:
 		return cBoldRed
 	case KindRestart, KindProbe, KindPull, KindSchedule, KindPressure, KindRejected, KindDrain:
 		return cYellow

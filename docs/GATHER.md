@@ -118,6 +118,8 @@ Below the probable causes, `--analyze` lists the **incidents**, one line per wor
 - evictions, and the kubelet refusing to admit pods while the node is under pressure
 - restarts, liveness kills, image pulls, unschedulable pods, denied creates, volume and sandbox (CNI) failures
 - NotReady nodes and node pressure
+- the Kubernetes API not answering, with the nodes SSH still reached (the machines up: the apiserver or etcd is what is down)
+- nodes the cluster lists that the gather could not reach over SSH (whatever the API says of them): their journals and probes are missing from the bundle
 
 `--incident ID` shows one incident in context:
 

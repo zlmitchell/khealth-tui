@@ -130,7 +130,9 @@ type App struct {
 	collecting map[string]string // node -> tiers of the probe in flight (perf log, tab status lines)
 	etcd       map[string]*etcd.Probe
 	etcdPend   map[string]bool
-	knownNodes []corev1.Node // last node list the API returned; used when the apiserver is down
+	knownNodes []corev1.Node             // last node list the API returned; used when the apiserver is down
+	sshDown    map[string]rca.SSHFailure // nodes whose probe fails over SSH, since their first failure
+	apiDown    *rca.APIFailure           // the API not answering, since the first snapshot it did not
 	s3         *k8s.S3SecretInfo
 	s3Reach    map[string]etcd.S3Check
 	logSum     map[string]*logs.Summary
@@ -1252,6 +1254,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.snap = m.snap
+		a.noteAPI(m.snap)
 		a.refreshing = false
 		a.lastRefresh = time.Now()
 		a.stigDirty = true
@@ -1270,6 +1273,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					delete(a.nodes, n)
 					delete(a.etcd, n)
 					delete(a.logSum, n)
+					delete(a.sshDown, n)
 				}
 			}
 		}
@@ -1327,6 +1331,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.info.MergeSTIG(a.nodes[m.info.Node])
 		m.info.MergeConfig(a.nodes[m.info.Node])
 		a.nodes[m.info.Node] = m.info
+		a.noteSSH(m.info)
 		if m.opts.Config && m.info.ControlPlane {
 			// the PSA config's exempt namespaces are this deployment's own
 			// list of infrastructure namespaces (IsSystemNamespace)

@@ -25,6 +25,7 @@ import (
 	"github.com/zlmitchell/khealth-tui/internal/k8s"
 	"github.com/zlmitchell/khealth-tui/internal/logs"
 	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
+	"github.com/zlmitchell/khealth-tui/internal/strutil"
 )
 
 // Entry is one point on the timeline.
@@ -136,9 +137,96 @@ func Build(b *gather.Bundle, r *gather.Replayed) *Timeline {
 		}
 	}
 	tl.Entries = append(tl.Entries, snapshotEntries(r.Snap)...)
+	down := map[string]SSHFailure{}
+	for _, n := range b.Manifest.Nodes {
+		if n.Probe != "" && n.Probe != "ok" {
+			down[n.Name] = SSHFailure{Since: b.Manifest.Created, Err: n.Probe}
+		}
+	}
+	reach := Reach{SSH: down}
+	if !b.Manifest.APIReachable && k8s.Unreachable(b.Manifest.APIErrors) {
+		reach.API = &APIFailure{Since: b.Manifest.Created, Err: firstUnreachable(b.Manifest.APIErrors)}
+		for _, n := range b.Manifest.Nodes {
+			if n.Probe == "ok" {
+				reach.API.SSHUp = append(reach.API.SSHUp, n.Name)
+			}
+		}
+	}
+	tl.Entries = append(tl.Entries, reach.entries(r.Snap, "manifest.json")...)
 	tl.Entries = dedupe(tl.Entries)
 	sort.SliceStable(tl.Entries, func(i, j int) bool { return tl.Entries[i].Time.Before(tl.Entries[j].Time) })
 	return tl
+}
+
+// Reach is what khealth could not reach: the nodes over SSH, the API.
+type Reach struct {
+	SSH map[string]SSHFailure
+	API *APIFailure
+}
+
+// SSHFailure is a node khealth could not reach over SSH: since when, and
+// the last error.
+type SSHFailure struct {
+	Since time.Time
+	Err   string
+}
+
+// APIFailure is the Kubernetes API not answering: since when, the last
+// error, and the nodes SSH still reaches meanwhile.
+type APIFailure struct {
+	Since time.Time
+	Err   string
+	SSHUp []string
+}
+
+func (r Reach) entries(s *k8s.Snapshot, ref string) []Entry {
+	out := sshEntries(s, r.SSH, ref)
+	if f := r.API; f != nil && !f.Since.IsZero() {
+		text := "the Kubernetes API did not answer: " + f.Err
+		if len(f.SSHUp) > 0 {
+			text += "; SSH still reaches " + strutil.TruncList(f.SSHUp, 4) + ": the machines are up, the apiserver (or etcd under it) is down"
+		}
+		out = append(out, Entry{Time: f.Since, Kind: "status", Unit: "apiserver", Class: logs.ClassError, Pattern: "api-unreachable", Text: text, Ref: Ref{File: ref}})
+	}
+	return out
+}
+
+// firstUnreachable is the first of the API errors that says it did not
+// answer (k8s.Unreachable), else the first.
+func firstUnreachable(errs []string) string {
+	for _, e := range errs {
+		if k8s.Unreachable([]string{e}) {
+			return e
+		}
+	}
+	if len(errs) > 0 {
+		return errs[0]
+	}
+	return ""
+}
+
+// FirstUnreachable is firstUnreachable for the live TUI.
+func FirstUnreachable(errs []string) string { return firstUnreachable(errs) }
+
+// sshEntries are the ssh-failed entries of the nodes the cluster lists
+// that SSH could not reach (every one when the API listed no nodes: the
+// targets were the nodes khealth knew). Their journals and probes are
+// missing, whatever the API says of them.
+func sshEntries(s *k8s.Snapshot, down map[string]SSHFailure, ref string) []Entry {
+	known := map[string]bool{}
+	for i := range s.Nodes {
+		known[s.Nodes[i].Name] = true
+	}
+	var out []Entry
+	for _, node := range strutil.SortedKeys(down) {
+		f := down[node]
+		if (len(known) > 0 && !known[node]) || f.Since.IsZero() {
+			continue
+		}
+		out = append(out, Entry{Time: f.Since, Node: node, Kind: "status", Unit: "node " + node, Class: logs.ClassError, Pattern: "ssh-failed",
+			Text: "SSH to the node failed: " + f.Err, Ref: Ref{File: ref}})
+	}
+	return out
 }
 
 // nodeName maps a bundle directory back to the node it holds (the probe
@@ -429,9 +517,10 @@ func snapshotEntries(s *k8s.Snapshot) []Entry {
 }
 
 // BuildLive is Build for the live TUI: the snapshot's events and states,
-// and the log lines each node's probe classified (logSum, keyed by node).
-// No file references: live entries point at the unit they came from.
-func BuildLive(s *k8s.Snapshot, logSum map[string]*logs.Summary) *Timeline {
+// the log lines each node's probe classified (logSum, keyed by node) and
+// what khealth cannot reach (the nodes over SSH, the API). No file
+// references: live entries point at the unit they came from.
+func BuildLive(s *k8s.Snapshot, logSum map[string]*logs.Summary, reach Reach) *Timeline {
 	tl := newTimeline()
 	for node, sum := range logSum {
 		if sum == nil {
@@ -446,6 +535,7 @@ func BuildLive(s *k8s.Snapshot, logSum map[string]*logs.Summary) *Timeline {
 		}
 	}
 	tl.Entries = append(tl.Entries, snapshotEntries(s)...)
+	tl.Entries = append(tl.Entries, reach.entries(s, "node probe")...)
 	tl.Entries = dedupe(tl.Entries)
 	sort.SliceStable(tl.Entries, func(i, j int) bool { return tl.Entries[i].Time.Before(tl.Entries[j].Time) })
 	return tl

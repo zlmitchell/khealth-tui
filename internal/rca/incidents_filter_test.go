@@ -64,6 +64,40 @@ func TestBootstrapNoise(t *testing.T) {
 	}
 }
 
+// A node SSH cannot reach is an incident whatever the API says of it (here
+// it still reports Ready); a name the cluster does not list is not, unless
+// the API listed no nodes at all.
+func TestSSHFailure(t *testing.T) {
+	at := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	ready := corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}
+	snap := &k8s.Snapshot{Nodes: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "w-1", CreationTimestamp: metav1.NewTime(at.Add(-24 * time.Hour))}, Status: ready}}}
+	down := map[string]SSHFailure{"w-1": {Since: at, Err: "dial tcp 10.0.0.2:22: i/o timeout"}, "ghost": {Since: at, Err: "no route to host"}}
+	ssh := kinds(Extract(BuildLive(snap, nil, Reach{SSH: down}), snap))[KindSSH]
+	if len(ssh) != 1 || ssh[0].Object() != "node/w-1" || !ssh[0].Time.Equal(at) || !strings.Contains(ssh[0].Summary, "i/o timeout") {
+		t.Fatalf("ssh incidents %+v", ssh)
+	}
+	// apiserver down: the nodes khealth probes are the ones it knew
+	if n := len(kinds(Extract(BuildLive(&k8s.Snapshot{}, nil, Reach{SSH: down}), &k8s.Snapshot{}))[KindSSH]); n != 2 {
+		t.Errorf("API down: %d ssh incidents, want 2", n)
+	}
+}
+
+// The API not answering is one cluster-level incident; with the nodes
+// still on SSH it says the machines are up.
+func TestAPIUnavailable(t *testing.T) {
+	at := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	snap := &k8s.Snapshot{}
+	reach := Reach{API: &APIFailure{Since: at, Err: "dial tcp 10.0.0.1:6443: connect: connection refused", SSHUp: []string{"cp-1", "cp-2"}}}
+	api := kinds(Extract(BuildLive(snap, nil, reach), snap))[KindAPI]
+	if len(api) != 1 || api[0].Object() != "apiserver" || !api[0].Time.Equal(at) || !strings.Contains(api[0].Summary, "SSH still reaches cp-1, cp-2") {
+		t.Fatalf("API incidents %+v", api)
+	}
+	reach.API.SSHUp = nil
+	if api := kinds(Extract(BuildLive(snap, nil, reach), snap))[KindAPI]; len(api) != 1 || strings.Contains(api[0].Summary, "SSH") {
+		t.Errorf("no SSH: %+v", api)
+	}
+}
+
 // A node in a container reads the host's kernel log: its OOM kills are
 // other containers'.
 func TestContainerizedNodeOOM(t *testing.T) {
