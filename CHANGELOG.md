@@ -1,3 +1,10 @@
+## [1.3.4](https://github.com/zlmitchell/khealth-tui/compare/v1.3.3...v1.3.4) (2026-10-01)
+
+
+### Bug Fixes
+
+* incidents for nodes SSH cannot reach and for the API not answering ([e70ee59](https://github.com/zlmitchell/khealth-tui/commit/e70ee5927b8512fb082583f13caad6f400d57894))
+
 ## [1.3.3](https://github.com/zlmitchell/khealth-tui/compare/v1.3.2...v1.3.3) (2026-09-30)
 
 
