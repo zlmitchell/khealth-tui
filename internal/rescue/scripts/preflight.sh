@@ -46,6 +46,14 @@ case "$KIND" in
         grep -E '^[[:space:]]*(server|cluster-init|profile|etcd-s3|etcd-s3-config-secret|data-dir|node-ip)[[:space:]]*:' "$f" 2>/dev/null | sed -E 's/^[[:space:]]*//' | sed "s|^|config: |"
       fi
     done
+    # Rancher-provisioned: rancher-system-agent applies plans that rewrite
+    # 50-rancher.yaml and restart rke2-server; the rescue stops it first
+    if systemctl cat rancher-system-agent.service >/dev/null 2>&1; then
+      say "agent=$(systemctl is-active rancher-system-agent 2>/dev/null)"
+    else
+      say "agent=none"
+    fi
+    [ -f $CONFDIR/config.yaml.d/50-rancher.yaml ] && say "rancher_config=yes"
     # the member identity on disk: rke2/k3s write the etcd name and the
     # peer URL it registered with; after an address change the peer URL is
     # the stale one the cluster still lists

@@ -30,10 +30,11 @@ if [ -f "$DD/server/db/reset-flag" ]; then
   rm -f "$DD/server/db/reset-flag" && say "removed $DD/server/db/reset-flag (deliberate second reset)"
 fi
 # rke2/k3s refuse a cluster-reset while the config carries a join URL
-# (any server but the first one has server:); the flag on the command line
-# overrides the file and leaves the file alone
-SRVFLAG=
-grep -qsE '^[[:space:]]*server[[:space:]]*:' $CONFDIR/config.yaml $CONFDIR/config.yaml.d/*.yaml 2>/dev/null && SRVFLAG=--server=
+# (any server but the first one has server:, a VIP setup every one); the
+# flag on the command line overrides the file and leaves the file alone.
+# Always passed: Rancher's 50-rancher.yaml is JSON and RKE2_URL can come from
+# the environment, neither of which a grep for server: sees.
+SRVFLAG=--server=
 say "cmd=$BIN server --cluster-reset $RESTORE $SRVFLAG"
 say "log=$LOG"
 CMD="'$BIN' server --cluster-reset $RESTORE $SRVFLAG >'$LOG' 2>&1; echo \$? >'$EXITF'"

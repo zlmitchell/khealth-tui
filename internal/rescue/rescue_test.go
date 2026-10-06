@@ -48,6 +48,9 @@ type fakeNode struct {
 	oldIP      string
 	nodeIPFix  string // what fix_node_ip rewrote node-ip to
 	serverHost string // server: URL host in config.yaml (default 10.0.0.1)
+	// Rancher-provisioned: rancher-system-agent runs (agentOff: the rescue
+	// stopped it)
+	agent, agentOff bool
 }
 
 func (c *fakeCluster) note(f string, a ...any) {
@@ -116,6 +119,12 @@ func (c *fakeCluster) handle(n *fakeNode) sshtest.Handler {
 					say("peer=https://%s:2380", n.oldIP)
 				}
 				say("etcd_user=998")
+				if n.agent {
+					say("agent=active")
+					say("rancher_config=yes")
+				} else {
+					say("agent=none")
+				}
 			}
 			say("addrs=%s fd00::%s", n.ip, n.name)
 			role := "other"
@@ -126,7 +135,28 @@ func (c *fakeCluster) handle(n *fakeNode) sshtest.Handler {
 			}
 			n.role = role
 			say("preflight=ok")
+		case strings.Contains(stdin, `say "agent=ok"`):
+			switch {
+			case strings.Contains(stdin, "case 'stop' in"):
+				c.note("%s agent stop", n.name)
+				n.agentOff = true
+			case strings.Contains(stdin, "case 'start' in"):
+				// only once every server is back and no drop-in is left
+				for _, o := range c.nodes {
+					if o.dropIn || !slices.Contains(c.members, o.name) {
+						return "", "rancher-system-agent started while " + o.name + " is not back (or keeps its drop-in)", 1
+					}
+				}
+				c.note("%s agent start", n.name)
+				n.agentOff = false
+			default:
+				return "", "agent.sh without an action", 1
+			}
+			say("agent=ok")
 		case strings.Contains(stdin, `say "stopped=ok"`):
+			if n.agent && !n.agentOff {
+				return "", "rke2-server stopped while rancher-system-agent still runs", 1
+			}
 			c.note("%s stop", n.name)
 			n.stopped = true
 			c.members = remove(c.members, n.name)
@@ -262,6 +292,14 @@ func (c *fakeCluster) handle(n *fakeNode) sshtest.Handler {
 				}
 			}
 			if varOf(stdin, "JOIN") != "" {
+				n.dropIn = true
+			}
+			// the restored target starts with server: cleared, whatever its
+			// config says (a VIP, a follower, Rancher's init node)
+			if n.role == "target" && c.kind != Kubeadm {
+				if !strings.Contains(stdin, `"target" = target`) || !strings.Contains(stdin, `printf 'server: ""\n'`) {
+					return "", "target started without the server: override", 1
+				}
 				n.dropIn = true
 			}
 			n.started = true
@@ -430,10 +468,10 @@ func TestRKE2Restore(t *testing.T) {
 	want := []string{
 		"cp-1: Stop rke2-server", "cp-3: Stop rke2-server", "cp-2: Stop rke2-server",
 		"cp-2: Move etcd data to /var/lib/rancher/rke2/server/etcd-rescue-x", "cp-1: Move etcd data to /var/lib/rancher/rke2/server/etcd-rescue-x", "cp-3: Move etcd data to /var/lib/rancher/rke2/server/etcd-rescue-x",
-		"cp-2: Restore etcd-snapshot-cp-2-1700000000 and reset membership (cluster-reset), verify the data dir was replaced", "cp-2: Set data dir owner/mode", "cp-2: Start rke2-server", "cp-2: Wait for etcd and the apiserver (second cluster-reset if the member does not come up alone)", "cp-2: Restart the CNI agent (it drops the local pod routes while the apiserver comes up)",
+		"cp-2: Restore etcd-snapshot-cp-2-1700000000 and reset membership (cluster-reset), verify the data dir was replaced", "cp-2: Set data dir owner/mode", "cp-2: Start rke2-server (server: overridden to none until every follower is back)", "cp-2: Wait for etcd and the apiserver (second cluster-reset if the member does not come up alone)", "cp-2: Restart the CNI agent (it drops the local pod routes while the apiserver comes up)",
 		"cp-1: Rejoin: start rke2-server (join via https://10.0.0.2:9345)", "cp-2: Wait until cp-1 is a healthy member (2/3)", "cp-1: Remove the join drop-in", "cp-2: Check etcd status",
 		"cp-3: Rejoin: start rke2-server (join via https://10.0.0.2:9345)", "cp-2: Wait until cp-3 is a healthy member (3/3)", "cp-3: Remove the join drop-in", "cp-2: Check etcd status",
-		"cp-2: Verify the cluster", "cp-2: Take a fresh snapshot",
+		"cp-2: Verify the cluster", "cp-2: Remove the server: override", "cp-2: Take a fresh snapshot",
 	}
 	if got := titles(); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("steps:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -453,10 +491,13 @@ func TestRKE2Restore(t *testing.T) {
 	if got := strings.Join(c.members, ","); got != "cp-2,cp-1,cp-3" {
 		t.Errorf("members %s", got)
 	}
-	for _, n := range []string{"cp-1", "cp-3"} {
+	for _, n := range []string{"cp-1", "cp-2", "cp-3"} {
 		if c.nodes[n].dropIn {
-			t.Errorf("join drop-in left behind on %s", n)
+			t.Errorf("drop-in left behind on %s", n)
 		}
+	}
+	if w := strings.Join(p.Warnings, "\n"); !strings.Contains(w, `cp-2 has server: https://10.0.0.1:9345: the restored node must come up without one`) {
+		t.Errorf("no target server: warning in:\n%s", w)
 	}
 	// followers were stopped before the target, target restarted first, then one by one
 	order := strings.Join(c.log, "\n")
@@ -466,8 +507,93 @@ func TestRKE2Restore(t *testing.T) {
 		}
 	}
 	notes := strings.Join(p.Notes, "\n")
-	if !strings.Contains(notes, "cp-2: previous etcd data kept in /var/lib/rancher/rke2/server/etcd-rescue-x") || !strings.Contains(notes, "99-khealth-rescue.yaml on cp-1") {
+	if !strings.Contains(notes, "cp-2: previous etcd data kept in /var/lib/rancher/rke2/server/etcd-rescue-x") || !strings.Contains(notes, "zz-khealth-rescue.yaml on cp-1") || !strings.Contains(notes, `zz-khealth-rescue.yaml on cp-2 (server: "")`) {
 		t.Errorf("notes: %s", notes)
+	}
+}
+
+// Rancher-provisioned servers: rancher-system-agent is stopped on every
+// server before anything else and started again only after every server is
+// back and the drop-ins are gone (the harness refuses either out of order);
+// the fresh snapshot comes after. A failed run leaves it stopped, with a note.
+func TestRKE2RestoreRancherAgent(t *testing.T) {
+	c, p := cluster(t, RKE2, func(c *fakeCluster) {
+		for _, n := range c.nodes {
+			n.agent = true
+		}
+	})
+	steps := p.Steps()
+	var head, tail []string
+	for i, s := range steps {
+		if i < 3 {
+			head = append(head, s.Node+": "+s.Title)
+		}
+		if i >= len(steps)-4 {
+			tail = append(tail, s.Node+": "+s.Title)
+		}
+	}
+	if want := "cp-2: Stop rancher-system-agent (its plans rewrite 50-rancher.yaml and restart rke2-server)|cp-1: Stop rancher-system-agent (its plans rewrite 50-rancher.yaml and restart rke2-server)|cp-3: Stop rancher-system-agent (its plans rewrite 50-rancher.yaml and restart rke2-server)"; strings.Join(head, "|") != want {
+		t.Errorf("first steps:\n%s", strings.Join(head, "\n"))
+	}
+	if want := "cp-2: Start rancher-system-agent|cp-1: Start rancher-system-agent|cp-3: Start rancher-system-agent|cp-2: Take a fresh snapshot"; strings.Join(tail, "|") != want {
+		t.Errorf("last steps:\n%s", strings.Join(tail, "\n"))
+	}
+	w := strings.Join(p.Warnings, "\n")
+	for _, s := range []string{"rancher-system-agent runs on cp-2, cp-1, cp-3: it is stopped before anything else", "provisioned by Rancher (config.yaml.d/50-rancher.yaml)"} {
+		if !strings.Contains(w, s) {
+			t.Errorf("missing warning %q in:\n%s", s, w)
+		}
+	}
+	last, _ := run(t, p)
+	if last.Err != nil {
+		t.Fatalf("rescue failed: %v\n%s", last.Err, strings.Join(c.log, "\n"))
+	}
+	for _, n := range c.nodes {
+		if n.agentOff {
+			t.Errorf("rancher-system-agent left stopped on %s", n.name)
+		}
+	}
+	if strings.Contains(strings.Join(p.Notes, "\n"), "still stopped") {
+		t.Errorf("notes: %v", p.Notes)
+	}
+
+	// a failure after the agents were stopped: they stay stopped, the notes say so
+	c, p = cluster(t, RKE2, func(c *fakeCluster) {
+		for _, n := range c.nodes {
+			n.agent = true
+		}
+	})
+	p.steps[5].run = func(ctx context.Context, s *Step) error { return fmt.Errorf("boom") }
+	last, _ = run(t, p)
+	if last.Err == nil {
+		t.Fatal("no failure")
+	}
+	if !c.nodes["cp-1"].agentOff {
+		t.Error("the agent was started again after a failed step")
+	}
+	if notes := strings.Join(p.Notes, "\n"); !strings.Contains(notes, "rancher-system-agent is still stopped on cp-2, cp-1, cp-3") {
+		t.Errorf("notes: %s", notes)
+	}
+}
+
+// server: as a DNS name: a server's own name (short or FQDN) counts as
+// that server; any other name is called out as a VIP / load balancer.
+func TestServerDNSName(t *testing.T) {
+	_, p := cluster(t, RKE2, func(c *fakeCluster) {
+		c.nodes["cp-1"].hasServer, c.nodes["cp-1"].serverHost = true, "rke2-vip.example.lan"
+		c.nodes["cp-3"].serverHost = "cp-1.example.lan"
+	})
+	w := strings.Join(p.Warnings, "\n")
+	for _, s := range []string{
+		"cp-1 joins through server: https://rke2-vip.example.lan:9345, a DNS name that is no server in this rescue (a VIP or load balancer?)",
+		"cp-3 keeps server: https://cp-1.example.lan:9345 (cp-1)",
+	} {
+		if !strings.Contains(w, s) {
+			t.Errorf("missing warning %q in:\n%s", s, w)
+		}
+	}
+	if strings.Contains(w, "cp-1 has no server:") {
+		t.Errorf("cp-1 has a server: now:\n%s", w)
 	}
 }
 

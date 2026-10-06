@@ -91,6 +91,8 @@ type Facts struct {
 	ServerURL   string // that server: value
 	NodeIP      string // config.yaml node-ip: (every listener rke2 renders binds to it)
 	ClusterInit bool
+	Agent       string // rancher-system-agent: systemctl is-active, or "none" (no unit)
+	Rancher     bool   // config.yaml.d/50-rancher.yaml: provisioned by Rancher
 	// every kind
 	Addrs    []string // global-scope addresses the node holds right now
 	Profile  string
@@ -230,6 +232,8 @@ type Plan struct {
 	Skipped  []Node   // Others that failed preflight: neither stopped nor rejoined
 	Notes    []string // what to know afterward (backup locations, drop-ins)
 
+	agentOff map[string]bool // nodes whose rancher-system-agent the rescue stopped and has not started again
+
 	runner Runner
 	mu     sync.Mutex
 	steps  []*Step
@@ -299,7 +303,7 @@ func (p *Plan) render(name string, n Node, vars map[string]string) string {
 	all := map[string]string{
 		"KIND": string(p.Kind), "DD": p.DD, "DATADIR": p.dataDir(n), "STAMP": p.Stamp, "RESCUE": n.Facts.Rescue, "IP": n.IP,
 		"ROLE": "other", "SNAP": "", "S3": "0", "API": "0", "PROMOTE": "0", "JOIN": "", "OWNER": "",
-		"NAME": "", "PEER": "", "IMAGE": "", "INITIAL_CLUSTER": "", "LOG": "", "EXIT": "", "DIR": "", "FORCE": "0", "SINCE": "0", "NODE": "", "OLD": "", "NEW": "",
+		"NAME": "", "PEER": "", "IMAGE": "", "INITIAL_CLUSTER": "", "LOG": "", "EXIT": "", "DIR": "", "FORCE": "0", "SINCE": "0", "NODE": "", "OLD": "", "NEW": "", "ACTION": "",
 	}
 	for k, v := range vars {
 		all[k] = v
@@ -388,6 +392,7 @@ func (p *Plan) Preflight(ctx context.Context, r Runner) error {
 		p.members = st.Members
 		p.Warnings = append(p.Warnings, fmt.Sprintf("%s sees %d members, %d healthy, leader %s; %s rejoins through it and keeps that data (nothing is restored)", p.Target.Name, st.Members, st.Healthy, st.Leader, p.Others[0].Name))
 		p.Warnings = append(p.Warnings, p.addressWarnings()...)
+		p.Warnings = append(p.Warnings, p.rancherWarnings()...)
 		p.build()
 		return nil
 	}
@@ -502,6 +507,10 @@ func parseFacts(out string) Facts {
 			f.Rescue = v
 		case "etcd_user":
 			f.EtcdUser = v != "none" && v != ""
+		case "agent":
+			f.Agent = v
+		case "rancher_config":
+			f.Rancher = v == "yes"
 		case "addrs":
 			f.Addrs = strings.Fields(v)
 		case "manifest":
@@ -579,13 +588,70 @@ func (p *Plan) assess() []string {
 			w = append(w, fmt.Sprintf("%s: %s is %s", o.Name, p.Svc(), o.Facts.SvcState))
 		}
 	}
-	if (p.Kind == RKE2 || p.Kind == K3s) && len(p.Others) > 0 {
-		w = append(w, "each follower rejoins through "+p.JoinURL()+" (temporary config.yaml.d/99-khealth-rescue.yaml, removed once it is a member): its own server: may point at a server that is still stopped")
+	if p.Kind == RKE2 || p.Kind == K3s {
+		if t.HasServer {
+			w = append(w, fmt.Sprintf("%s has server: %s: the restored node must come up without one (it would try to join there instead of serving the restored data), so it starts with server: \"\" from %s until every follower is back", p.Target.Name, t.ServerURL, p.dropInPath()))
+		}
+		if len(p.Others) > 0 {
+			w = append(w, "each follower rejoins through "+p.JoinURL()+" (temporary "+p.dropInPath()+", removed once it is a member): its own server: may point at a server that is still stopped")
+		}
 	}
 	if len(p.Others) == 0 && len(p.Skipped) == 0 {
 		w = append(w, "single-server cluster: the restore reboots the only control plane")
 	}
 	w = append(w, p.addressWarnings()...)
+	w = append(w, p.rancherWarnings()...)
+	return w
+}
+
+// dropIn is the rescue's temporary config.yaml.d file: rke2/k3s read the
+// directory in name order and the last value wins, so it sorts after
+// Rancher's 50-rancher.yaml and any numbered file.
+const dropIn = "zz-khealth-rescue.yaml"
+
+func (p *Plan) dropInPath() string { return p.confDir() + "/config.yaml.d/" + dropIn }
+
+// touched is the servers whose service the rescue stops (the rejoin anchor
+// keeps running).
+func (p *Plan) touched() []Node {
+	if p.Rejoin {
+		return p.Others
+	}
+	return append([]Node{p.Target}, p.Others...)
+}
+
+// agentNodes is the touched servers with a running rancher-system-agent.
+func (p *Plan) agentNodes() []Node {
+	var out []Node
+	for _, n := range p.touched() {
+		switch n.Facts.Agent {
+		case "active", "activating", "reloading":
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// rancherWarnings: a Rancher-provisioned server whose rancher-system-agent
+// would apply a plan mid-rescue (rewrite 50-rancher.yaml, start or restart
+// rke2-server).
+func (p *Plan) rancherWarnings() []string {
+	var names, prov []string
+	for _, n := range p.agentNodes() {
+		names = append(names, n.Name)
+	}
+	for _, n := range p.touched() {
+		if n.Facts.Rancher {
+			prov = append(prov, n.Name)
+		}
+	}
+	var w []string
+	if len(names) > 0 {
+		w = append(w, fmt.Sprintf("rancher-system-agent runs on %s: it is stopped before anything else and started again only once every server is back and the drop-ins are gone - a plan applied in between rewrites 50-rancher.yaml and starts or restarts %s. Do not change the cluster in Rancher meanwhile; a plan it sends is applied when the agent is back", strings.Join(names, ", "), p.Svc()))
+	}
+	if len(prov) > 0 {
+		w = append(w, fmt.Sprintf("%s provisioned by Rancher (config.yaml.d/50-rancher.yaml): Rancher's own restore (Cluster Management > Snapshots) is the supported route while Rancher can still reach the cluster's agents", strings.Join(prov, ", ")))
+	}
 	return w
 }
 
@@ -631,21 +697,29 @@ func (p *Plan) addressWarnings() []string {
 			continue
 		}
 		known := ""
+		short, _, _ := strings.Cut(h, ".")
 		for _, o := range all {
 			if (len(o.Facts.Addrs) > 0 && o.Facts.HasAddr(h)) || o.IP == h {
+				known = o.Name
+			}
+			// a DNS name that is one server's own name, short or FQDN
+			if net.ParseIP(h) == nil && (strings.EqualFold(h, o.Name) || strings.EqualFold(h, o.Facts.Hostname) ||
+				strings.EqualFold(short, o.Name) || strings.EqualFold(short, o.Facts.Hostname)) {
 				known = o.Name
 			}
 		}
 		switch {
 		case known == "" && net.ParseIP(h) != nil:
 			w = append(w, fmt.Sprintf("%s joins through server: %s, which is no address of a server in this rescue (a VIP, or a server that is gone?)", n.Name, n.Facts.ServerURL))
-		case known != "":
-			// the rescue never rewrites server: (the join goes through a
+		case known == "":
+			w = append(w, fmt.Sprintf("%s joins through server: %s, a DNS name that is no server in this rescue (a VIP or load balancer?): not resolved here - from the next restart on it must reach a server that is back, or %s there cannot start", n.Name, n.Facts.ServerURL, p.Svc()))
+		default:
+			// the rescue never rewrites server: (it overrides it with a
 			// temporary drop-in that is removed again); say where the node
 			// will join from at its next restart, since a single server is
 			// a single point of failure and rke2 wants a fixed registration
 			// address there
-			w = append(w, fmt.Sprintf("%s keeps server: %s (%s) for its next restarts - the rescue joins it through a temporary drop-in and leaves the file alone; a VIP or DNS name in front of the servers is what rke2 recommends for server:", n.Name, n.Facts.ServerURL, known))
+			w = append(w, fmt.Sprintf("%s keeps server: %s (%s) for its next restarts - the rescue overrides it with a temporary drop-in and leaves the file alone; a VIP or DNS name in front of the servers is what rke2 recommends for server:", n.Name, n.Facts.ServerURL, known))
 		}
 	}
 	return w
@@ -662,6 +736,22 @@ func (p *Plan) add(title string, n Node, run func(ctx context.Context, s *Step) 
 func (p *Plan) build() {
 	p.steps = nil
 	svc := p.Svc()
+	// first of all: a Rancher plan applied mid-rescue starts or restarts
+	// the server unit with the plan's config
+	for _, n := range p.agentNodes() {
+		p.add("Stop rancher-system-agent (its plans rewrite 50-rancher.yaml and restart "+svc+")", n, func(ctx context.Context, s *Step) error {
+			_, err := p.exec(ctx, s, n, "agent", map[string]string{"ACTION": "stop"}, 2*time.Minute, "agent=ok")
+			if err == nil {
+				p.mu.Lock()
+				if p.agentOff == nil {
+					p.agentOff = map[string]bool{}
+				}
+				p.agentOff[n.Name] = true
+				p.mu.Unlock()
+			}
+			return err
+		})
+	}
 	if p.Rejoin {
 		o := p.Others[0]
 		p.add("Stop "+svc, o, func(ctx context.Context, s *Step) error {
@@ -695,6 +785,7 @@ func (p *Plan) build() {
 		p.add("Verify the cluster", p.Target, func(ctx context.Context, s *Step) error {
 			return p.waitStatus(ctx, s, p.Target, p.members, true, false, "")
 		})
+		p.startAgents()
 		return
 	}
 	for _, o := range p.Others {
@@ -726,6 +817,16 @@ func (p *Plan) build() {
 	p.add("Verify the cluster", t, func(ctx context.Context, s *Step) error {
 		return p.waitStatus(ctx, s, t, want, true, false, "")
 	})
+	if p.Kind == RKE2 || p.Kind == K3s {
+		// only now: a restart of the target before every follower was back
+		// would follow its own server: (a VIP, a follower) into a cluster
+		// that is not there yet
+		p.add("Remove the server: override", t, func(ctx context.Context, s *Step) error {
+			_, err := p.exec(ctx, s, t, "join_cleanup", nil, time.Minute, "cleanup=ok")
+			return err
+		})
+	}
+	p.startAgents()
 	if p.TakeSnapshot {
 		p.add("Take a fresh snapshot", t, func(ctx context.Context, s *Step) error {
 			dir := p.Snapshot
@@ -735,6 +836,22 @@ func (p *Plan) build() {
 				dir = "/var/lib/etcd-backup"
 			}
 			_, err := p.exec(ctx, s, t, "snapshot", map[string]string{"DIR": dir}, 5*time.Minute, "snapshot=ok")
+			return err
+		})
+	}
+}
+
+// startAgents starts the rancher-system-agents the rescue stopped: last,
+// once every server is back and no drop-in is left for a plan to fight with.
+func (p *Plan) startAgents() {
+	for _, n := range p.agentNodes() {
+		p.add("Start rancher-system-agent", n, func(ctx context.Context, s *Step) error {
+			_, err := p.exec(ctx, s, n, "agent", map[string]string{"ACTION": "start"}, 2*time.Minute, "agent=ok")
+			if err == nil {
+				p.mu.Lock()
+				delete(p.agentOff, n.Name)
+				p.mu.Unlock()
+			}
 			return err
 		})
 	}
@@ -754,8 +871,11 @@ func (p *Plan) buildRKE2() {
 		_, err := p.exec(ctx, s, t, "perms", map[string]string{"OWNER": t.Facts.Owner}, 5*time.Minute, "perms=ok")
 		return err
 	})
-	p.add("Start "+svc, t, func(ctx context.Context, s *Step) error {
+	p.add("Start "+svc+" (server: overridden to none until every follower is back)", t, func(ctx context.Context, s *Step) error {
 		_, err := p.exec(ctx, s, t, "start", map[string]string{"ROLE": "target"}, 2*time.Minute, "started=ok")
+		if err == nil {
+			p.note("wrote " + p.dropInPath() + " on " + t.Name + " (server: \"\") for the restore (removed again once every follower was back)")
+		}
 		return err
 	})
 	p.add("Wait for etcd and the apiserver (second cluster-reset if the member does not come up alone)", t, func(ctx context.Context, s *Step) error {
@@ -784,7 +904,7 @@ func (p *Plan) rejoinSteps(t, o Node, want, total int) {
 		p.add("Rejoin: start "+p.Svc()+" (join via "+join+")", o, func(ctx context.Context, s *Step) error {
 			_, err := p.exec(ctx, s, o, "start", map[string]string{"JOIN": join, "ROLE": "other"}, 2*time.Minute, "started=ok")
 			if err == nil {
-				p.note("wrote " + p.confDir() + "/config.yaml.d/99-khealth-rescue.yaml on " + o.Name + " for the rejoin (removed again once it was a member)")
+				p.note("wrote " + p.dropInPath() + " on " + o.Name + " for the rejoin (removed again once it was a member)")
 			}
 			return err
 		})
@@ -1104,11 +1224,7 @@ func (p *Plan) Run(ctx context.Context, events chan<- Event) {
 
 // finishNotes records what the operator needs to know afterward.
 func (p *Plan) finishNotes(failed error) {
-	touched := append([]Node{p.Target}, p.Others...)
-	if p.Rejoin {
-		touched = p.Others // the anchor is not touched
-	}
-	for _, n := range touched {
+	for _, n := range p.touched() {
 		if n.Facts.Rescue != "" {
 			p.note(fmt.Sprintf("%s: previous etcd data kept in %s (delete it once the cluster has been fine for a while)", n.Name, n.Facts.Rescue))
 		}
@@ -1121,6 +1237,15 @@ func (p *Plan) finishNotes(failed error) {
 	}
 	if p.Kind == Kubeadm {
 		p.note("worker kubelets were not restarted: if pods look stale on a worker, systemctl restart kubelet there")
+	}
+	var off []string
+	for _, n := range p.agentNodes() {
+		if p.agentOff[n.Name] {
+			off = append(off, n.Name)
+		}
+	}
+	if len(off) > 0 {
+		p.note(fmt.Sprintf("rancher-system-agent is still stopped on %s (left so on purpose: a plan would rewrite 50-rancher.yaml and restart %s mid-repair). Once the servers are back and %s is gone: systemctl start rancher-system-agent", strings.Join(off, ", "), p.Svc(), p.dropInPath()))
 	}
 	if failed != nil {
 		p.note("the cluster is in the state the failed step left it; the steps above say what was done on each node. Data moved aside is never deleted by khealth.")
