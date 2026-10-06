@@ -156,6 +156,16 @@ func TestScanStageFailure(t *testing.T) {
 	if !strings.Contains(a.status, "1 failed") {
 		t.Errorf("status %q", a.status)
 	}
+	// the results are the nodes that answered; the one that did not is named
+	a.sub[tabSecurity] = 2
+	if v := ansi.Strip(a.View()); !strings.Contains(v, "1 of 2 node(s) not in these results - the scan failed there: w-1 (files: ssh: timeout)") {
+		t.Errorf("OS STIG view does not name the failed node:\n%s", v)
+	}
+	a.nodes["w-1"] = nodeinfo.Parse("w-1", "10.0.0.2", nodeSample, time.Now())
+	a.sub[tabSecurity] = 1
+	if v := ansi.Strip(a.View()); !strings.Contains(v, "scan failed: files: ssh:") {
+		t.Errorf("Node hardening does not mark the failed node:\n%s", v)
+	}
 	a.scan.want["w-1"] = true // show the checklist again to read the row
 	a.sub[tabSecurity] = 2
 	if v := ansi.Strip(a.View()); !strings.Contains(v, "failed at files: ssh: timeout") {

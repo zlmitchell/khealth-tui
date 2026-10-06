@@ -467,6 +467,77 @@ func (r *Runner) client(host string) (*ssh.Client, error) {
 	return c, nil
 }
 
+// closeGrace is how long a killed session gets to close before its
+// connection is declared dead.
+var closeGrace = 3 * time.Second
+
+// noAnswer explains an error from a connection that stopped answering.
+const noAnswer = "the SSH connection stopped answering (host down or rebooting?)"
+
+// dropDead closes a connection that stopped answering: a host that went
+// down or rebooted sends no RST, so the cached connection stays open and
+// every wait on it would last until the kernel gives up on TCP (minutes),
+// holding a concurrency slot all along. Closing it ends those waits; the
+// next call dials again.
+func (r *Runner) dropDead(addr string, c *ssh.Client) {
+	r.mu.Lock()
+	if r.clients[addr] == c {
+		delete(r.clients, addr)
+		delete(r.become, addr)
+	}
+	r.mu.Unlock()
+	c.Close()
+}
+
+// newSession opens a session within ctx. A live host answers the channel
+// open at once, so one that has not by the deadline is gone.
+func (r *Runner) newSession(ctx context.Context, c *ssh.Client, addr string) (*ssh.Session, error) {
+	type opened struct {
+		s   *ssh.Session
+		err error
+	}
+	ch := make(chan opened, 1)
+	go func() {
+		s, err := c.NewSession()
+		ch <- opened{s, err}
+	}()
+	select {
+	case o := <-ch:
+		if o.err != nil {
+			return nil, fmt.Errorf("session: %w", o.err)
+		}
+		return o.s, nil
+	case <-ctx.Done():
+	}
+	r.dropDead(addr, c)
+	if o := <-ch; o.s != nil {
+		o.s.Close()
+	}
+	return nil, fmt.Errorf("session: %w: %s", ctx.Err(), noAnswer)
+}
+
+// wait waits for a session started with done, killing it when ctx ends;
+// when even the close goes unanswered the connection is dead and closed.
+func (r *Runner) wait(ctx context.Context, c *ssh.Client, addr string, sess *ssh.Session, done <-chan error) error {
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+	}
+	_ = sess.Signal(ssh.SIGKILL)
+	sess.Close()
+	// Run returns once the closed channel drains; wait for it so the
+	// stdout/stderr copies are finished before the buffers are read
+	select {
+	case <-done:
+		return ctx.Err()
+	case <-time.After(closeGrace):
+	}
+	r.dropDead(addr, c)
+	<-done
+	return fmt.Errorf("%w: %s", ctx.Err(), noAnswer)
+}
+
 func (r *Runner) drop(host string) {
 	addr := r.addr(host)
 	r.mu.Lock()
@@ -566,21 +637,21 @@ func (r *Runner) runOnce(ctx context.Context, host, script string, stdout io.Wri
 		res.Finished = time.Now()
 		return res
 	}
-	sess, err := c.NewSession()
+	addr := r.addr(host)
+	sess, err := r.newSession(ctx, c, addr)
 	if err != nil {
-		res.Err = fmt.Errorf("session: %w", err)
+		res.Err = err
 		res.Finished = time.Now()
 		return res
 	}
 	defer sess.Close()
 
 	// how to become root on this host (probed once, cached until reconnect)
-	addr := r.addr(host)
 	r.mu.Lock()
 	method, known := r.become[addr]
 	r.mu.Unlock()
 	if !known {
-		method, err = r.detectBecome(ctx, c)
+		method, err = r.detectBecome(ctx, c, addr)
 		if err != nil {
 			res.Err = err
 			res.Finished = time.Now()
@@ -602,16 +673,7 @@ func (r *Runner) runOnce(ctx context.Context, host, script string, stdout io.Wri
 	res.Started = time.Now()
 	done := make(chan error, 1)
 	go func() { done <- sess.Run(cmd) }()
-	select {
-	case err = <-done:
-	case <-ctx.Done():
-		_ = sess.Signal(ssh.SIGKILL)
-		sess.Close()
-		// Run returns once the closed channel drains; wait for it so the
-		// stdout/stderr copies are finished before the buffers are read
-		<-done
-		err = ctx.Err()
-	}
+	err = r.wait(ctx, c, addr, sess, done)
 	res.Finished = time.Now()
 	res.Stderr = stderr.String()
 	if err != nil {

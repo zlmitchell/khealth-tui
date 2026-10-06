@@ -654,6 +654,15 @@ func newSecScan(nodes []string, hosts map[string]string) *secScan {
 // running reports whether any node still owes its facts.
 func (sc *secScan) running() bool { return sc != nil && len(sc.want) > 0 }
 
+// failedAt is the error the scan stopped at on a node ("" when it did not
+// fail, or no scan ran).
+func (sc *secScan) failedAt(n string) string {
+	if sc == nil {
+		return ""
+	}
+	return sc.failed[n]
+}
+
 // done is the number of nodes that have answered.
 func (sc *secScan) done() int { return len(sc.nodes) - len(sc.want) }
 

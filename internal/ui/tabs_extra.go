@@ -1629,7 +1629,9 @@ func (a *App) hardeningContent() content {
 		}
 		counts, _ := stig.OSSummary(a.stigRes, n)
 		osCell := styleDim.Render("no STIG table")
-		if !ni.STIGProbed {
+		if e := a.scan.failedAt(n); e != "" && !ni.STIGProbed {
+			osCell = styleCrit.Render("scan failed: " + strutil.FirstLine(e))
+		} else if !ni.STIGProbed {
 			osCell = styleDim.Render("not collected (Shift+S)")
 		} else if len(counts) > 0 {
 			sc := stig.Score{Open: counts[stig.Fail], NotAFinding: counts[stig.Pass]}
@@ -1716,6 +1718,9 @@ func (a *App) osStigContent() content {
 			c.empty = "the OS STIG scan cannot run without SSH"
 		case a.scan.running():
 			c.empty = "collecting the OS STIG facts from the nodes (a few seconds per node)..."
+		case a.scanFailedLine() != "":
+			hdr = append(hdr, a.scanFailedLine())
+			c.empty = "no OS STIG results - no node answered the scan"
 		default:
 			hdr = append(hdr, styleBold.Render("Shift+S runs the full OS STIG scan on all hosts")+styleDim.Render(" (sysctl -a, packages, audit rules, file sweep, config dumps; a few seconds per node; results stay until the next Shift+S)"))
 		}
@@ -1725,6 +1730,9 @@ func (a *App) osStigContent() content {
 	hdr := []string{
 		styleTitle.Render("DISA OS STIG rules") + "  " + stacked(40, ssegs) + "  " + legend(ssegs) + "  " + kv("automated pass rate", gauge(score, 10, 200, 200)),
 		a.osBenchmarkLine(),
+	}
+	if l := a.scanFailedLine(); l != "" {
+		hdr = append(hdr, l)
 	}
 	scores := stig.Scores(osRes, true)
 	shown := 0
@@ -1771,6 +1779,26 @@ func (a *App) osStigContent() content {
 		c.rows = append(c.rows, row{id: ids[i], text: l})
 	}
 	return c
+}
+
+// scanFailedLine names the nodes the last scan could not collect from: the
+// results are those of the nodes that answered, and without this line a
+// node that was down simply would not be there.
+func (a *App) scanFailedLine() string {
+	sc := a.scan
+	if sc == nil {
+		return ""
+	}
+	var parts []string
+	for _, n := range sc.nodes {
+		if e := sc.failed[n]; e != "" {
+			parts = append(parts, n+" ("+strutil.FirstLine(e)+")")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return styleWarn.Render(fmt.Sprintf("%d of %d node(s) not in these results - the scan failed there: ", len(parts), len(sc.nodes))) + styleDim.Render(strings.Join(parts, "; ")+"  (Shift+S scans again)")
 }
 
 // osBenchmarkLine names the OS STIG release each reachable node is matched to.

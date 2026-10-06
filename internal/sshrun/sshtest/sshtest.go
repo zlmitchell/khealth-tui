@@ -53,6 +53,7 @@ type Server struct {
 	accepted [][]byte // marshalled public keys that may log in
 	execs    int
 	dials    int
+	frozen   bool
 }
 
 // New starts a server; it is closed when the test ends.
@@ -212,6 +213,53 @@ func (s *Server) DropConnections() {
 	}
 }
 
+// Freeze makes every connection stop answering without closing, as a host
+// that powered off or is rebooting does (no RST): what the client sends
+// lands, nothing comes back. New connections hang in the handshake. Close
+// (the test cleanup) still ends them.
+func (s *Server) Freeze() {
+	s.mu.Lock()
+	s.frozen = true
+	s.mu.Unlock()
+}
+
+func (s *Server) isFrozen() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.frozen
+}
+
+// freezeConn blocks reads and writes once the server is frozen, until the
+// connection is closed.
+type freezeConn struct {
+	net.Conn
+	s      *Server
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *freezeConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if c.s.isFrozen() {
+		<-c.closed
+		return 0, net.ErrClosed
+	}
+	return n, err
+}
+
+func (c *freezeConn) Write(p []byte) (int, error) {
+	if c.s.isFrozen() {
+		<-c.closed
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *freezeConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
 // Close stops the listener and drops the connections.
 func (s *Server) Close() {
 	_ = s.ln.Close()
@@ -228,7 +276,8 @@ func (s *Server) accept() {
 	}
 }
 
-func (s *Server) handle(nc net.Conn) {
+func (s *Server) handle(raw net.Conn) {
+	nc := &freezeConn{Conn: raw, s: s, closed: make(chan struct{})}
 	sconn, chans, reqs, err := ssh.NewServerConn(nc, s.connConfig())
 	if err != nil {
 		nc.Close()

@@ -96,11 +96,11 @@ func classifyBecomeFailure(tool, stderr string) (needsPassword bool, reason stri
 
 // detectBecome probes one host and returns the method to use, or an error
 // naming every tool tried and why it failed.
-func (r *Runner) detectBecome(ctx context.Context, c *ssh.Client) (becomeMethod, error) {
+func (r *Runner) detectBecome(ctx context.Context, c *ssh.Client, addr string) (becomeMethod, error) {
 	if r.cfg.Become == "none" {
 		return becomeMethod{}, nil
 	}
-	out, _, err := r.exec(ctx, c, "/bin/sh -s", becomeProbe)
+	out, _, err := r.exec(ctx, c, addr, "/bin/sh -s", becomeProbe)
 	if err != nil {
 		return becomeMethod{}, fmt.Errorf("become probe: %w", err)
 	}
@@ -127,7 +127,7 @@ func (r *Runner) detectBecome(ctx context.Context, c *ssh.Client) (becomeMethod,
 	password := r.becomePassword()
 	var reasons []string
 	for _, tool := range candidates {
-		out, stderr, err := r.exec(ctx, c, tool+" -n id -u", "")
+		out, stderr, err := r.exec(ctx, c, addr, tool+" -n id -u", "")
 		if err == nil && strings.TrimSpace(out) == "0" {
 			return becomeMethod{tool: tool}, nil
 		}
@@ -139,7 +139,7 @@ func (r *Runner) detectBecome(ctx context.Context, c *ssh.Client) (becomeMethod,
 			case password == "":
 				reason = "password required (none configured: use --ask-pass, KHT_BECOME_PASSWORD or ssh.become_password)"
 			default:
-				out, stderr, err = r.exec(ctx, c, tool+" -S -p '' id -u", password+"\n")
+				out, stderr, err = r.exec(ctx, c, addr, tool+" -S -p '' id -u", password+"\n")
 				if err == nil && strings.TrimSpace(out) == "0" {
 					return becomeMethod{tool: tool, withPass: true}, nil
 				}
@@ -162,10 +162,10 @@ func (r *Runner) becomePassword() string {
 }
 
 // exec runs one command on an established client with the given stdin.
-func (r *Runner) exec(ctx context.Context, c *ssh.Client, cmd, stdin string) (string, string, error) {
-	sess, err := c.NewSession()
+func (r *Runner) exec(ctx context.Context, c *ssh.Client, addr, cmd, stdin string) (string, string, error) {
+	sess, err := r.newSession(ctx, c, addr)
 	if err != nil {
-		return "", "", fmt.Errorf("session: %w", err)
+		return "", "", err
 	}
 	defer sess.Close()
 	var stdout, stderr bytes.Buffer
@@ -173,12 +173,7 @@ func (r *Runner) exec(ctx context.Context, c *ssh.Client, cmd, stdin string) (st
 	sess.Stdin = strings.NewReader(stdin)
 	done := make(chan error, 1)
 	go func() { done <- sess.Run(cmd) }()
-	select {
-	case err = <-done:
-	case <-ctx.Done():
-		_ = sess.Signal(ssh.SIGKILL)
-		err = ctx.Err()
-	}
+	err = r.wait(ctx, c, addr, sess, done)
 	return stdout.String(), stderr.String(), err
 }
 

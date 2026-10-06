@@ -405,6 +405,73 @@ func TestRunContext(t *testing.T) {
 	<-r.sem
 }
 
+// A host that goes down or reboots while its connection is cached sends no
+// RST: the session open, and the wait for a script it never finishes, would
+// last until the kernel gives up on TCP (minutes), holding the concurrency
+// slot. The deadline ends both, the dead connection is dropped and the next
+// call dials again.
+func TestRunHostGoneSilent(t *testing.T) {
+	defer func(g time.Duration) { closeGrace = g }(closeGrace)
+	closeGrace = 200 * time.Millisecond
+	var srv *sshtest.Server
+	srv = sshtest.New(t, func(cmd, stdin string) (string, string, int) {
+		if strings.HasPrefix(stdin, "id -u;") {
+			return "0\n", "", 0
+		}
+		if strings.Contains(stdin, "freeze") {
+			srv.Freeze() // powered off mid-script: the answer never leaves
+		}
+		return "ok\n", "", 0
+	})
+	cfg := testCfg(srv)
+	cfg.Concurrency = 1
+	r := newRunner(t, cfg)
+	check := func(what string, res Result, start time.Time) {
+		t.Helper()
+		if !errors.Is(res.Err, context.DeadlineExceeded) || !strings.Contains(res.Err.Error(), "stopped answering") || time.Since(start) > 2*time.Second {
+			t.Errorf("%s: %v after %s", what, res.Err, time.Since(start))
+		}
+		r.mu.Lock()
+		_, cached := r.clients[srv.Addr]
+		r.mu.Unlock()
+		if cached {
+			t.Errorf("%s: the dead connection is still cached", what)
+		}
+		select {
+		case r.sem <- struct{}{}:
+			<-r.sem
+		default:
+			t.Errorf("%s: the concurrency slot is still held", what)
+		}
+	}
+	run := func(script string) (Result, time.Time) {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		return r.Run(ctx, srv.Addr, script), start
+	}
+
+	// mid-script
+	if res := r.Run(context.Background(), srv.Addr, "a\n"); res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	res, start := run("freeze\n")
+	check("mid-script", res, start)
+
+	// between two calls: the cached connection's session open never answers
+	srv2 := sshtest.New(t, hostHandler{uid: "0"}.handle)
+	srv = srv2
+	cfg = testCfg(srv2)
+	cfg.Concurrency = 1
+	r = newRunner(t, cfg)
+	if res := r.Run(context.Background(), srv2.Addr, "a\n"); res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	srv2.Freeze()
+	res, start = run("b\n")
+	check("session open", res, start)
+}
+
 func TestKnownHosts(t *testing.T) {
 	srv := sshtest.New(t, hostHandler{uid: "0"}.handle)
 	kh := filepath.Join(t.TempDir(), "known_hosts")
