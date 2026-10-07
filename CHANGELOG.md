@@ -1,3 +1,12 @@
+## [1.3.5](https://github.com/zlmitchell/khealth-tui/compare/v1.3.4...v1.3.5) (2026-10-07)
+
+
+### Bug Fixes
+
+* data race in the silent-host SSH test ([af0ce90](https://github.com/zlmitchell/khealth-tui/commit/af0ce905130cfe294cd70df3bf49ef1779e4a018))
+* etcd restore order for server: and rancher-system-agent ([994286e](https://github.com/zlmitchell/khealth-tui/commit/994286e61b696a38eb3ed1d3925b450801f153c2))
+* security scan no longer hangs on a node that went down ([27da91a](https://github.com/zlmitchell/khealth-tui/commit/27da91a4180e596f6bf60c3491eec02ad02a3627))
+
 ## [1.3.4](https://github.com/zlmitchell/khealth-tui/compare/v1.3.3...v1.3.4) (2026-10-01)
 
 
