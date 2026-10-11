@@ -870,8 +870,20 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 	if len(s.RKE2Snapshots) > 0 {
 		backupMechanism = true
 	}
+	// a CronJob that takes etcd snapshots: "etcd" plus "snapshot"/"backup"
+	// in its name or command (an etcd-defrag job is not a backup), and not
+	// suspended
 	for i := range s.CronJobs {
-		if strings.Contains(strings.ToLower(s.CronJobs[i].Name), "etcd") {
+		c := &s.CronJobs[i]
+		if c.Spec.Suspend != nil && *c.Spec.Suspend {
+			continue
+		}
+		text := c.Name
+		for _, ct := range c.Spec.JobTemplate.Spec.Template.Spec.Containers {
+			text += " " + strings.Join(ct.Command, " ") + " " + strings.Join(ct.Args, " ")
+		}
+		text = strings.ToLower(text)
+		if strings.Contains(text, "etcd") && (strings.Contains(text, "snapshot") || strings.Contains(text, "backup")) {
 			backupMechanism = true
 		}
 	}

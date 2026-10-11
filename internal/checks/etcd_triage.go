@@ -68,11 +68,24 @@ func (q etcdQuorum) String() string {
 // state, container state and journal patterns, and emits one finding per
 // problem member with the ordered steps to fix it. It returns the node and
 // member names it reported so the generic per-endpoint checks skip them.
-func triageEtcd(in Input, add func(Finding)) map[string]bool {
+func triageEtcd(in Input, addRaw func(Finding)) map[string]bool {
 	covered := map[string]bool{}
 	s := in.Snap
 	if s == nil {
 		return covered
+	}
+	// steps that run etcdctl say once how: it is on no host's PATH
+	ctl := runtimeOf(clusterDist(in), "").ctl
+	add := func(f Finding) {
+		if ctl != "" && len(f.Steps) > 0 {
+			for _, st := range f.Steps {
+				if strings.Contains(st, "etcdctl ") {
+					f.Steps = append(f.Steps[:1:1], append([]string{"etcdctl in these steps: " + ctl}, f.Steps[1:]...)...)
+					break
+				}
+			}
+		}
+		addRaw(f)
 	}
 	src := etcdMembershipSource(in)
 
@@ -798,8 +811,8 @@ func etcdQuorumOf(recs []*etcdTriage, members []etcd.Member, statusByID map[stri
 			}
 		}
 		best := ""
-		for id, n := range votes {
-			if n > votes[best] {
+		for _, id := range strutil.SortedKeys(votes) { // ties go to the lowest id, not map order
+			if n := votes[id]; n > votes[best] {
 				best = id
 			}
 		}

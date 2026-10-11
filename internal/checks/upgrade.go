@@ -120,7 +120,16 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 			}
 		}
 		if len(skips) > 0 {
-			add(SevCrit, "upgrade", obj, fmt.Sprintf("plan targets %s but %s more than one minor behind: %s - skipping a minor version is not supported, the node will not come back healthy", target, pluralCount(len(skips), "node"), strutil.TruncList(skips, 3)), "upgrade one minor at a time: set spec.version to the latest v"+strconv.Itoa(tmaj)+"."+strconv.Itoa(lowest+1)+" release first")
+			// the control plane must go one minor at a time (storage
+			// version migrations, removed APIs); for agent-only plans it is
+			// a warning, the servers decide whether the cluster still works
+			sev := SevWarn
+			for _, sk := range skips {
+				if n := s.Node(strings.SplitN(sk, " ", 2)[0]); n != nil && k8s.IsControlPlane(n) {
+					sev = SevCrit
+				}
+			}
+			add(sev, "upgrade", obj, fmt.Sprintf("plan targets %s but %s more than one minor behind: %s - skipping a minor version is not supported, the node will not come back healthy", target, pluralCount(len(skips), "node"), strutil.TruncList(skips, 3)), "upgrade one minor at a time: set spec.version to the latest v"+strconv.Itoa(tmaj)+"."+strconv.Itoa(lowest+1)+" release first")
 		}
 		if len(downgrades) > 0 {
 			add(SevWarn, "upgrade", obj, fmt.Sprintf("plan targets %s, older than what %s run: %s - this is a downgrade", target, pluralCount(len(downgrades), "node"), strutil.TruncList(downgrades, 3)), "check spec.version / the channel")
@@ -133,7 +142,8 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 			}
 		}
 		lastActivity := p.Created
-		for node, j := range latest {
+		for _, node := range strutil.SortedKeys(latest) {
+			j := latest[node]
 			if j.Started.After(lastActivity) {
 				lastActivity = j.Started
 			}
