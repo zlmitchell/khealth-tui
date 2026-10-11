@@ -20,8 +20,9 @@ import (
 func evalEvents(in Input, add func(Severity, string, string, string, string)) {
 	s := in.Snap
 	now := in.Now
-	gc := map[string][]string{} // node -> reasons
-	ipam := map[string]string{} // node -> last message
+	gc := map[string][]string{}   // node -> reasons
+	ipam := map[string]string{}   // node -> last message
+	dnsCfg := map[string]string{} // node -> last DNSConfigForming message
 	for i := range s.Events {
 		e := &s.Events[i]
 		if now.Sub(k8s.EventTime(e)) > time.Hour {
@@ -35,6 +36,13 @@ func evalEvents(in Input, add func(Severity, string, string, string, string)) {
 		case "ImageGCFailed", "FreeDiskSpaceFailed", "ContainerGCFailed":
 			if node != "" && !slices.Contains(gc[node], e.Reason) {
 				gc[node] = append(gc[node], e.Reason)
+			}
+		case "DNSConfigForming":
+			if node == "" {
+				node = podNode(s, e.InvolvedObject.Namespace, e.InvolvedObject.Name)
+			}
+			if node != "" {
+				dnsCfg[node] = strutil.TruncStr(strutil.FirstLine(e.Message), 200)
 			}
 		case "FailedCreatePodSandBox":
 			m := strings.ToLower(e.Message)
@@ -50,6 +58,9 @@ func evalEvents(in Input, add func(Severity, string, string, string, string)) {
 	}
 	for _, n := range strutil.SortedKeys(gc) {
 		add(SevWarn, "node", n, "the kubelet could not free disk space in the last hour ("+strings.Join(gc[n], ", ")+"): images in use or pinned (airgap tarballs) keep the disk full, DiskPressure and evictions follow", "crictl rmi --prune; move the containerd root to a larger disk; rke2 airgap: remove old tarballs in agent/images (they are re-imported and pinned at every start)")
+	}
+	for _, n := range strutil.SortedKeys(dnsCfg) {
+		add(SevWarn, "node", n, "the kubelet trims the resolver config it hands pods: "+dnsCfg[n], "keep at most 3 nameservers and 32 search domains in the resolv.conf the kubelet uses (its resolv-conf setting); pods only see the first 3 nameservers")
 	}
 	for _, n := range strutil.SortedKeys(ipam) {
 		add(SevCrit, "network", n, "pod sandboxes fail for lack of IPs on this node: "+ipam[n], "the node's pod CIDR is used up or IPAM leaked addresses: see the IPAM finding for the node; host-local: clean /var/lib/cni/networks/<net> on a drained node; Calico: calicoctl ipam check")

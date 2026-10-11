@@ -100,6 +100,8 @@ type Snapshot struct {
 	APIServices  []APIService
 	CSRs         []CSR
 	PDBs         []policyv1.PodDisruptionBudget
+	APIMetrics   *APIMetrics  // apiserver /metrics: APF rejections, objects in storage (apimetrics.go)
+	CertManager  *CertManager // nil without cert-manager (certmanager.go)
 
 	Errors []string
 
@@ -514,6 +516,8 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		return nil
 	})
 	c.fetchControl(ctx, s, &mu, optional)
+	c.fetchAPIMetrics(ctx, s, &mu, optional)
+	c.fetchCertManager(ctx, s, &mu, optional)
 	run("readyz", func() error {
 		checks, err := c.healthz(ctx, "/readyz")
 		if err != nil {

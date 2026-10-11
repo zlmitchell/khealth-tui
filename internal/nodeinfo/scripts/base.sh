@@ -172,9 +172,9 @@ units() {
     /^$/{if(id!="" && l=="loaded") print id"|"l"|"a"|"ss"|"n"|"t"|"r"|"u; id="";l="";a="";ss="";n="";t="";r="";u=""}
     END{if(id!="" && l=="loaded") print id"|"l"|"a"|"ss"|"n"|"t"|"r"|"u}'
 }
-UNITS_OUT=$(units kubelet containerd rke2-server rke2-agent k3s k3s-agent etcd docker crio rancher-system-agent chronyd chrony ntpd ntp systemd-timesyncd firewalld ufw nftables iptables apparmor fapolicyd auditd unattended-upgrades dnf-automatic.timer usbguard sssd cloud-init-local cloud-init cloud-config cloud-final)
+UNITS_OUT=$(units kubelet containerd rke2-server rke2-agent k3s k3s-agent etcd docker crio rancher-system-agent chronyd chrony ntpd ntp systemd-timesyncd firewalld ufw nftables iptables apparmor fapolicyd auditd unattended-upgrades dnf-automatic.timer usbguard sssd cloud-init-local cloud-init cloud-config cloud-final keepalived)
 sec SVC
-echo "$UNITS_OUT" | awk -F'|' '$1=="kubelet"||$1=="containerd"||$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="etcd"||$1=="docker"||$1=="crio"||$1=="rancher-system-agent"||$1=="chronyd"||$1=="chrony"||$1=="ntpd"||$1=="ntp"||$1=="systemd-timesyncd"||$1=="firewalld"||$1=="ufw"||$1=="nftables"||$1=="iptables"||$1=="apparmor"{print $1, $2, $3, $4}'
+echo "$UNITS_OUT" | awk -F'|' '$1=="kubelet"||$1=="containerd"||$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="etcd"||$1=="docker"||$1=="crio"||$1=="rancher-system-agent"||$1=="chronyd"||$1=="chrony"||$1=="ntpd"||$1=="ntp"||$1=="systemd-timesyncd"||$1=="firewalld"||$1=="ufw"||$1=="nftables"||$1=="iptables"||$1=="apparmor"||$1=="keepalived"{print $1, $2, $3, $4}'
 sec UNITS
 echo "$UNITS_OUT" | awk -F'|' '$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="kubelet"||$1=="containerd"||$1=="rancher-system-agent"||$1=="etcd"||$1=="cloud-init-local"||$1=="cloud-init"||$1=="cloud-config"||$1=="cloud-final"{print $1"|"$3"|"$4"|"$5"|"$6"|"$7"|"}'
 sec ADDRS

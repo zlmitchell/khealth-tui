@@ -94,6 +94,7 @@ type Client struct {
 	webhooksAt time.Time
 	csrs       []CSR
 	csrsAt     time.Time
+	apiMetrics *APIMetrics // apiserver /metrics, read at most every apiMetricsTTL
 }
 
 type deniedEntry struct {

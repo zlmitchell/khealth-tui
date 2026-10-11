@@ -394,6 +394,7 @@ func Evaluate(in Input) []Finding {
 
 	// ---- API endpoint vs tls-san / serving certificate ----
 	evalEndpoint(in, add)
+	evalVIP(in, add) // an API VIP held by two nodes or by none (endpoint.go)
 
 	// ---- etcd ----
 	evalEtcd(in, add, addF)
@@ -677,6 +678,10 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 		// k3s without --cluster-init: no etcd, so no etcd findings; the
 		// datastore still needs a backup and is a single point of failure
 		add(SevInfo, "etcd", "datastore", "no etcd: k3s keeps the cluster state in "+ds, "back up /var/lib/rancher/k3s/server/db/ (or the external database); restart the server with --cluster-init to move to embedded etcd and add servers for HA")
+		if strings.Contains(ds, "mysql") || strings.Contains(ds, "postgres") {
+			// docs.k3s.io/known-issues: older kine schemas stop at a 32-bit revision
+			add(SevInfo, "etcd", "datastore", "an external SQL datastore created on a k3s release before May 2024 goes read-only when its revision reaches 2147483647 unless the kine schema was migrated", "set KINE_SCHEMA_MIGRATION=1 (or higher) in the k3s service environment file on every server and restart them (k3s known issues)")
+		}
 		return
 	}
 	if kc := s.Kubeadm; kc != nil && kc.ExternalEtcd {

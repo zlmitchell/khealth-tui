@@ -25,6 +25,10 @@ func evalControl(in Input, add func(Severity, string, string, string, string)) {
 	now := in.Now
 	system := func(ns string) bool { return ns != "default" && k8s.IsSystemNamespace(ns) }
 
+	evalAPIMetrics(in, add)
+	evalIngressNetpol(in, add)
+	evalCertManager(in, add)
+
 	// ---- admission webhooks ----
 	if s.ServiceReady != nil {
 		for _, w := range s.Webhooks {
@@ -280,4 +284,124 @@ func replicaFailure(d *appsv1.Deployment) (cause, hint string) {
 		}
 	}
 	return "", ""
+}
+
+// evalAPIMetrics: API Priority & Fairness rejections (clients get 429s,
+// controllers lag) and what fills etcd, from the apiserver's /metrics.
+func evalAPIMetrics(in Input, add func(Severity, string, string, string, string)) {
+	m := in.Snap.APIMetrics
+	if m == nil {
+		return
+	}
+	fmtRej := func(r map[string]float64) (float64, string) {
+		var total float64
+		var parts []string
+		for _, k := range strutil.SortedKeys(r) {
+			total += r[k]
+			pl, reason, _ := strings.Cut(k, "|")
+			parts = append(parts, fmt.Sprintf("%s/%s %.0f", pl, reason, r[k]))
+		}
+		return total, strutil.TruncList(parts, 3)
+	}
+	hint := "find the noisy client: kubectl get --raw /metrics | grep apiserver_request_total, or the audit log by user agent; fix or throttle it; raise max-requests-inflight / max-mutating-requests-inflight or give it its own FlowSchema only as a last resort"
+	if m.RejectedNew != nil {
+		if n, which := fmtRej(m.RejectedNew); n > 0 {
+			add(SevWarn, "cluster", "api-priority", fmt.Sprintf("the apiserver rejected %.0f requests (429, API Priority & Fairness) in the last %s: %s - controllers and kubelets retry and lag", n, strutil.HumanDur(m.Since), which), hint)
+		}
+	} else if n, which := fmtRej(m.Rejected); n > 0 {
+		add(SevInfo, "cluster", "api-priority", fmt.Sprintf("the apiserver has rejected %.0f requests (429) since it started: %s", n, which), hint)
+	}
+	for _, r := range strutil.SortedKeys(m.Objects) {
+		if n := m.Objects[r]; n > 50000 {
+			add(SevWarn, "etcd", "objects/"+r, fmt.Sprintf("%.0f %s objects in storage: one resource is filling etcd (quota, slow lists, big snapshots)", n, r), "find who creates them (events: lower the controller's event rate or the apiserver event-ttl; Helm release secrets: --history-max; operator CRs: its retention); delete the excess, then compact and defrag")
+		}
+	}
+}
+
+// evalIngressNetpol: the rke2 CIS profile puts a same-namespace-only
+// NetworkPolicy (default-network-policy, annotated np.rke2.io) in default,
+// kube-public and kube-system. An Ingress whose backend lives in such a
+// namespace is unreachable from an ingress controller in another one: the
+// controller answers 502/504 (rke2 known issue "Ingress in CIS Mode").
+func evalIngressNetpol(in Input, add func(Severity, string, string, string, string)) {
+	s := in.Snap
+	ctrlNS := map[string]bool{}
+	for i := range s.Pods {
+		p := &s.Pods[i]
+		n := p.Labels["app.kubernetes.io/name"]
+		if p.Status.Phase == corev1.PodRunning && (strings.Contains(n, "ingress-nginx") || strings.Contains(n, "traefik")) {
+			ctrlNS[p.Namespace] = true
+		}
+	}
+	if len(ctrlNS) == 0 {
+		return
+	}
+	for i := range s.Ingresses {
+		ing := &s.Ingresses[i]
+		ns := ing.Namespace
+		rke2Default, opensUp := false, false
+		for j := range s.NetPols {
+			np := &s.NetPols[j]
+			if np.Namespace != ns {
+				continue
+			}
+			if np.Name == "default-network-policy" && np.Annotations["np.rke2.io"] != "" {
+				rke2Default = true
+			}
+			for _, r := range np.Spec.Ingress {
+				if len(r.From) == 0 {
+					opensUp = true // from anywhere
+				}
+				for _, f := range r.From {
+					// rke2-flannel-host-networking admits the nodes' flannel
+					// addresses as /32 ipBlocks: that is host traffic, not
+					// the controller's pods; only a wide block opens it up
+					if f.NamespaceSelector != nil || (f.IPBlock != nil && !strings.HasSuffix(f.IPBlock.CIDR, "/32") && !strings.HasSuffix(f.IPBlock.CIDR, "/128")) {
+						opensUp = true
+					}
+				}
+			}
+		}
+		if !rke2Default || opensUp || ctrlNS[ns] {
+			continue
+		}
+		var ctrl []string
+		for n := range ctrlNS {
+			ctrl = append(ctrl, n)
+		}
+		sort.Strings(ctrl)
+		add(SevWarn, "workload", ns+"/ingress/"+ing.Name, fmt.Sprintf("the ingress controller (namespace %s) cannot reach this Ingress's backends: rke2's CIS default-network-policy in %s only admits traffic from inside %s, so requests end in 502/504", strings.Join(ctrl, ","), ns, ns), "add a NetworkPolicy in "+ns+" allowing ingress from namespaceSelector kubernetes.io/metadata.name="+ctrl[0]+" (podSelector app.kubernetes.io/name of the controller) to the backend pods, or run the app in its own namespace (rke2 known issue: Ingress in CIS mode)")
+	}
+}
+
+// evalCertManager: cert-manager Certificates that are not Ready, expiring
+// without having been renewed, or expired; issuers that are not Ready.
+func evalCertManager(in Input, add func(Severity, string, string, string, string)) {
+	cm := in.Snap.CertManager
+	if cm == nil {
+		return
+	}
+	now := in.Now
+	for _, c := range cm.Certificates {
+		obj := c.Namespace + "/certificate/" + c.Name
+		hint := "kubectl -n " + c.Namespace + " describe certificate " + c.Name + "; kubectl -n " + c.Namespace + " get certificaterequest,order,challenge; cmctl status certificate " + c.Name + " -n " + c.Namespace + " (cmctl renew to retry)"
+		switch {
+		case !c.NotAfter.IsZero() && !c.NotAfter.After(now):
+			add(SevCrit, "security", obj, fmt.Sprintf("certificate %s expired %s ago (secret %s): whatever serves it (ingress, webhook, Rancher) presents an expired certificate", c.Name, strutil.HumanDur(now.Sub(c.NotAfter)), c.Secret), hint)
+		case !c.NotAfter.IsZero() && c.NotAfter.Sub(now) < 7*24*time.Hour && !c.RenewalTime.IsZero() && c.RenewalTime.Before(now):
+			add(SevWarn, "security", obj, fmt.Sprintf("certificate %s expires in %s and its renewal (due %s ago) has not happened", c.Name, strutil.HumanDur(c.NotAfter.Sub(now)), strutil.HumanDur(now.Sub(c.RenewalTime))), hint)
+		case !c.Ready && now.Sub(c.Created) > in.Cfg.Thresholds.PendingPodAge: // a new one takes a moment to issue
+			add(SevWarn, "security", obj, fmt.Sprintf("certificate %s is not Ready (%s): %s", c.Name, strutil.FirstNonEmpty(c.Reason, "no reason"), strutil.TruncStr(strutil.FirstLine(c.Message), 160)), hint)
+		}
+	}
+	for _, is := range cm.Issuers {
+		if is.Ready {
+			continue
+		}
+		obj := strings.ToLower(is.Kind) + "/" + is.Name
+		if is.Namespace != "" {
+			obj = is.Namespace + "/" + obj
+		}
+		add(SevWarn, "security", obj, fmt.Sprintf("cert-manager %s %s is not Ready: %s - certificates it issues cannot be renewed", is.Kind, is.Name, strutil.TruncStr(strutil.FirstLine(is.Message), 160)), "kubectl describe "+strings.ToLower(is.Kind)+" "+is.Name+"; check the CA secret / ACME account and the solver's reachability")
+	}
 }

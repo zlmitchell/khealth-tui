@@ -24,10 +24,14 @@ func TestNodeRuntimeGaps(t *testing.T) {
 			ni.Mounts = []nodeinfo.Mount{{Filesystem: "/dev/mapper/rhel-var", Mountpoint: "/var"}}
 			ni.DiskBusy = []nodeinfo.DiskBusy{{Name: "rhel-var", UtilPct: 97, AwaitMs: 12, IOPS: 800}}
 		}, SevWarn, "disk rhel-var (/var) busy 97%"},
-		{"slow disk", func(ni *nodeinfo.Info) { ni.DiskBusy = []nodeinfo.DiskBusy{{Name: "vda", UtilPct: 40, AwaitMs: 120, IOPS: 50}} }, SevWarn, "average 120 ms per I/O"},
+		{"slow disk", func(ni *nodeinfo.Info) {
+			ni.DiskBusy = []nodeinfo.DiskBusy{{Name: "vda", UtilPct: 40, AwaitMs: 120, IOPS: 50}}
+		}, SevWarn, "average 120 ms per I/O"},
 		{"nic errors", func(ni *nodeinfo.Info) { ni.NICDev, ni.NICGrowth = "eno1", map[string]int64{"rx_crc_errors": 17} }, SevWarn, "rx_crc_errors +17"},
 		{"link flap", func(ni *nodeinfo.Info) { ni.NICDev, ni.NICGrowth = "eno1", map[string]int64{"carrier_changes": 2} }, SevWarn, "lost and regained its link 1 time(s)"},
-		{"bond slave down", func(ni *nodeinfo.Info) { ni.BondSlaves = []nodeinfo.BondSlave{{Bond: "bond0", Slave: "eno2", Status: "down"}} }, SevWarn, "bond bond0 slave eno2 is down"},
+		{"bond slave down", func(ni *nodeinfo.Info) {
+			ni.BondSlaves = []nodeinfo.BondSlave{{Bond: "bond0", Slave: "eno2", Status: "down"}}
+		}, SevWarn, "bond bond0 slave eno2 is down"},
 		{"arp table", func(ni *nodeinfo.Info) { ni.Neigh, ni.GCThresh3 = 900, 1024 }, SevWarn, "ARP table holds 900 entries"},
 		{"ipam leak", func(ni *nodeinfo.Info) { ni.IPAMFiles = map[string]int{"cbr0": 120} }, SevWarn, "holds 120 allocations for 0 pods"},
 		{"ipam full", func(ni *nodeinfo.Info) { ni.IPAMFiles = map[string]int{"cbr0": 240} }, SevCrit, "240 of 254 pod IPs allocated"},
@@ -76,10 +80,11 @@ func TestEventGaps(t *testing.T) {
 	s := &k8s.Snapshot{
 		Events: []corev1.Event{
 			ev("ImageGCFailed", "w-1", "failed to garbage collect required amount of images"),
+			ev("DNSConfigForming", "w-1", "Nameserver limits were exceeded, some nameservers have been omitted, the applied nameserver line is: 10.0.0.1 10.0.0.2 10.0.0.3"),
 			ev("FailedCreatePodSandBox", "w-2", "plugin type=\"host-local\" failed (add): failed to allocate for range 0: no IP addresses available in range set"),
 		},
-		Nodes: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "dead"}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionUnknown, LastTransitionTime: long}}}}},
-		Pods:  []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "db", Name: "pg-0", DeletionTimestamp: &recent}, Spec: corev1.PodSpec{NodeName: "dead"}}},
+		Nodes:             []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "dead"}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionUnknown, LastTransitionTime: long}}}}},
+		Pods:              []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Namespace: "db", Name: "pg-0", DeletionTimestamp: &recent}, Spec: corev1.PodSpec{NodeName: "dead"}}},
 		VolumeAttachments: []storagev1.VolumeAttachment{{Spec: storagev1.VolumeAttachmentSpec{NodeName: "dead"}, Status: storagev1.VolumeAttachmentStatus{Attached: true}}},
 	}
 	for i := 0; i < 4; i++ {
@@ -91,6 +96,7 @@ func TestEventGaps(t *testing.T) {
 		substr string
 	}{
 		{SevWarn, "the kubelet could not free disk space"},
+		{SevWarn, "trims the resolver config"},
 		{SevCrit, "pod sandboxes fail for lack of IPs"},
 		{SevWarn, "4 pods evicted from the node in the last hour"},
 		{SevWarn, "1 pod(s) stuck Terminating there and volumes still attached"},
