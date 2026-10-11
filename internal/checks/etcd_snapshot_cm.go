@@ -62,9 +62,24 @@ func evalSnapshotConfigMap(in Input, add func(Severity, string, string, string, 
 	steady := servers * retention * targets
 
 	// what is piling up: per node, and for nodes that are gone
+	// S3 copies are recorded under the node name "s3", not the server that
+	// took them: they are one cluster-wide set with their own retention
 	perNode := map[string]int{}
+	s3Records := 0
 	for i := range s.RKE2Snapshots {
+		if s.RKE2Snapshots[i].S3 || s.RKE2Snapshots[i].Node == "s3" {
+			s3Records++
+			continue
+		}
 		perNode[s.RKE2Snapshots[i].Node]++
+	}
+	s3Retention := retention
+	for _, ni := range in.Nodes {
+		if ni != nil && ni.Err == nil && ni.ControlPlane {
+			if v, err := strconv.Atoi(strings.TrimSpace(ni.Settings["etcd-s3-retention"])); err == nil && v > 0 {
+				s3Retention = v
+			}
+		}
 	}
 	var over, gone []string
 	for _, n := range strutil.SortedKeys(perNode) {
@@ -72,9 +87,12 @@ func evalSnapshotConfigMap(in Input, add func(Severity, string, string, string, 
 		switch {
 		case n != "" && !current[n]:
 			gone = append(gone, fmt.Sprintf("%s (%d)", n, c))
-		case c > retention*targets+1:
-			over = append(over, fmt.Sprintf("%s (%d, retention allows %d)", n, c, retention*targets))
+		case c > retention+1:
+			over = append(over, fmt.Sprintf("%s (%d, retention allows %d)", n, c, retention))
 		}
+	}
+	if s3Records > s3Retention*servers+1 {
+		over = append(over, fmt.Sprintf("S3 (%d, retention allows %d per server)", s3Records, s3Retention))
 	}
 	sort.Strings(over)
 	piling := len(gone) > 0 || len(over) > 0 || cm.Entries > steady*3/2+2

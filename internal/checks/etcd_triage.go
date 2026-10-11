@@ -45,6 +45,7 @@ type etcdQuorum struct {
 	term           uint64
 	leaderIndex    uint64
 	lost           bool
+	down           int // voting members known unhealthy
 }
 
 func (q etcdQuorum) String() string {
@@ -169,6 +170,16 @@ func triageEtcd(in Input, add func(Finding)) map[string]bool {
 	}
 	if known == 0 && !apiDown {
 		q.lost = false
+		if src == nil && len(recs) > 0 {
+			add(Finding{Severity: SevInfo, Area: "etcd", Object: "cluster",
+				Message: "etcd member health was not checked: no SSH to the etcd nodes and no kubectl exec into an etcd pod",
+				Hint:    "enable SSH (ssh.user/key) or grant the kubeconfig user create on pods/exec in kube-system"})
+		}
+	}
+	if apiDown && q.total > 0 && q.healthy < q.total/2+1 {
+		// no apiserver to say the cluster still writes: fewer healthy
+		// members than a majority is all there is to go on
+		q.lost = true
 	}
 	if q.lost || (known > 0 && q.healthy == 0) {
 		add(triageClusterDown(in, recs, members, q))
@@ -197,6 +208,19 @@ func triageEtcd(in Input, add func(Finding)) map[string]bool {
 			continue
 		}
 		covered[m.Name] = true
+		if m.IsLearner {
+			// an unstarted learner has no name yet: the ID is all there is
+			add(Finding{Severity: SevWarn, Area: "etcd", Object: strutil.FirstNonEmpty(m.Name, m.ID),
+				Message: fmt.Sprintf("learner member %s belongs to no cluster node: a join that never finished", memberLabel(m)),
+				Hint:    "etcdctl member remove " + m.ID,
+				Steps: []string{
+					"A learner does not vote, so quorum is not affected; but etcd allows one learner at a time, so it blocks the next node from joining",
+					"Confirm: etcdctl member list -w table - peer URL " + strings.Join(m.PeerURLs, ",") + " belongs to no node",
+					"Remove it on a healthy member: etcdctl member remove " + m.ID + ", then retry the join on the node that was meant to be added",
+					q.String(),
+				}})
+			continue
+		}
 		add(Finding{Severity: SevWarn, Area: "etcd", Object: m.Name,
 			Message: fmt.Sprintf("stale member %s (%s): no cluster node matches it", m.Name, m.ID),
 			Hint:    "etcdctl member remove " + m.ID,
@@ -429,6 +453,11 @@ func latestSnapshotPath(in Input, recs []*etcdTriage) string {
 // triageOne classifies one etcd node and returns its finding, if any.
 func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 	rt := runtimeFor(t, clusterDist(in))
+	if t.member != nil && t.member.IsLearner {
+		// a learner answers endpoint health with "not supported for
+		// learner" and does not vote: it is syncing, not down
+		return triageLag(t, q, rt)
+	}
 	svc := rt.svc
 	podState := ""
 	if t.pod != nil {
@@ -442,7 +471,7 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 	crashLooping := podState == "CrashLoopBackOff" || (restarts > 0 && !lastRestart.IsZero() && in.Now.Sub(lastRestart) < time.Hour)
 	// container evidence only means something where etcd is a container
 	containerDown := rt.static && (crashLooping || (t.pod != nil && t.pod.Status.Phase != corev1.PodRunning) || (len(containersOf(t.info)) > 0 && !hasContainer(t.info, "etcd")))
-	problem := (t.known && !t.healthy) || (t.member == nil && q.total > 0) || !t.ready || containerDown
+	problem := (t.known && !t.healthy) || (t.member == nil && q.haveMembers) || !t.ready || containerDown
 	if !problem {
 		return triageLag(t, q, rt)
 	}
@@ -539,7 +568,7 @@ func triageOne(in Input, t *etcdTriage, q etcdQuorum) (Finding, bool) {
 	// (not a member only when there is a member list to be missing from:
 	// without one - k3s before the gRPC probe, a probe that failed - a
 	// node whose /health answers is not "unhealthy")
-	case t.known && !t.healthy, t.member == nil && q.haveMembers, t.member == nil && !t.known:
+	case t.known && !t.healthy, t.member == nil && q.haveMembers:
 		if q.lost && cause == "" {
 			// the cluster finding carries the recovery; a per-node entry
 			// without a node-specific cause would only repeat it
@@ -633,7 +662,7 @@ func etcdCause(in Input, t *etcdTriage, rt etcdRuntime) (string, []string) {
 		steps := []string{"On " + healthyPeer + ": etcdctl member list; if " + t.node + " is listed, etcdctl member remove " + memberID(t)}
 		return "cluster ID mismatch - this node's etcd data belongs to a different cluster (reinstalled or restored node)",
 			append(steps, rt.rejoinSteps(t.node, ip, memberID(t), healthyPeer)...)
-	case has("etcd-nospace") || hasAlarm(t, "NOSPACE"):
+	case has("etcd-nospace") || hasAlarm(in, t, "NOSPACE"):
 		return "NOSPACE alarm - the database hit quota-backend-bytes; the cluster is read-only until cleared", []string{
 			"rev=$(etcdctl endpoint status -w json | grep -o '\"revision\":[0-9]*' | head -1 | cut -d: -f2); etcdctl compact $rev",
 			"etcdctl defrag --endpoints=<one member at a time>; wait for each to come back healthy (D on the etcd tab does exactly that)",
@@ -727,13 +756,26 @@ func etcdMembershipSource(in Input) *etcd.Probe {
 }
 
 func etcdQuorumOf(recs []*etcdTriage, members []etcd.Member, statusByID map[string]*etcd.EndpointStatus) etcdQuorum {
-	q := etcdQuorum{total: len(members), haveMembers: len(members) > 0}
-	if q.total == 0 {
+	// quorum is a majority of the voting members: learners do not vote
+	q := etcdQuorum{haveMembers: len(members) > 0}
+	for i := range members {
+		if !members[i].IsLearner {
+			q.total++
+		}
+	}
+	if !q.haveMembers {
 		q.total = len(recs)
 	}
+	down := 0
 	for _, t := range recs {
-		if t.known && t.healthy {
+		if t.member != nil && t.member.IsLearner {
+			continue
+		}
+		switch {
+		case t.known && t.healthy:
 			q.healthy++
+		case t.known:
+			down++
 		}
 	}
 	// members without a node count as members but never as healthy
@@ -767,7 +809,11 @@ func etcdQuorumOf(recs []*etcdTriage, members []etcd.Member, statusByID map[stri
 			}
 		}
 	}
-	q.lost = q.total > 0 && q.healthy < q.total/2+1
+	// lost needs the members known to be down to leave no majority: the
+	// ones nobody could check (no SSH, no exec) are unknown, not down
+	need := q.total/2 + 1
+	q.lost = q.total > 0 && q.healthy < need && q.total-down < need
+	q.down = down
 	return q
 }
 
@@ -848,11 +894,22 @@ func hasContainer(ni *nodeinfo.Info, name string) bool {
 	return false
 }
 
-func hasAlarm(t *etcdTriage, typ string) bool {
-	if t.probe == nil {
-		return false
+// hasAlarm: the alarm is raised on this member. The cluster-wide exec probe
+// is current every refresh; the node's own etcdctl output is carried
+// forward while etcdctl is skipped there, so it is only the fallback.
+func hasAlarm(in Input, t *etcdTriage, typ string) bool {
+	alarms := []etcd.Alarm(nil)
+	switch {
+	case in.EtcdExec != nil && in.EtcdExec.Err == nil:
+		for _, a := range in.EtcdExec.Alarms {
+			if t.member == nil || a.MemberID == t.member.ID {
+				alarms = append(alarms, a)
+			}
+		}
+	case t.probe != nil:
+		alarms = t.probe.Alarms
 	}
-	for _, a := range t.probe.Alarms {
+	for _, a := range alarms {
 		if a.Type == typ {
 			return true
 		}
@@ -910,4 +967,12 @@ func nodeHeartbeat(in Input, node string) string {
 		}
 	}
 	return "unknown"
+}
+
+// memberLabel is "name (id)", or the id of a member that never started.
+func memberLabel(m *etcd.Member) string {
+	if m.Name == "" {
+		return m.ID + " (unstarted)"
+	}
+	return m.Name + " (" + m.ID + ")"
 }

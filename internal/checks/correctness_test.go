@@ -263,3 +263,72 @@ func TestProxyByConsumer(t *testing.T) {
 		t.Errorf("containerd-only proxy: %+v", f)
 	}
 }
+
+func TestNonKubernetesPlanNotComparedWithKubelets(t *testing.T) {
+	now := time.Now()
+	n := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cp-1", Labels: map[string]string{"plan.upgrade.cattle.io/system-agent-upgrader": "h1"}},
+		Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.35.8+rke2r1"}}}
+	snap := &k8s.Snapshot{Version: "v1.35.8+rke2r1", Distribution: "rke2", Nodes: []corev1.Node{n},
+		Upgrade: &k8s.UpgradeInfo{PlansCRD: true, Plans: []k8s.UpgradePlan{{Namespace: "cattle-system", Name: "system-agent-upgrader", Version: "v0.3.12", Latest: "v0.3.12", Hash: "h1", Image: "rancher/system-agent"}}}}
+	for _, f := range Evaluate(Input{Snap: snap, Cfg: config.Default(), Now: now}) {
+		if f.Area == "upgrade" && f.Severity >= SevWarn {
+			t.Errorf("agent plan compared with kubelets: %s", f.Message)
+		}
+	}
+}
+
+func TestKubeletAheadDuringControlPlaneUpgrade(t *testing.T) {
+	kn := func(name, v string, cp bool) corev1.Node {
+		l := map[string]string{}
+		if cp {
+			l["node-role.kubernetes.io/control-plane"] = "true"
+		}
+		return corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: l}, Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{KubeletVersion: v}}}
+	}
+	sevOf := func(snap *k8s.Snapshot, node string) Severity {
+		for _, f := range Evaluate(Input{Snap: snap, Cfg: config.Default(), Now: time.Now()}) {
+			if f.Area == "upgrade" && f.Object == node {
+				return f.Severity
+			}
+		}
+		return -1
+	}
+	// cp-1 upgraded, cp-2 (old) answered: the documented order
+	snap := &k8s.Snapshot{Version: "v1.34.3", Nodes: []corev1.Node{kn("cp-1", "v1.35.1", true), kn("cp-2", "v1.34.3", true), kn("w-1", "v1.34.3", false)}}
+	if s := sevOf(snap, "cp-1"); s != SevWarn {
+		t.Errorf("upgraded server mid-upgrade: %v", s)
+	}
+	// a worker ahead of every control-plane node
+	snap.Nodes = []corev1.Node{kn("cp-1", "v1.34.3", true), kn("w-1", "v1.35.1", false)}
+	if s := sevOf(snap, "w-1"); s != SevCrit {
+		t.Errorf("worker ahead of the control plane: %v", s)
+	}
+	// 1.27 apiserver allowed only 2 minors of skew
+	snap = &k8s.Snapshot{Version: "v1.27.4", Nodes: []corev1.Node{kn("cp-1", "v1.27.4", true), kn("w-1", "v1.24.9", false)}}
+	if s := sevOf(snap, "w-1"); s != SevWarn {
+		t.Errorf("3 minors behind a 1.27 apiserver: %v", s)
+	}
+}
+
+func TestNonCSIProvisionerWithoutClaims(t *testing.T) {
+	snap := &k8s.Snapshot{StorageClasses: []storagev1.StorageClass{
+		{ObjectMeta: metav1.ObjectMeta{Name: "nfs"}, Provisioner: "k8s-sigs.io/nfs-subdir-external-provisioner"},
+		{ObjectMeta: metav1.ObjectMeta{Name: "ghost"}, Provisioner: "ghost.csi.example.com"}}}
+	fs := Evaluate(Input{Snap: snap, Cfg: config.Default(), Now: time.Now()})
+	if f := findingWith(fs, SevWarn, "storage", "nfs-subdir-external-provisioner has no CSIDriver"); f != nil {
+		t.Errorf("non-CSI provisioner without pending claims: %s", f.Message)
+	}
+	if findingWith(fs, SevWarn, "storage", "ghost.csi.example.com has no CSIDriver") == nil {
+		t.Error("a missing CSI driver is still a WARN")
+	}
+}
+
+// IMDS turned off by hardening only matters to AWS integrations.
+func TestIMDSOnlyWithAWSIntegration(t *testing.T) {
+	aws := func(ni *nodeinfo.Info) {
+		ni.Preflight.Virt = nodeinfo.VirtInfo{Vendor: "Amazon EC2", IMDS: "000"}
+	}
+	if f := findingWith(evalPreflightNode(aws), SevCrit, "cloud", "EC2 instance metadata"); f != nil {
+		t.Errorf("no AWS CCM/CSI installed: %s", f.Message)
+	}
+}

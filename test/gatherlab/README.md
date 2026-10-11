@@ -34,6 +34,7 @@ Two more compose files run the same incidents and the same `check.sh` on other d
 
 - **`compose.kubeadm.yaml`**: the upstream layout. The node is kind's node image (`kindest/node`, which kind and Cluster API's Docker provider boot) with sshd and a `kubeadm init` unit added (`kubeadm/`).
 - **`compose.rke2.yaml`**: `rke2-server` from the release tarball as a systemd unit, as the k3s lab runs k3s (`rke2/`).
+- **`compose.kubeadm-extetcd.yaml`**: layered over the kubeadm lab (`-f compose.kubeadm.yaml -f compose.kubeadm-extetcd.yaml`). The control plane runs on an external etcd container (`etcd.external` in kubeadm-config), so no etcd static pod exists on the node. khealth must report the external datastore, not a missing etcd container or lost quorum.
 
 | | k3s (`compose.yaml`) | kubeadm (`compose.kubeadm.yaml`) | rke2 (`compose.rke2.yaml`) |
 |---|---|---|---|

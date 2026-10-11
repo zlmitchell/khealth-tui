@@ -30,6 +30,22 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 	// never newer; rke2/k3s agents newer than the servers are the same
 	// mistake (agents upgraded first).
 	if amaj, amin, _, ok := kubeVersion(s.Version); ok {
+		// s.Version is whichever apiserver answered: while the control
+		// plane is upgraded node by node, an upgraded server's kubelet is
+		// a minor ahead of an apiserver not upgraded yet - the documented
+		// order. Ahead of every control-plane kubelet is the real mistake.
+		cpMax := -1
+		for i := range s.Nodes {
+			if k8s.IsControlPlane(&s.Nodes[i]) {
+				if _, m, _, ok := kubeVersion(s.Nodes[i].Status.NodeInfo.KubeletVersion); ok && m > cpMax {
+					cpMax = m
+				}
+			}
+		}
+		maxSkew := 3 // kubelet may trail kube-apiserver by 3 minors since 1.28, 2 before
+		if amin < 28 {
+			maxSkew = 2
+		}
 		for i := range s.Nodes {
 			n := &s.Nodes[i]
 			kmaj, kmin, _, ok := kubeVersion(n.Status.NodeInfo.KubeletVersion)
@@ -37,14 +53,16 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 				continue
 			}
 			switch {
+			case kmin > amin && (k8s.IsControlPlane(n) || kmin <= cpMax):
+				add(SevWarn, "upgrade", n.Name, fmt.Sprintf("kubelet %s is newer than the API server %s that answered: a control-plane upgrade in progress (fine while it finishes)", n.Status.NodeInfo.KubeletVersion, s.Version), "finish upgrading the remaining control-plane nodes, then the workers")
 			case kmin > amin:
 				hint := "upgrade the control plane before the kubelets"
 				if rancherDist {
 					hint = "upgrade the " + cv.Server + " nodes before the agents; an agent newer than the supervisor is unsupported"
 				}
-				add(SevCrit, "upgrade", n.Name, fmt.Sprintf("kubelet %s is newer than the API server %s: unsupported version skew", n.Status.NodeInfo.KubeletVersion, s.Version), hint)
-			case amin-kmin > 3:
-				add(SevWarn, "upgrade", n.Name, fmt.Sprintf("kubelet %s is %d minors behind the API server %s: outside the supported skew (3)", n.Status.NodeInfo.KubeletVersion, amin-kmin, s.Version), "upgrade this node")
+				add(SevCrit, "upgrade", n.Name, fmt.Sprintf("kubelet %s is newer than the API server %s and every control-plane node: unsupported version skew", n.Status.NodeInfo.KubeletVersion, s.Version), hint)
+			case amin-kmin > maxSkew:
+				add(SevWarn, "upgrade", n.Name, fmt.Sprintf("kubelet %s is %d minors behind the API server %s: outside the supported skew (%d)", n.Status.NodeInfo.KubeletVersion, amin-kmin, s.Version, maxSkew), "upgrade this node")
 			}
 		}
 	}
@@ -75,6 +93,10 @@ func evalUpgrade(in Input, add func(Severity, string, string, string, string)) {
 			continue
 		}
 		tmaj, tmin, _, tok := kubeVersion(target)
+		// only a Kubernetes upgrade plan compares with kubelet versions:
+		// Rancher's system-agent-upgrader (v0.3.x) or an OS patch plan
+		// carry versions of something else
+		tok = tok && kubernetesPlan(p)
 		// skipping a minor: rke2/k3s (and Kubernetes) upgrade one minor at a time
 		var skips, downgrades []string
 		lowest := -1
@@ -396,4 +418,15 @@ func pluralCount(n int, noun string) string {
 		return "1 " + noun
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// kubernetesPlan: the plan upgrades Kubernetes itself (rke2/k3s upgrade
+// images, a +rke2/+k3s version), not the Rancher agent or the OS.
+func kubernetesPlan(p k8s.UpgradePlan) bool {
+	img := strings.ToLower(p.Image)
+	if strings.Contains(img, "rke2-upgrade") || strings.Contains(img, "k3s-upgrade") || strings.Contains(img, "kubeadm") {
+		return true
+	}
+	v := p.Target()
+	return strings.Contains(v, "+rke2") || strings.Contains(v, "+k3s")
 }

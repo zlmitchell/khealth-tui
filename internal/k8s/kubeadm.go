@@ -18,7 +18,8 @@ type KubeadmConfig struct {
 	CertSANs             []string // apiServer.certSANs
 	ServiceSubnet        string
 	KubernetesVersion    string
-	Raw                  string // the ClusterConfiguration document as stored
+	ExternalEtcd         bool     // etcd.external: the datastore runs outside the cluster's nodes
+	Raw                  string   // the ClusterConfiguration document as stored
 	KubeletRaw           string // kube-system/kubelet-config KubeletConfiguration (cluster-wide kubelet defaults)
 }
 
@@ -44,11 +45,17 @@ func (c *Client) kubeadmConfig(ctx context.Context) (*KubeadmConfig, error) {
 		Networking struct {
 			ServiceSubnet string `json:"serviceSubnet"`
 		} `json:"networking"`
+		Etcd struct {
+			External *struct {
+				Endpoints []string `json:"endpoints"`
+			} `json:"external"`
+		} `json:"etcd"`
 	}
 	if err := yaml.Unmarshal([]byte(raw), &cc); err != nil {
 		return nil, nil
 	}
-	kc := &KubeadmConfig{ClusterName: cc.ClusterName, ControlPlaneEndpoint: cc.ControlPlaneEndpoint, CertSANs: cc.APIServer.CertSANs, ServiceSubnet: cc.Networking.ServiceSubnet, KubernetesVersion: cc.KubernetesVersion, Raw: raw}
+	kc := &KubeadmConfig{ClusterName: cc.ClusterName, ControlPlaneEndpoint: cc.ControlPlaneEndpoint, CertSANs: cc.APIServer.CertSANs, ServiceSubnet: cc.Networking.ServiceSubnet, KubernetesVersion: cc.KubernetesVersion, Raw: raw,
+		ExternalEtcd: cc.Etcd.External != nil && len(cc.Etcd.External.Endpoints) > 0}
 	if kl, err := c.CS.CoreV1().ConfigMaps("kube-system").Get(ctx, "kubelet-config", c.getOpts()); err == nil {
 		kc.KubeletRaw = kl.Data["kubelet"]
 	}

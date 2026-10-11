@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/zlmitchell/khealth-tui/internal/distro"
 	"github.com/zlmitchell/khealth-tui/internal/k8s"
 	"github.com/zlmitchell/khealth-tui/internal/nodeinfo"
@@ -139,12 +141,29 @@ func evalCloud(in Input, add func(Severity, string, string, string, string)) {
 	for _, d := range ci.CSI {
 		have[d.Driver] = true
 	}
+	// external provisioners that are not CSI drivers (nfs-subdir, OpenEBS
+	// local PV) register no CSIDriver: only claims that stay Pending prove
+	// the provisioner is missing
+	pendingBy := map[string]int{}
+	for i := range s.PVCs {
+		if sc := s.PVCs[i].Spec.StorageClassName; sc != nil && s.PVCs[i].Status.Phase == corev1.ClaimPending {
+			pendingBy[*sc]++
+		}
+	}
 	for i := range s.StorageClasses {
-		p := s.StorageClasses[i].Provisioner
+		sc := &s.StorageClasses[i]
+		p := sc.Provisioner
 		if strings.HasPrefix(p, "kubernetes.io/") || p == "rancher.io/local-path" || !strings.Contains(p, ".") || have[p] {
 			continue
 		}
-		add(SevWarn, "storage", s.StorageClasses[i].Name, "StorageClass provisioner "+p+" has no CSIDriver object: PVCs using it stay Pending", "install the driver or delete the StorageClass")
+		switch n := pendingBy[sc.Name]; {
+		case strings.Contains(strings.ToLower(p), "csi"):
+			add(SevWarn, "storage", sc.Name, "StorageClass provisioner "+p+" has no CSIDriver object: PVCs using it stay Pending", "install the driver or delete the StorageClass")
+		case n > 0:
+			add(SevWarn, "storage", sc.Name, fmt.Sprintf("StorageClass provisioner %s has no CSIDriver object and %d claim(s) of this class are Pending: the provisioner is likely not installed", p, n), "install the driver/provisioner or delete the StorageClass; kubectl describe pvc shows 'waiting for a volume to be created by external provisioner'")
+		default:
+			add(SevInfo, "storage", sc.Name, "StorageClass provisioner "+p+" has no CSIDriver object (fine for a non-CSI external provisioner such as nfs-subdir; otherwise the driver is missing)", "")
+		}
 	}
 }
 
@@ -164,7 +183,13 @@ func evalCloudNode(name string, ni *nodeinfo.Info, in Input, ci k8s.CloudInfo, a
 	if !p.Probed {
 		return
 	}
-	if p.Virt.AWS() && p.Virt.IMDS != "" && p.Virt.IMDS != "200" {
+	awsIntegration := ci.Provider == "aws"
+	for _, d := range ci.CSI {
+		if strings.HasPrefix(d.Provider, "aws") || strings.Contains(d.Driver, "amazonaws.com") {
+			awsIntegration = true
+		}
+	}
+	if p.Virt.AWS() && p.Virt.IMDS != "" && p.Virt.IMDS != "200" && awsIntegration {
 		add(SevCrit, "cloud", name, "EC2 instance metadata (IMDSv2 token request) answered HTTP "+p.Virt.IMDS+": the AWS cloud controller and EBS CSI cannot read the instance identity from this node", "enable IMDS on the instance (HttpEndpoint=enabled, HttpTokens=required is fine) and set the hop limit to 2 for pods: aws ec2 modify-instance-metadata-options --http-put-response-hop-limit 2")
 	}
 	hasVSphereCSI := false

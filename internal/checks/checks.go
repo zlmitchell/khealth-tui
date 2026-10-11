@@ -411,6 +411,8 @@ func Evaluate(in Input) []Finding {
 		}
 		switch {
 		case troubled:
+		case st == "Init:ContainerCreating" && in.Now.Sub(p.CreationTimestamp.Time) <= thr.PendingPodAge:
+			// an init container being created is a pod starting up
 		case st == "CreateContainerConfigError" || st == "CreateContainerError" || strings.HasPrefix(st, "Init:") && st != "Init:Running":
 			add(SevWarn, "workload", ref, st, "kubectl describe pod")
 		case st == "Evicted":
@@ -667,7 +669,16 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 		add(SevInfo, "etcd", "datastore", "no etcd: k3s keeps the cluster state in "+ds, "back up /var/lib/rancher/k3s/server/db/ (or the external database); restart the server with --cluster-init to move to embedded etcd and add servers for HA")
 		return
 	}
-	if etcdNodes > 0 && etcdNodes%2 == 0 {
+	if kc := s.Kubeadm; kc != nil && kc.ExternalEtcd {
+		// the control-plane nodes run no etcd: nothing here to triage, and
+		// its backups are taken where it runs
+		add(SevInfo, "etcd", "datastore", "etcd is external (kubeadm-config etcd.external): khealth does not probe it from the nodes", "check and back up the external etcd cluster where it runs; set etcd.endpoint/ca_cert/client_cert/client_key in the config to probe it")
+		return
+	}
+	switch {
+	case etcdNodes == 2:
+		add(SevWarn, "etcd", "cluster", "2 etcd nodes: quorum needs both, so losing either one stops the cluster (less tolerant than a single node)", "add a third etcd node, or go back to one")
+	case etcdNodes > 0 && etcdNodes%2 == 0:
 		add(SevWarn, "etcd", "cluster", fmt.Sprintf("%d etcd nodes (even number gives no extra fault tolerance)", etcdNodes), "use 1, 3 or 5")
 	}
 
@@ -696,14 +707,14 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 			}
 		}
 		for _, a := range x.Alarms {
-			add(SevCrit, "etcd", "cluster", "alarm "+a.Type+" on member "+a.MemberID, "etcdctl alarm disarm after compaction/defrag")
+			add(SevCrit, "etcd", "cluster", "alarm "+a.Type+" on member "+a.MemberID, alarmHint(a.Type))
 		}
-		if len(x.Members) > 0 && etcdNodes > 0 && len(x.Members) != etcdNodes {
-			add(SevWarn, "etcd", "cluster", fmt.Sprintf("%d etcd members but %d etcd nodes in the cluster", len(x.Members), etcdNodes), "stale member? etcdctl member list")
+		if v := voters(x.Members); v > 0 && etcdNodes > 0 && v != etcdNodes {
+			add(SevWarn, "etcd", "cluster", fmt.Sprintf("%d voting etcd members but %d etcd nodes in the cluster", v, etcdNodes), "stale member? etcdctl member list")
 		}
 		for _, m := range x.Members {
 			if m.IsLearner {
-				add(SevInfo, "etcd", "cluster", "member "+m.Name+" is a learner", "")
+				add(SevInfo, "etcd", "cluster", "member "+strutil.FirstNonEmpty(m.Name, m.ID+" (unstarted)")+" is a learner", "")
 			}
 		}
 		vers := map[string]bool{}
@@ -770,28 +781,41 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 				add(SevInfo, "etcd", name, fmt.Sprintf("%.0f failed proposals since start", m.ProposalsFailed), "usually leader elections")
 			}
 			if m.LeaderChanges > 10 {
-				add(SevWarn, "etcd", name, fmt.Sprintf("%.0f leader changes since start", m.LeaderChanges), "network/disk latency between control-plane nodes")
+				// a counter since the member started: on a long-lived
+				// member it says little about now
+				add(SevInfo, "etcd", name, fmt.Sprintf("%.0f leader changes since this member started", m.LeaderChanges), "frequent elections point at network/disk latency between control-plane nodes; watch whether the count grows")
 			}
 			if m.PeerRTTAvgMs > 50 {
 				add(SevWarn, "etcd", name, fmt.Sprintf("peer RTT avg %.0fms", m.PeerRTTAvgMs), "control-plane nodes too far apart")
 			}
 		}
-		for _, a := range p.Alarms {
-			add(SevCrit, "etcd", name, "alarm "+a.Type+" on member "+a.MemberID, "etcdctl alarm disarm after compaction/defrag")
+		// the node's etcdctl output is carried forward while etcdctl is
+		// skipped there (the exec probe covers it): with a current exec
+		// probe it is stale, and its alarms and statuses would repeat or
+		// contradict the cluster-wide ones
+		execOK := in.EtcdExec != nil && in.EtcdExec.Err == nil
+		if !execOK {
+			for _, a := range p.Alarms {
+				add(SevCrit, "etcd", name, "alarm "+a.Type+" on member "+a.MemberID, alarmHint(a.Type))
+			}
 		}
 		if len(p.Members) > 0 && in.EtcdExec == nil {
 			memberCounts[len(p.Members)] = true
-			if len(p.Members) != etcdNodes && etcdNodes > 0 {
-				add(SevWarn, "etcd", name, fmt.Sprintf("%d etcd members but %d etcd nodes in the cluster", len(p.Members), etcdNodes), "stale member? etcdctl member list")
+			if v := voters(p.Members); v != etcdNodes && etcdNodes > 0 {
+				add(SevWarn, "etcd", name, fmt.Sprintf("%d voting etcd members but %d etcd nodes in the cluster", v, etcdNodes), "stale member? etcdctl member list")
 			}
 			for _, m := range p.Members {
 				if m.IsLearner {
-					add(SevInfo, "etcd", name, "member "+m.Name+" is a learner", "")
+					add(SevInfo, "etcd", name, "member "+strutil.FirstNonEmpty(m.Name, m.ID+" (unstarted)")+" is a learner", "")
 				}
 			}
 		}
 		vers := map[string]bool{}
-		for _, st := range p.Statuses {
+		statuses := p.Statuses
+		if execOK {
+			statuses = nil
+		}
+		for _, st := range statuses {
 			if st.Leader != "" {
 				leaders[st.Leader] = true
 			}
@@ -1070,4 +1094,23 @@ func evalClocks(in Input, add func(Severity, string, string, string, string)) {
 	if apart*2 > len(names) {
 		add(SevInfo, "cluster", "clock", fmt.Sprintf("the nodes' clocks agree but differ from this machine by %s: this machine's clock is likely off", ds[len(ds)/2]), "the cluster is not affected; fix time sync where khealth runs (\"ago\" times shown here are off by that much)")
 	}
+}
+
+// alarmHint is the recovery for an etcd alarm type.
+func alarmHint(typ string) string {
+	if typ == "CORRUPT" {
+		return "a member's data diverged: etcdctl endpoint hashkv --cluster finds the odd member; remove it (etcdctl member remove <id>), clear its data dir and rejoin it, then disarm - disarming first hides the corruption"
+	}
+	return "NOSPACE: compact and defrag (D on the etcd tab), raise quota-backend-bytes if the data really grew, then etcdctl alarm disarm"
+}
+
+// voters counts the members that vote (learners do not).
+func voters(ms []etcd.Member) int {
+	n := 0
+	for _, m := range ms {
+		if !m.IsLearner {
+			n++
+		}
+	}
+	return n
 }

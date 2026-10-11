@@ -253,7 +253,7 @@ func TestEvaluateRichCluster(t *testing.T) {
 		{"node", "cp-1", "rke2-server"},
 		{"node", "cp-1", "client-admin.crt"},
 		{"ssh", "w-1", "collection failed"},
-		{"etcd", "cluster", "quorum lost"},
+		{"etcd", "cp-2", "stale member cp-2"}, // belongs to no node; its health is unknown, so no "quorum lost"
 		{"etcd", "cp-2", "stale member"},
 		{"etcd", "cp-1", "S3 endpoint"},
 		{"cluster", "endpoint", "single server node"},
