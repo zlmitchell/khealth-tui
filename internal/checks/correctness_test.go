@@ -185,3 +185,81 @@ func TestSystemDeploymentNoneAvailable(t *testing.T) {
 		t.Errorf("app namespace 0/2: %v", s)
 	}
 }
+
+// evalPreflightNode runs Evaluate on one preflightInfo node after mod.
+func evalPreflightNode(mod func(ni *nodeinfo.Info)) []Finding {
+	in := baseInput()
+	ni := preflightInfo()
+	mod(ni)
+	in.Nodes["cp-1"] = ni
+	return Evaluate(in)
+}
+
+func TestAuditdHalfFullIsNotNear(t *testing.T) {
+	stig := func(usePct int, availKB int64) func(*nodeinfo.Info) {
+		return func(ni *nodeinfo.Info) {
+			ni.Mounts[1] = nodeinfo.Mount{Mountpoint: "/var/log/audit", SizeKB: 20e6, AvailKB: availKB, UsePct: usePct}
+			ni.Preflight.Auditd = map[string]string{"space_left": "25%", "space_left_action": "email", "admin_space_left": "5%", "admin_space_left_action": "single", "disk_full_action": "HALT", "disk_error_action": "HALT"}
+		}
+	}
+	if f := findingWith(evalPreflightNode(stig(55, 9e6)), SevCrit, "node", "auditd"); f != nil {
+		t.Errorf("STIG auditd at 55%%: %s", f.Message)
+	}
+	f := findingWith(evalPreflightNode(stig(78, 4.4e6)), SevCrit, "node", "auditd")
+	if f == nil {
+		t.Fatal("past space_left (25% free) must be CRIT")
+	}
+	if strings.Contains(f.Message, "disk_error_action") {
+		t.Errorf("disk_error_action is about I/O errors: %s", f.Message)
+	}
+}
+
+func TestFapolicydDenialAge(t *testing.T) {
+	deny := func(ago time.Duration) func(*nodeinfo.Info) {
+		return func(ni *nodeinfo.Info) {
+			ni.Preflight.Denies = []nodeinfo.FapDeny{{Count: 3, Exe: "/root/khtest-runc", Path: "/root/khtest-runc", Last: now.Add(-ago)}}
+		}
+	}
+	if findingWith(evalPreflightNode(deny(5*time.Minute)), SevCrit, "node", "fapolicyd denied 3") == nil {
+		t.Error("a denial minutes ago is CRIT")
+	}
+	if findingWith(evalPreflightNode(deny(3*time.Hour)), SevWarn, "node", "fapolicyd denied 3") == nil {
+		t.Error("the last denial hours ago is WARN")
+	}
+}
+
+func TestFaillockUnlockTime(t *testing.T) {
+	lock := func(unlock, age int) func(*nodeinfo.Info) {
+		return func(ni *nodeinfo.Info) {
+			ni.Preflight.Faillock = map[string]int{"zach": 3}
+			ni.Preflight.FaillockAge = map[string]int{"zach": age}
+			ni.Preflight.FaillockDeny, ni.Preflight.FaillockUnlock = 3, unlock
+		}
+	}
+	if findingWith(evalPreflightNode(lock(60, 30)), SevWarn, "security", "zach is locked out") == nil {
+		t.Error("within unlock_time: locked")
+	}
+	if f := findingWith(evalPreflightNode(lock(60, 120)), SevWarn, "security", "zach is locked out"); f != nil {
+		t.Errorf("unlock_time passed: %s", f.Message)
+	}
+	if findingWith(evalPreflightNode(lock(0, 99999)), SevWarn, "security", "zach is locked out") == nil {
+		t.Error("unlock_time=0 stays locked until reset")
+	}
+}
+
+func TestProxyByConsumer(t *testing.T) {
+	proxy := func(lines ...nodeinfo.ProxyLine) func(*nodeinfo.Info) {
+		return func(ni *nodeinfo.Info) { ni.Preflight.Proxy = lines }
+	}
+	fs := evalPreflightNode(proxy(nodeinfo.ProxyLine{File: "/etc/environment", Key: "HTTP_PROXY", Value: "http://proxy:3128"}))
+	if f := findingWith(fs, SevWarn, "node", "NO_PROXY"); f != nil {
+		t.Errorf("/etc/environment is not read by the units: %s", f.Message)
+	}
+	if findingWith(fs, SevInfo, "node", "set in /etc/environment only") == nil {
+		t.Error("the shell-only proxy should be mentioned")
+	}
+	fs = evalPreflightNode(proxy(nodeinfo.ProxyLine{File: "/etc/default/rke2-server", Key: "CONTAINERD_HTTPS_PROXY", Value: "http://proxy:3128"}))
+	if f := findingWith(fs, SevWarn, "node", "without NO_PROXY"); f == nil || !strings.Contains(f.Message, "image pulls") {
+		t.Errorf("containerd-only proxy: %+v", f)
+	}
+}

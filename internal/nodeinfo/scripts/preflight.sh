@@ -140,8 +140,12 @@ echo "default_inactive=$(useradd -D 2>/dev/null | sed -n 's/^INACTIVE=//p')"
 awk -F: -v su="${SUDO_USER:-}" 'NR==FNR{if($7 !~ /(nologin|false|sync|halt|shutdown)$/ || $1=="root" || $1==su || $1=="etcd") keep[$1]=$3"|"$7; next} ($1 in keep){h=$2; s=(h==""||h=="*"||h=="!!"||h=="!*"||h=="!"?"none":(h ~ /^!/?"locked":"set")); print "user|"$1"|"keep[$1]"|"s"|"$3"|"$4"|"$5"|"$6"|"$7"|"$8}' /etc/passwd /etc/shadow 2>/dev/null
 if command -v faillock >/dev/null 2>&1; then
   echo "faillock_deny=$(grep -hsE '^[[:space:]]*deny[[:space:]]*=' /etc/security/faillock.conf 2>/dev/null | tail -1 | sed 's/.*=[[:space:]]*//')"
+  echo "faillock_deny_pam=$(grep -hsoE '^[^#]*pam_faillock\.so.*deny=[0-9]+' /etc/pam.d/system-auth /etc/pam.d/password-auth /etc/pam.d/common-auth 2>/dev/null | sed -E 's/.*deny=([0-9]+).*/\1/' | head -1)"
+  echo "faillock_unlock=$(grep -hsE '^[[:space:]]*unlock_time[[:space:]]*=' /etc/security/faillock.conf 2>/dev/null | tail -1 | sed 's/.*=[[:space:]]*//')"
+  # faillock|user|valid failures|seconds since the newest one
+  now=$(date +%s)
   for u in root ${SUDO_USER:-}; do
-    echo "faillock|$u|$(faillock --user "$u" 2>/dev/null | grep -c ' V$')"
+    faillock --user "$u" 2>/dev/null | awk -v u="$u" -v now="$now" '$NF=="V"{n++; t=$1" "$2} END{a=""; if(t!=""){c="date -d \""t"\" +%s"; c | getline e; close(c); if(e!="") a=now-e}; print "faillock|"u"|"n+0"|"a}'
   done
 fi
 # the provisioning user cloud-init created (Rancher's vSphere/AWS templates):
@@ -316,16 +320,18 @@ if [ "__JOURNAL__" = 1 ]; then
 sec FAPDENY
 # fapolicyd denials land in the audit log as FANOTIFY records (resp=2); the
 # SYSCALL/PATH records of the same event name the program and the file.
-# count|last_epoch|exe|path, most frequent first.
+# count|last_epoch|exe|path, most frequent first. With name_format set in
+# auditd.conf (the STIG does) every record starts with "node=<host> ", so the
+# record types are matched after a blank, not at the start of the line.
 if { [ -L /run/systemd/units/invocation:fapolicyd.service ] || [ -e /run/systemd/units/invocation:fapolicyd.service ]; } && command -v ausearch >/dev/null 2>&1; then
   # --input-logs and </dev/null: ausearch reads events from stdin when stdin
   # is a pipe, and this script arrives on stdin (sh -s) - it would swallow
   # the rest of the probe
   timeout 20 ausearch -m FANOTIFY -ts today --raw --input-logs </dev/null 2>/dev/null | awk '
     { if (match($0,/audit\([0-9.]+:[0-9]+\)/)) { id=substr($0,RSTART+6,RLENGTH-7); split(id,tt,":"); ts=tt[1]; sn=tt[2] } else next }
-    /^type=FANOTIFY/ { if (match($0,/resp=[0-9]+/) && substr($0,RSTART+5,RLENGTH-5)=="2") { deny[sn]=1; when[sn]=ts } }
-    /^type=SYSCALL/ { if (match($0,/exe="[^"]*"/)) exe[sn]=substr($0,RSTART+5,RLENGTH-6) }
-    /^type=PATH/ { if (!(sn in path) && match($0,/name="[^"]*"/)) path[sn]=substr($0,RSTART+6,RLENGTH-7) }
+    /(^| )type=FANOTIFY / { if (match($0,/resp=[0-9]+/) && substr($0,RSTART+5,RLENGTH-5)=="2") { deny[sn]=1; when[sn]=ts } }
+    /(^| )type=SYSCALL / { if (match($0,/exe="[^"]*"/)) exe[sn]=substr($0,RSTART+5,RLENGTH-6) }
+    /(^| )type=PATH / { if (!(sn in path) && match($0,/name="[^"]*"/)) path[sn]=substr($0,RSTART+6,RLENGTH-7) }
     END { for (s in deny) { k=exe[s] "|" path[s]; n[k]++; if (when[s]>last[k]) last[k]=when[s] } for (k in n) print n[k] "|" int(last[k]) "|" k }' | sort -t'|' -k1,1nr | head -20
 fi
 fi

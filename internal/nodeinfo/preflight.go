@@ -17,42 +17,44 @@ import (
 // rest comes with the config tier (Probed); Denies and Pulls with the
 // heavy tier.
 type Preflight struct {
-	Swaps         []SwapDev
-	Units         map[string]PFUnit // NetworkManager, nm-cloud-setup, vmtoolsd, cloud-init, multipathd, fapolicyd, auditd, firewalld
-	Probed        bool
-	FstabSwap     []string
-	FailSwapOn    string // kubelet config failSwapOn from the drop-ins ("" when not set: upstream default true)
-	SwapBehavior  string // kubelet memorySwap.swapBehavior
-	MountOpts     []MountOpt
-	Modprobe      []ModprobeLine  // install/blacklist lines from modprobe.d for the modules that matter
-	Modules       map[string]bool // loaded kernel modules among the ones that matter
-	Virt          VirtInfo
-	CloudInit     CloudInit
-	Fapolicyd     Fapolicyd
-	Auditd        map[string]string // auditd.conf keys
-	Accounts      []Account
-	SudoUser      string // the ssh user (SUDO_USER on the node)
-	Today         int    // days since the epoch on the node
-	LoginDefs     map[string]string
-	Faillock      map[string]int // user -> valid failed attempts
-	FaillockDeny  int
-	Proxy         []ProxyLine
-	Iptables      string
-	SEPkgs        []string // rpm -q rke2-selinux k3s-selinux container-selinux rancher-selinux
-	NMUnmanaged   []string
-	RegProbes     []RegProbe
-	RegFiles      []RegFile
-	CurlMissing   bool
-	Denies        []FapDeny // fapolicyd denials from the audit log (heavy)
-	DeniesProbed  bool
-	Pulls         []RegPull // crictl pull dry run per mirrored registry (heavy)
-	PullsProbed   bool
-	CrictlMissing bool // no crictl on the node: the pull dry run did not happen
-	CSI           CSIInfo
-	CIUsers       []string            // users cloud-init created (sudoers.d/90-cloud-init-users)
-	CIDefault     string              // default_user from /etc/cloud/cloud.cfg
-	Sudo          map[string]SudoInfo // ssh user and cloud-init users
-	VCenters      []VCenterProbe
+	Swaps          []SwapDev
+	Units          map[string]PFUnit // NetworkManager, nm-cloud-setup, vmtoolsd, cloud-init, multipathd, fapolicyd, auditd, firewalld
+	Probed         bool
+	FstabSwap      []string
+	FailSwapOn     string // kubelet config failSwapOn from the drop-ins ("" when not set: upstream default true)
+	SwapBehavior   string // kubelet memorySwap.swapBehavior
+	MountOpts      []MountOpt
+	Modprobe       []ModprobeLine  // install/blacklist lines from modprobe.d for the modules that matter
+	Modules        map[string]bool // loaded kernel modules among the ones that matter
+	Virt           VirtInfo
+	CloudInit      CloudInit
+	Fapolicyd      Fapolicyd
+	Auditd         map[string]string // auditd.conf keys
+	Accounts       []Account
+	SudoUser       string // the ssh user (SUDO_USER on the node)
+	Today          int    // days since the epoch on the node
+	LoginDefs      map[string]string
+	Faillock       map[string]int // user -> valid failed attempts
+	FaillockAge    map[string]int // user -> seconds since the newest failure (-1 unknown)
+	FaillockDeny   int            // faillock.conf deny, else the PAM line's deny=, else pam_faillock's default 3
+	FaillockUnlock int            // unlock_time seconds; 0 = locked until an admin resets it, -1 unset (pam default 600)
+	Proxy          []ProxyLine
+	Iptables       string
+	SEPkgs         []string // rpm -q rke2-selinux k3s-selinux container-selinux rancher-selinux
+	NMUnmanaged    []string
+	RegProbes      []RegProbe
+	RegFiles       []RegFile
+	CurlMissing    bool
+	Denies         []FapDeny // fapolicyd denials from the audit log (heavy)
+	DeniesProbed   bool
+	Pulls          []RegPull // crictl pull dry run per mirrored registry (heavy)
+	PullsProbed    bool
+	CrictlMissing  bool // no crictl on the node: the pull dry run did not happen
+	CSI            CSIInfo
+	CIUsers        []string            // users cloud-init created (sudoers.d/90-cloud-init-users)
+	CIDefault      string              // default_user from /etc/cloud/cloud.cfg
+	Sudo           map[string]SudoInfo // ssh user and cloud-init users
+	VCenters       []VCenterProbe
 }
 
 // CSIInfo is what storage drivers left on the host: the CSI node plugins
@@ -488,7 +490,14 @@ func parsePreflight(info *Info, secs map[string]string) {
 		p.LoginDefs["INACTIVE"] = v
 	}
 	p.FaillockDeny = strutil.AtoiOr(acc["faillock_deny"], 0)
-	p.Faillock = map[string]int{}
+	if p.FaillockDeny == 0 {
+		p.FaillockDeny = strutil.AtoiOr(acc["faillock_deny_pam"], 0)
+	}
+	if _, ok := acc["faillock_deny"]; ok && p.FaillockDeny == 0 {
+		p.FaillockDeny = 3 // pam_faillock's default
+	}
+	p.FaillockUnlock = strutil.AtoiOr(acc["faillock_unlock"], -1)
+	p.Faillock, p.FaillockAge = map[string]int{}, map[string]int{}
 	p.CIDefault = acc["ci_default"]
 	p.Sudo = map[string]SudoInfo{}
 	for _, l := range nonEmpty(secs["ACCOUNTS"]) {
@@ -497,8 +506,12 @@ func parsePreflight(info *Info, secs map[string]string) {
 		case f[0] == "user" && len(f) == 11:
 			a := Account{Name: f[1], UID: strutil.AtoiOr(f[2], -1), Shell: f[3], PW: f[4], LastChange: strutil.AtoiOr(f[5], -1), Min: strutil.AtoiOr(f[6], -1), Max: strutil.AtoiOr(f[7], -1), Warn: strutil.AtoiOr(f[8], -1), Inactive: strutil.AtoiOr(f[9], -1), Expire: strutil.AtoiOr(f[10], -1)}
 			p.Accounts = append(p.Accounts, a)
-		case f[0] == "faillock" && len(f) == 3:
+		case f[0] == "faillock" && (len(f) == 3 || len(f) == 4):
 			p.Faillock[f[1]] = strutil.AtoiOr(f[2], 0)
+			p.FaillockAge[f[1]] = -1
+			if len(f) == 4 {
+				p.FaillockAge[f[1]] = strutil.AtoiOr(f[3], -1)
+			}
 		case strings.HasPrefix(f[0], "ci_user="):
 			p.CIUsers = append(p.CIUsers, strings.TrimPrefix(f[0], "ci_user="))
 		case f[0] == "sudo" && len(f) == 4:

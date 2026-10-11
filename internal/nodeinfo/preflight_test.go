@@ -99,8 +99,10 @@ user|rancher|1000|/bin/bash|set|19900|1|60|7|35|
 user|etcd|998|/sbin/nologin|none|19800|0|99999|7||
 user|ops|1001|/bin/bash|locked|19950|1|60|7||20100
 faillock_deny=3
+faillock_deny_pam=
+faillock_unlock=0
 faillock|root|0
-faillock|rancher|3
+faillock|rancher|3|42
 ci_user=rancher
 ci_default=rocky
 sudo|rancher|nopasswd=yes|keys=1
@@ -216,6 +218,9 @@ func TestParsePreflight(t *testing.T) {
 	}
 	if p.Faillock["rancher"] != 3 || p.FaillockDeny != 3 {
 		t.Errorf("faillock: %v deny=%d", p.Faillock, p.FaillockDeny)
+	}
+	if p.FaillockAge["rancher"] != 42 || p.FaillockAge["root"] != -1 || p.FaillockUnlock != 0 {
+		t.Errorf("faillock age/unlock: %v unlock=%d", p.FaillockAge, p.FaillockUnlock)
 	}
 	if len(p.Proxy) != 2 || p.Proxy[0].Key != "HTTP_PROXY" || !strings.Contains(p.Proxy[0].Value, "<masked>") || p.Proxy[1].Key != "NO_PROXY" {
 		t.Errorf("proxy: %+v", p.Proxy)
