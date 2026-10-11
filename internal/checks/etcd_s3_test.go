@@ -102,7 +102,7 @@ func TestS3UploadsStale(t *testing.T) {
 		"latest S3 snapshot upload is 2d",
 		"1 snapshot record(s) failed to upload to S3: AccessDenied: bucket policy",
 		"cp-2: 4 S3 upload error(s) in the journal",
-		"CRIT cp-3: S3 endpoint https://s3.example.com unreachable from the node: (60) SSL certificate problem",
+		"WARN cp-3: S3 endpoint https://s3.example.com unreachable from the node: (60) SSL certificate problem", // local-new is an hour old
 	)
 	all := strings.Join(got, "\n")
 	if strings.Contains(all, "cp-1: S3 endpoint") || strings.Contains(all, "not on") || strings.Contains(all, "different S3") {

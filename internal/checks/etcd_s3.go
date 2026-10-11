@@ -188,16 +188,20 @@ func evalS3(in Input, add func(Severity, string, string, string, string)) {
 	failedS3 := 0
 	lastFail := ""
 	total := 0
+	var lastFailAt, latestLocal time.Time
 	for i := range in.Snap.RKE2Snapshots {
 		r := &in.Snap.RKE2Snapshots[i]
 		if !r.S3 {
+			if r.Status != "failed" && r.Created.After(latestLocal) {
+				latestLocal = r.Created
+			}
 			continue
 		}
 		total++
 		if r.Status == "failed" {
 			failedS3++
-			if lastFail == "" {
-				lastFail = strutil.FirstLine(r.Message)
+			if lastFail == "" || r.Created.After(lastFailAt) { // the newest error, not list order
+				lastFail, lastFailAt = strutil.FirstLine(r.Message), r.Created
 			}
 			continue
 		}
@@ -230,7 +234,13 @@ func evalS3(in Input, add func(Severity, string, string, string, string)) {
 		if strings.Contains(r.Detail, "certificate") || strings.Contains(r.Detail, "SSL") {
 			hint = "set etcd-s3-endpoint-ca to the endpoint's CA (or fix the endpoint certificate)"
 		}
-		add(SevCrit, "etcd", n, "S3 endpoint "+r.URL+" unreachable from the node: "+r.Detail, hint)
+		// off-box copies failing while local snapshots are current is a
+		// WARN; with no recent backup anywhere it is CRIT
+		sev := SevCrit
+		if !latestLocal.IsZero() && in.Now.Sub(latestLocal) <= in.Cfg.Etcd.MaxBackupAge {
+			sev = SevWarn
+		}
+		add(sev, "etcd", n, "S3 endpoint "+r.URL+" unreachable from the node: "+r.Detail, hint)
 	}
 }
 
