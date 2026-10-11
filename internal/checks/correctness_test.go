@@ -332,3 +332,89 @@ func TestIMDSOnlyWithAWSIntegration(t *testing.T) {
 		t.Errorf("no AWS CCM/CSI installed: %s", f.Message)
 	}
 }
+
+// A volume moving onto this node: the device appears before the cluster
+// says "attached", which is not a split brain.
+func TestLonghornDeviceWhileAttachingHere(t *testing.T) {
+	in := longhornInput()
+	ni := &nodeinfo.Info{Node: "cp-3", Dist: "rke2", KubeletFlags: map[string]string{}, Sysctl: map[string]string{}, Settings: map[string]string{}, Hardening: map[string]string{}}
+	ni.Preflight = nodeinfo.Preflight{Probed: true, Units: map[string]nodeinfo.PFUnit{}, CSI: nodeinfo.CSIInfo{Drivers: []string{"driver.longhorn.io"}, ISCSID: true, MultipathBlacklist: -1,
+		LonghornDevs: []string{"pvc-data-db-1"}}, SudoUser: "root", Today: 20000}
+	in.Nodes["cp-3"] = ni
+	in.Snap.Longhorn.Volumes[1].State, in.Snap.Longhorn.Volumes[1].Node = "attaching", "cp-3"
+	if f := findingWith(Evaluate(in), SevCrit, "storage", "still presents /dev/longhorn/pvc-data-db-1"); f != nil {
+		t.Errorf("attaching on this very node: %s", f.Message)
+	}
+}
+
+// More replicas than nodes on a detached volume: it works with fewer
+// copies (WARN), it is not unattachable (CRIT).
+func TestLonghornPartlyScheduled(t *testing.T) {
+	in := longhornInput()
+	v := &in.Snap.Longhorn.Volumes[0]
+	v.State, v.Robustness, v.Scheduled, v.SchedMessage = "detached", "unknown", false, "replica scheduling failed: no available disks"
+	v.ReplicaList = []k8s.LonghornReplica{{Name: "r1", Node: "cp-1"}, {Name: "r2", Node: "cp-2"}, {Name: "r3"}}
+	fs := Evaluate(in)
+	if f := findingWith(fs, SevCrit, "storage", "cannot schedule its replicas"); f != nil && strings.Contains(f.Message, v.Name) {
+		t.Errorf("two of three replicas placed: %s", f.Message)
+	}
+	if findingWith(fs, SevWarn, "storage", "Longhorn volume "+v.Name+" cannot schedule its replicas") == nil {
+		t.Error("the missing replica should still be a WARN")
+	}
+}
+
+func TestLonghornSoftAntiAffinityReplicaCount(t *testing.T) {
+	in := longhornInput() // replica-soft-anti-affinity is true there
+	if f := findingWith(Evaluate(in), SevWarn, "storage", "default-replica-count is"); f != nil {
+		t.Errorf("soft anti-affinity places extra replicas on the same node: %s", f.Message)
+	}
+}
+
+func TestCephWarnLevels(t *testing.T) {
+	run := func(cc k8s.CephCluster) []Finding {
+		in := baseInput()
+		in.Snap.CSIDrivers = []storagev1.CSIDriver{{ObjectMeta: metav1.ObjectMeta{Name: "rbd.csi.ceph.com"}}}
+		in.Snap.Ceph = &k8s.CephInfo{Clusters: []k8s.CephCluster{cc},
+			Pools: []k8s.CephResource{{Kind: "CephBlockPool", Namespace: "rook-ceph", Name: "ext", Phase: "Connected"}}}
+		var out []Finding
+		for _, f := range Evaluate(in) {
+			if f.Area == "storage" && strings.HasPrefix(f.Object, "rook-ceph/") {
+				out = append(out, f)
+			}
+		}
+		return out
+	}
+	// one monitor of three down, quorum kept; OSDs at 85%: warnings
+	fs := run(k8s.CephCluster{Namespace: "rook-ceph", Name: "rook-ceph", Phase: "Ready", Health: "HEALTH_WARN",
+		Details: []k8s.CephCheck{{Name: "MON_DOWN", Severity: "HEALTH_WARN", Message: "1/3 mons down, quorum a,b"}, {Name: "OSD_NEARFULL", Severity: "HEALTH_WARN", Message: "1 nearfull osd(s)"}}})
+	for _, f := range fs {
+		if f.Severity == SevCrit {
+			t.Errorf("MON_DOWN with quorum / NEARFULL: %s", f.Message)
+		}
+	}
+	// an external cluster connected and healthy: nothing to say
+	if fs := run(k8s.CephCluster{Namespace: "rook-ceph", Name: "rook-ceph", Phase: "Connected", Health: "HEALTH_OK", External: true}); len(fs) != 0 {
+		t.Errorf("healthy external cluster: %+v", fs)
+	}
+	// a cluster being created: WARN, not CRIT
+	for _, f := range run(k8s.CephCluster{Namespace: "rook-ceph", Name: "rook-ceph", Phase: "Progressing"}) {
+		if f.Severity == SevCrit {
+			t.Errorf("Progressing without health yet: %s", f.Message)
+		}
+	}
+}
+
+// A finished Job pod that once mounted the claim elsewhere does not wait
+// for the volume: no "both nodes write" CRIT for it.
+func TestVolumeAttachmentIgnoresFinishedPods(t *testing.T) {
+	in := longhornInput()
+	for i := range in.Snap.Pods {
+		if in.Snap.Pods[i].Name == "single-new" {
+			in.Snap.Pods[i].Status.Phase = corev1.PodSucceeded
+			in.Snap.Pods[i].Spec.NodeName = "cp-1"
+		}
+	}
+	if f := findingWith(Evaluate(in), SevCrit, "storage", "volume is still attached to cp-3 (NotReady) while"); f != nil {
+		t.Errorf("a completed pod is not waiting: %s", f.Message)
+	}
+}

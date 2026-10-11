@@ -336,3 +336,17 @@ sec FSTABSWAP`) {
 		t.Errorf("light script should skip the preflight config tier")
 	}
 }
+
+// The Longhorn device list runs every refresh: a light probe's list (here:
+// the volume moved away, nothing left) must win over the carried config tier.
+func TestLonghornDevsEveryRefresh(t *testing.T) {
+	prev := Parse("n1", "h", "===SWAPS\n===PFUNITS\n===LHDEV\nlhdev=pvc-a\niscsi=iqn.2019-10.io.longhorn:pvc-a|LOGGED_IN\n===MOUNTOPTS\n===CSI\ndriver=driver.longhorn.io|\niscsid=socket\n===ACCOUNTS\ntoday=20000\n===END\n", time.Now())
+	if len(prev.Preflight.CSI.LonghornDevs) != 1 || !prev.Preflight.CSI.ISCSID {
+		t.Fatalf("LHDEV / socket-activated iscsid: %+v", prev.Preflight.CSI)
+	}
+	light := Parse("n1", "h", "===SWAPS\n===PFUNITS\n===LHDEV\n===END\n", time.Now())
+	light.Preflight.mergeConfig(&prev.Preflight)
+	if c := light.Preflight.CSI; len(c.LonghornDevs) != 0 || len(c.ISCSISessions) != 0 || len(c.Drivers) != 1 {
+		t.Errorf("fresh device list lost or config tier not carried: %+v", c)
+	}
+}

@@ -34,6 +34,14 @@ for u in NetworkManager.service nm-cloud-setup.service nm-cloud-setup.timer vmto
   e=disabled; case "$WANTS" in *" $u "*) e=enabled;; esac
   echo "$u|$a|$e"
 done
+sec LHDEV
+# block devices Longhorn still presents on this node and the iSCSI sessions
+# behind them, compared with where the cluster says each volume is attached:
+# every refresh (only /dev and /sys are read), because the cluster's side is
+# re-listed every refresh too - a config-tier copy would be a stale device
+# list next to a fresh attachment
+for d in /dev/longhorn/*; do [ -b "$d" ] && echo "lhdev=${d##*/}"; done
+for s in /sys/class/iscsi_session/session*; do [ -d "$s" ] && echo "iscsi=$(cat "$s/targetname" 2>/dev/null)|$(cat "$s/state" 2>/dev/null)"; done
 # registries.yaml parser, field separator and the airgap marker are shared
 # by the curl probe (config tier) and the crictl pull dry run (heavy tier)
 T=$(printf '\037')
@@ -119,14 +127,14 @@ sec CSI
 ls /var/lib/kubelet/plugins_registry 2>/dev/null | sed -E 's/-reg\.sock$/|/; s/\.sock$/|/' | sed 's/^/driver=/'
 for d in /var/lib/longhorn/engine-binaries /var/lib/longhorn /opt/pwx/bin /var/lib/kubelet/volumeplugins /usr/libexec/kubernetes/kubelet-plugins/volume/exec /var/lib/rook /var/lib/trident /var/openebs; do [ -d "$d" ] && echo "dir=$d"; done
 { [ -L /run/systemd/units/invocation:iscsid.service ] || [ -e /run/systemd/units/invocation:iscsid.service ]; } && echo "iscsid=active"
-[ -f /etc/multipath.conf ] && echo "multipath_blacklist=$(grep -c '^[[:space:]]*blacklist' /etc/multipath.conf 2>/dev/null)"
+# socket-activated (Ubuntu, RHEL): iscsid starts on the first login; sockets
+# leave no invocation entry, the enablement link is what says it is armed
+[ -e /etc/systemd/system/sockets.target.wants/iscsid.socket ] && echo "iscsid=socket"
+# entries inside blacklist { } (not blacklist_exceptions, not an empty stanza)
+[ -f /etc/multipath.conf ] && echo "multipath_blacklist=$(awk '/^[[:space:]]*blacklist[[:space:]]*\{/{b=1; next} b && /^[[:space:]]*(devnode|wwid|device|property)/{n++} b && /^\}/{b=0} END{print n+0}' /etc/multipath.conf 2>/dev/null)"
 # Trident iSCSI wants multipathd with find_multipaths no; NAS backends need mount.nfs
 [ -f /etc/multipath.conf ] && echo "find_multipaths=$(grep -hsE '^[[:space:]]*find_multipaths' /etc/multipath.conf 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '"')"
 command -v mount.nfs >/dev/null 2>&1 && echo "mount_nfs=yes"
-# block devices Longhorn still presents on this node and the iSCSI sessions
-# behind them (the cluster's idea of where a volume is attached may differ)
-for d in /dev/longhorn/*; do [ -b "$d" ] && echo "lhdev=${d##*/}"; done
-for s in /sys/class/iscsi_session/session*; do [ -d "$s" ] && echo "iscsi=$(cat "$s/targetname" 2>/dev/null)|$(cat "$s/state" 2>/dev/null)"; done
 sec AUDITD
 grep -hsE '^[[:space:]]*(log_file|max_log_file|max_log_file_action|num_logs|space_left|space_left_action|admin_space_left|admin_space_left_action|disk_full_action|disk_error_action)[[:space:]]*=' /etc/audit/auditd.conf 2>/dev/null | tr -d ' \t'
 sec ACCOUNTS

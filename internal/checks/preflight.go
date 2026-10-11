@@ -165,8 +165,12 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		if !p.CSI.ISCSID {
 			add(SevWarn, "storage", name, "Longhorn CSI is registered but iscsid is not running: v1 volumes cannot attach on this node", "install open-iscsi / iscsi-initiator-utils and systemctl enable --now iscsid")
 		}
-		if p.Units["multipathd.service"].Active && p.CSI.MultipathBlacklist <= 0 {
-			add(SevWarn, "storage", name, "multipathd is running without a blacklist while Longhorn is installed: multipath claims Longhorn block devices and volumes fail to mount", "blacklist Longhorn devices in /etc/multipath.conf (devnode \"^sd[a-z0-9]+\") or disable multipathd; see Longhorn troubleshooting")
+		// find_multipaths yes/strict: multipathd only claims devices with a
+		// second path or a known WWID, never a single-path Longhorn disk
+		fm := strings.ToLower(p.CSI.FindMultipaths)
+		safeFind := fm == "yes" || fm == "on" || fm == "strict"
+		if p.Units["multipathd.service"].Active && p.CSI.MultipathBlacklist <= 0 && !safeFind {
+			add(SevWarn, "storage", name, "multipathd is running without a blacklist (find_multipaths "+strutil.FirstNonEmpty(p.CSI.FindMultipaths, "unset")+") while Longhorn is installed: multipath claims Longhorn block devices and volumes fail to mount", `blacklist only Longhorn's iSCSI disks in /etc/multipath.conf: blacklist { device { vendor "IET" product "VIRTUAL-DISK" } }, then systemctl reload multipathd (a devnode "^sd" blacklist would also drop SAN LUNs that need multipath); or disable multipathd if nothing uses it`)
 		}
 	}
 

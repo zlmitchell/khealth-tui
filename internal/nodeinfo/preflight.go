@@ -73,6 +73,7 @@ type CSIInfo struct {
 	// gave up on is the split-brain case.
 	LonghornDevs  []string
 	ISCSISessions []ISCSISession
+	DevsProbed    bool // LonghornDevs/ISCSISessions come from this probe (every refresh), not a carried config tier
 }
 
 // ISCSISession is one entry of /sys/class/iscsi_session.
@@ -339,6 +340,14 @@ func parsePreflight(info *Info, secs map[string]string) {
 			p.Units[f[0]] = PFUnit{Active: f[1] == "active", Enabled: f[2] == "enabled"}
 		}
 	}
+	// Longhorn devices and iSCSI sessions: every refresh (LHDEV)
+	if lines, ok := secs["LHDEV"]; ok {
+		p.CSI.DevsProbed = true
+		for _, l := range nonEmpty(lines) {
+			k, v, _ := strings.Cut(l, "=")
+			parseLonghornDev(&p.CSI, k, v)
+		}
+	}
 	if _, ok := secs["MOUNTOPTS"]; !ok {
 		parseHeavy(p, secs)
 		return
@@ -462,18 +471,17 @@ func parsePreflight(info *Info, secs map[string]string) {
 		case "dir":
 			p.CSI.HostDirs = append(p.CSI.HostDirs, strings.TrimSpace(v))
 		case "iscsid":
-			p.CSI.ISCSID = v == "active"
+			p.CSI.ISCSID = p.CSI.ISCSID || v == "active" || v == "socket"
 		case "multipath_blacklist":
 			p.CSI.MultipathBlacklist = strutil.AtoiOr(v, 0)
 		case "find_multipaths":
 			p.CSI.FindMultipaths = strings.TrimSpace(v)
 		case "mount_nfs":
 			p.CSI.MountNFS = v == "yes"
-		case "lhdev":
-			p.CSI.LonghornDevs = append(p.CSI.LonghornDevs, strings.TrimSpace(v))
-		case "iscsi":
-			t, st, _ := strings.Cut(strings.TrimSpace(v), "|")
-			p.CSI.ISCSISessions = append(p.CSI.ISCSISessions, ISCSISession{Target: t, State: st})
+		case "lhdev", "iscsi": // bundles from before LHDEV carry them here
+			if !p.CSI.DevsProbed {
+				parseLonghornDev(&p.CSI, k, v)
+			}
 		}
 	}
 	p.Auditd = kvLines(secs["AUDITD"])
@@ -618,8 +626,12 @@ func (p *Preflight) mergeConfig(prev *Preflight) {
 	swaps, units := p.Swaps, p.Units
 	denies, dp := p.Denies, p.DeniesProbed
 	pulls, pp, cm := p.Pulls, p.PullsProbed, p.CrictlMissing
+	devs, sessions, devsProbed := p.CSI.LonghornDevs, p.CSI.ISCSISessions, p.CSI.DevsProbed
 	*p = *prev
 	p.Swaps, p.Units = swaps, units
+	if devsProbed {
+		p.CSI.LonghornDevs, p.CSI.ISCSISessions, p.CSI.DevsProbed = devs, sessions, true
+	}
 	p.Denies, p.DeniesProbed = denies, dp
 	p.Pulls, p.PullsProbed, p.CrictlMissing = pulls, pp, cm
 }
@@ -659,4 +671,14 @@ func (p *Preflight) MountOpt(path string) *MountOpt {
 		}
 	}
 	return best
+}
+
+func parseLonghornDev(c *CSIInfo, k, v string) {
+	switch k {
+	case "lhdev":
+		c.LonghornDevs = append(c.LonghornDevs, strings.TrimSpace(v))
+	case "iscsi":
+		t, st, _ := strings.Cut(strings.TrimSpace(v), "|")
+		c.ISCSISessions = append(c.ISCSISessions, ISCSISession{Target: t, State: st})
+	}
 }
