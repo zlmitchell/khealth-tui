@@ -833,9 +833,16 @@ func etcdQuorumOf(recs []*etcdTriage, members []etcd.Member, statusByID map[stri
 // memberForNode matches a member to a node by name (kubeadm: node name;
 // rke2: "<node>-<hash>") or by the host in its peer/client URLs.
 func memberForNode(members []etcd.Member, n *corev1.Node) *etcd.Member {
+	// rke2/k3s name the member <node>-<8 hex>: a bare prefix match gave node
+	// "cp" the member of node "cp-2" ("cp-2-1a2b3c4d" starts with "cp-")
+	for i := range members {
+		if members[i].Name == n.Name {
+			return &members[i]
+		}
+	}
 	for i := range members {
 		m := &members[i]
-		if m.Name == n.Name || strings.HasPrefix(m.Name, n.Name+"-") {
+		if rest, ok := strings.CutPrefix(m.Name, n.Name+"-"); ok && isHexID(rest) {
 			return m
 		}
 	}
@@ -988,4 +995,17 @@ func memberLabel(m *etcd.Member) string {
 		return m.ID + " (unstarted)"
 	}
 	return m.Name + " (" + m.ID + ")"
+}
+
+// isHexID: the 8 hex digits rke2/k3s append to an etcd member's node name.
+func isHexID(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for _, c := range s {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return false
+		}
+	}
+	return true
 }

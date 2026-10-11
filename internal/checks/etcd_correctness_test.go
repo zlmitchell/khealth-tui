@@ -173,3 +173,16 @@ func TestKubeadmExternalEtcd(t *testing.T) {
 		t.Error("external etcd not explained")
 	}
 }
+
+// Node "redhat9-test" next to "redhat9-test-2": each gets its own member,
+// not the first one whose name starts with "redhat9-test-".
+func TestMemberForNodePrefix(t *testing.T) {
+	ms := []etcd.Member{{ID: "b2", Name: "redhat9-test-2-9eb2de3f"}, {ID: "a1", Name: "redhat9-test-239abcf5"}}
+	for node, want := range map[string]string{"redhat9-test": "a1", "redhat9-test-2": "b2"} {
+		n := corev1.Node{}
+		n.Name = node
+		if m := memberForNode(ms, &n); m == nil || m.ID != want {
+			t.Errorf("%s -> %+v, want %s", node, m, want)
+		}
+	}
+}
