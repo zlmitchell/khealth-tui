@@ -104,9 +104,25 @@ func evalNetwork(in Input, add func(Severity, string, string, string, string)) {
 				under = l.MTU
 			}
 		}
+		// tunl0 appears (DOWN) whenever the ipip module loads, whatever the
+		// CNI: a DOWN generic tunnel next to the overlay actually in use
+		// (flannel.1, vxlan.calico, ...) is idle, not broken
+		otherUp := map[string]bool{}
+		for _, l := range ni.Links {
+			if _, ok := overlays[l.Name]; ok && l.State != "DOWN" {
+				for _, x := range ni.Links {
+					if x.Name != l.Name {
+						otherUp[x.Name] = true
+					}
+				}
+			}
+		}
 		for _, l := range ni.Links {
 			o, ok := overlays[l.Name]
 			if !ok {
+				continue
+			}
+			if l.State == "DOWN" && (l.Name == "tunl0" || l.Name == "vxlan0") && otherUp[l.Name] {
 				continue
 			}
 			byOverlay[l.Name] = append(byOverlay[l.Name], ovl{name, l.Name, l.MTU})
