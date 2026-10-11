@@ -31,7 +31,9 @@ func TestNodeHealthGaps(t *testing.T) {
 		substr  string
 	}{
 		{"ro /var", "v1.35.8", func(ni *nodeinfo.Info) { ni.ROMounts = []nodeinfo.ROMount{{Mountpoint: "/var", FSType: "xfs"}} }, SevCrit, "/var (xfs) is mounted read-only"},
-		{"ro elsewhere", "v1.35.8", func(ni *nodeinfo.Info) { ni.ROMounts = []nodeinfo.ROMount{{Mountpoint: "/srv/archive", FSType: "ext4"}} }, SevInfo, "/srv/archive (ext4) is mounted read-only"},
+		{"ro elsewhere", "v1.35.8", func(ni *nodeinfo.Info) {
+			ni.ROMounts = []nodeinfo.ROMount{{Mountpoint: "/srv/archive", FSType: "ext4"}}
+		}, SevInfo, "/srv/archive (ext4) is mounted read-only"},
 		{"conntrack 85%", "v1.35.8", func(ni *nodeinfo.Info) { ni.ConntrackCount, ni.ConntrackMax = 850, 1000 }, SevWarn, "conntrack table 85% full"},
 		{"conntrack full", "v1.35.8", func(ni *nodeinfo.Info) { ni.ConntrackCount, ni.ConntrackMax = 999, 1000 }, SevCrit, "conntrack table 99% full"},
 		{"cgroup v1 on 1.35", "v1.35.8+rke2r1", func(ni *nodeinfo.Info) { ni.CgroupFS = "tmpfs" }, SevCrit, "since 1.35 the kubelet refuses to start on cgroup v1"},
@@ -62,7 +64,9 @@ func TestNodeHealthGaps(t *testing.T) {
 		t.Errorf("kubelet already points at resolved's list: %s", f.Message)
 	}
 	// virtio NIC: offload is not the vmxnet3 bug
-	fs = nodeHealthInput("v1.35.8", func(ni *nodeinfo.Info) { ni.Offload, ni.UnderlayDriver = map[string]string{"flannel.1": "on"}, "virtio_net" })
+	fs = nodeHealthInput("v1.35.8", func(ni *nodeinfo.Info) {
+		ni.Offload, ni.UnderlayDriver = map[string]string{"flannel.1": "on"}, "virtio_net"
+	})
 	if f := anyMessage(fs, SevWarn, "tx-checksum"); f != nil {
 		t.Errorf("virtio: %s", f.Message)
 	}
