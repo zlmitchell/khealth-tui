@@ -13,11 +13,11 @@ import (
 // cycle: the caller keeps the previous summary). now is when the lines
 // were collected, which decides what counts as recent.
 func (i *Info) ClassifyLogs(now time.Time) *logs.Summary {
-	if i == nil || (len(i.Journal) == 0 && len(i.LogFiles) == 0) {
+	if i == nil || (len(i.Journal) == 0 && len(i.KernelLog) == 0 && len(i.LogFiles) == 0) {
 		return nil
 	}
 	// rke2's kubelet/containerd log to files rather than the journal
-	srcs := []logs.Source{{Lines: i.Journal}}
+	srcs := []logs.Source{{Lines: i.Journal}, {Lines: i.KernelLog}}
 	for _, lf := range i.LogFiles {
 		srcs = append(srcs, logs.Source{Unit: LogFileUnit(lf.Path), Lines: strings.Split(lf.Content, "\n")})
 	}

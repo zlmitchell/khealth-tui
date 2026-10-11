@@ -261,6 +261,7 @@ func Evaluate(in Input) []Finding {
 			add(SevWarn, "node", name, fmt.Sprintf("load %.1f on %d CPUs", ni.Load1, ni.CPUs), "")
 		}
 		evalPreflight(name, ni, in, add) // swap, fapolicyd, auditd, mounts, accounts, proxies, vSphere ISO, registries (preflight.go)
+		evalNodeHealth(name, ni, in, add) // read-only fs, conntrack, cgroup v1, CNI sysctls, resolver, VXLAN offload (nodehealth.go)
 		active := map[string]bool{}
 		for _, svc := range ni.Services {
 			if svc.Active == "active" {
@@ -371,6 +372,7 @@ func Evaluate(in Input) []Finding {
 			}
 			return " (last " + in.Now.Sub(m.Time).Round(time.Minute).String() + " ago)"
 		}
+		evalKernelLog(name, ls, ago, add) // hung tasks, lockups, disk/NIC errors from journalctl -k (nodehealth.go)
 		if n := ls.ByName["rancher-plan-failed"]; n > 0 {
 			failed, applied := ls.Last("rancher-plan-failed"), ls.Last("rancher-plan-applied")
 			if !applied.Time.IsZero() && applied.Time.After(failed.Time) {

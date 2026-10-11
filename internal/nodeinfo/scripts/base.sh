@@ -123,6 +123,11 @@ sec STAT1; head -1 /proc/stat
 # has nothing to diff against and samples over one second here.
 if [ "__CPUSAMPLE__" = 1 ]; then sleep 1; sec STAT2; head -1 /proc/stat; fi
 sec MEM; cat /proc/meminfo
+# disk filesystems mounted read-only (an ext4 errors=remount-ro or an XFS
+# shutdown leaves the node Ready while every write fails) and the conntrack
+# table fill: both plain reads of /proc, cheap enough for every refresh
+sec ROMOUNTS; awk '$4 ~ /(^|,)ro(,|$)/ && $3 ~ /^(ext[234]|xfs|btrfs)$/ && $2 !~ /^\/var\/lib\/kubelet\/(pods|plugins)\// {print $2"|"$3}' /proc/mounts 2>/dev/null
+sec CONNTRACK; cat /proc/sys/net/netfilter/nf_conntrack_count /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null | tr '\n' ' '
 # df blocks in statfs on a hung network mount (NFS server gone, RWX share
 # manager down): a stalled df is retried without network filesystems and
 # the hung mounts are named in STALEMOUNTS (checked one by one, in parallel,
@@ -333,6 +338,21 @@ echo "system-agent=${sa:-not-found inactive dead }"
 [ -f /var/lib/rancher/agent/rancher2_connection_info.json ] && echo "connection-info=yes"
 [ -d /var/lib/rancher/agent/applied ] && echo "applied-plans=$(ls /var/lib/rancher/agent/applied 2>/dev/null | wc -l)"
 if [ "__CONFIG__" = 1 ]; then
+sec CGROUP; stat -fc %T /sys/fs/cgroup 2>/dev/null
+sec RESOLV
+# the nameservers of /etc/resolv.conf and of systemd-resolved's real list:
+# a loopback stub (127.0.0.53) handed to pods makes CoreDNS forward to itself
+grep -s '^nameserver' /etc/resolv.conf | awk '{print "etc="$2}'
+grep -s '^nameserver' /run/systemd/resolve/resolv.conf | awk '{print "resolved="$2}'
+sec OFFLOAD
+# VXLAN checksum offload on the overlay (a kernel/vmxnet3 bug corrupts it)
+# and the underlay's driver
+for d in flannel.1 vxlan.calico vxlan0; do
+  [ -d /sys/class/net/$d ] || continue
+  echo "$d=$(ethtool -k $d 2>/dev/null | awk '/tx-checksum-ip-generic:/{print $2}')"
+done
+dd=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+[ -n "$dd" ] && echo "driver=$(basename "$(readlink /sys/class/net/$dd/device/driver 2>/dev/null)" 2>/dev/null)"
 sec CNI
 for d in /var/lib/rancher/rke2/agent/etc/cni/net.d /var/lib/rancher/k3s/agent/etc/cni/net.d /etc/cni/net.d; do
   [ -d "$d" ] || continue

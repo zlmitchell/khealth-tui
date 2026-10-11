@@ -18,8 +18,8 @@ type KubeadmConfig struct {
 	CertSANs             []string // apiServer.certSANs
 	ServiceSubnet        string
 	KubernetesVersion    string
-	ExternalEtcd         bool     // etcd.external: the datastore runs outside the cluster's nodes
-	Raw                  string   // the ClusterConfiguration document as stored
+	ExternalEtcd         bool   // etcd.external: the datastore runs outside the cluster's nodes
+	Raw                  string // the ClusterConfiguration document as stored
 	KubeletRaw           string // kube-system/kubelet-config KubeletConfiguration (cluster-wide kubelet defaults)
 }
 

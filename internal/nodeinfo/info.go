@@ -125,14 +125,31 @@ type Info struct {
 	STIGProbed     bool                  // OS STIG facts present (collected by this or a previous probe)
 	STIGCollected  time.Time             // when the OS STIG facts were collected
 
+	// every refresh: disk filesystems mounted read-only, conntrack table fill
+	ROMounts       []ROMount
+	ConntrackCount int64
+	ConntrackMax   int64
+	// config tier: cgroup filesystem type (cgroup2fs = v2, tmpfs = v1), the
+	// nameservers of /etc/resolv.conf and systemd-resolved's real list, VXLAN
+	// checksum offload per overlay device and the underlay NIC's driver
+	CgroupFS       string
+	ResolvEtc      []string
+	ResolvResolved []string
+	Offload        map[string]string
+	UnderlayDriver string
+
 	// heavy
 	Images     []Image
 	Containers []Container
 	Tarballs   []Tarball
 	Journal    []string
+	KernelLog  []string // journalctl -k: the kernel's own log
 	LogFiles   []ConfigFile
 	CrictlInfo string
 }
+
+// ROMount is a disk filesystem mounted read-only.
+type ROMount struct{ Mountpoint, FSType string }
 
 // CPUStat is the first line of /proc/stat, summed: total jiffies and idle
 // (idle + iowait) jiffies.
@@ -601,9 +618,40 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 			}
 		}
 	}
+	for _, l := range nonEmpty(secs["ROMOUNTS"]) {
+		if mp, fs, ok := strings.Cut(l, "|"); ok {
+			info.ROMounts = append(info.ROMounts, ROMount{Mountpoint: mp, FSType: fs})
+		}
+	}
+	if f := strings.Fields(secs["CONNTRACK"]); len(f) == 2 {
+		info.ConntrackCount, _ = strconv.ParseInt(f[0], 10, 64)
+		info.ConntrackMax, _ = strconv.ParseInt(f[1], 10, 64)
+	}
+	if _, ok := secs["CGROUP"]; ok {
+		info.CgroupFS = strings.TrimSpace(secs["CGROUP"])
+		for _, l := range nonEmpty(secs["RESOLV"]) {
+			k, v, _ := strings.Cut(l, "=")
+			switch k {
+			case "etc":
+				info.ResolvEtc = append(info.ResolvEtc, v)
+			case "resolved":
+				info.ResolvResolved = append(info.ResolvResolved, v)
+			}
+		}
+		info.Offload = map[string]string{}
+		for _, l := range nonEmpty(secs["OFFLOAD"]) {
+			k, v, _ := strings.Cut(l, "=")
+			if k == "driver" {
+				info.UnderlayDriver = v
+			} else {
+				info.Offload[k] = v
+			}
+		}
+	}
 	if _, ok := secs["JOURNAL"]; ok {
 		info.Heavy, info.JournalAt = true, info.Collected
 		info.Journal = nonEmpty(secs["JOURNAL"])
+		info.KernelLog = nonEmpty(secs["KERNEL"])
 		info.LogFiles = ParseDumps(secs["LOGFILES"])
 	}
 	return info
@@ -1616,6 +1664,7 @@ func (i *Info) MergeConfig(prev *Info) {
 	i.ConfigFiles, i.ExtraFiles, i.PSA, i.Manifests, i.StaticPods, i.Settings = prev.ConfigFiles, prev.ExtraFiles, prev.PSA, prev.Manifests, prev.StaticPods, prev.Settings
 	i.CNI, i.Registries, i.RegistryMirrors, i.ContainerdHosts, i.ContainerdConfig = prev.CNI, prev.Registries, prev.RegistryMirrors, prev.ContainerdHosts, prev.ContainerdConfig
 	i.NetProbes, i.NetProbed = prev.NetProbes, prev.NetProbed
+	i.CgroupFS, i.ResolvEtc, i.ResolvResolved, i.Offload, i.UnderlayDriver = prev.CgroupFS, prev.ResolvEtc, prev.ResolvResolved, prev.Offload, prev.UnderlayDriver
 	i.Preflight.mergeConfig(&prev.Preflight)
 	if i.Hardening == nil {
 		i.Hardening = map[string]string{}
@@ -1657,7 +1706,7 @@ func (i *Info) MergeTiers(prev *Info) {
 		i.PVDirs, i.PVsAt = prev.PVDirs, prev.PVsAt
 	}
 	if i.JournalAt.IsZero() {
-		i.Journal, i.LogFiles, i.JournalAt = prev.Journal, prev.LogFiles, prev.JournalAt
+		i.Journal, i.KernelLog, i.LogFiles, i.JournalAt = prev.Journal, prev.KernelLog, prev.LogFiles, prev.JournalAt
 	}
 	if !i.ImagesAt.IsZero() || !i.PVsAt.IsZero() || !i.JournalAt.IsZero() {
 		i.Heavy = i.Heavy || prev.Heavy
