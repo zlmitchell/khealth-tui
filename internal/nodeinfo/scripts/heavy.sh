@@ -56,6 +56,14 @@ if [ "__JOURNAL__" = 1 ]; then
 untac() { tac 2>/dev/null || sed -n '1!G;h;$p'; }
 sec JOURNAL
 journalctl --no-pager -o short-iso -q -r -n __LINES__ --since '__SINCE__' -u rke2-server -u rke2-agent -u k3s -u k3s-agent -u kubelet -u containerd -u rancher-system-agent -u etcd 2>/dev/null | untac | scrublog
+sec RUNTIME
+# does the runtime answer (a hung shim wedges every CRI call: the cause
+# behind "PLEG is not healthy"), and how many sandboxes are left NotReady
+if [ -n "$CRICTL" ]; then
+  t0=$(date +%s%N); timeout 10 $CRICTL ps -q >/dev/null 2>&1; rc=$?
+  echo "rc=$rc ms=$(( ($(date +%s%N) - t0) / 1000000 ))"
+  [ $rc -eq 0 ] && echo "notready=$(timeout 10 $CRICTL pods --state NotReady -q 2>/dev/null | wc -l)"
+fi
 sec KERNEL
 # the kernel's own log: hung tasks, soft lockups, filesystem and I/O errors,
 # conntrack/neighbour tables full, NIC link flaps - none of it reaches the

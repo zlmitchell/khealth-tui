@@ -260,8 +260,9 @@ func Evaluate(in Input) []Finding {
 		if ni.CPUs > 0 && ni.Load1/float64(ni.CPUs) >= thr.LoadPerCPUWarn {
 			add(SevWarn, "node", name, fmt.Sprintf("load %.1f on %d CPUs", ni.Load1, ni.CPUs), "")
 		}
-		evalPreflight(name, ni, in, add)  // swap, fapolicyd, auditd, mounts, accounts, proxies, vSphere ISO, registries (preflight.go)
-		evalNodeHealth(name, ni, in, add) // read-only fs, conntrack, cgroup v1, CNI sysctls, resolver, VXLAN offload (nodehealth.go)
+		evalPreflight(name, ni, in, add)   // swap, fapolicyd, auditd, mounts, accounts, proxies, vSphere ISO, registries (preflight.go)
+		evalNodeHealth(name, ni, in, add)  // read-only fs, conntrack, cgroup v1, CNI sysctls, resolver, VXLAN offload (nodehealth.go)
+		evalNodeRuntime(name, ni, in, add) // disk saturation, NIC errors, bonds, ARP, IPAM leaks, runtime, SELinux (nodehealth.go)
 		active := map[string]bool{}
 		for _, svc := range ni.Services {
 			if svc.Active == "active" {
@@ -607,6 +608,7 @@ func Evaluate(in Input) []Finding {
 	// ---- addons / rancher ----
 	evalACE(in, add)     // Authorized Cluster Endpoint on Rancher-managed clusters (ace.go)
 	evalControl(in, add) // webhooks, APIServices, stuck deletions, PDBs, CSRs, Service endpoints (control.go)
+	evalEvents(in, add)  // image GC, IPAM exhaustion, eviction storms, out-of-service hint (events.go)
 	if r := s.Rancher; r != nil && r.Managed {
 		if !r.ClusterAgentOK {
 			add(SevCrit, "addons", "rancher", "cattle-cluster-agent not ready ("+r.ClusterAgent+") - cluster disconnected from Rancher "+r.Server, "check agent logs, Rancher URL/CA")

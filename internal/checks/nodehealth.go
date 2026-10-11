@@ -3,6 +3,7 @@ package checks
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/zlmitchell/khealth-tui/internal/distro"
 	"github.com/zlmitchell/khealth-tui/internal/logs"
@@ -152,4 +153,146 @@ func kubeletSetting(nv distro.Vocab, flag, field string) string {
 		return fmt.Sprintf(nv.KubeletArgHow, flag)
 	}
 	return fmt.Sprintf(nv.KubeletArgHow, field)
+}
+
+// evalNodeRuntime covers what needs two samples or the runtime itself:
+// disk saturation, NIC errors and link flaps, degraded bonds, the ARP
+// table, leaked IPAM allocations, a runtime that does not answer, and
+// SELinux denials.
+func evalNodeRuntime(name string, ni *nodeinfo.Info, in Input, add func(Severity, string, string, string, string)) {
+	nv := distro.For(ni.Dist)
+	// ---- disks ----
+	mountsOf := map[string][]string{}
+	for _, m := range ni.Mounts {
+		if dev, ok := strings.CutPrefix(m.Filesystem, "/dev/mapper/"); ok {
+			mountsOf[dev] = append(mountsOf[dev], m.Mountpoint)
+		} else if dev, ok := strings.CutPrefix(m.Filesystem, "/dev/"); ok {
+			mountsOf[dev] = append(mountsOf[dev], m.Mountpoint)
+		}
+	}
+	for _, d := range ni.DiskBusy {
+		if d.IOPS < 10 {
+			continue // a handful of I/Os can look slow without hurting anyone
+		}
+		where := ""
+		if ms := mountsOf[d.Name]; len(ms) > 0 {
+			where = " (" + strings.Join(ms, ", ") + ")"
+		}
+		switch {
+		case d.UtilPct >= 90:
+			add(SevWarn, "node", name, fmt.Sprintf("disk %s%s busy %.0f%% of the time (%.0f IOPS, await %.1f ms): etcd fsyncs and container writes queue behind it", d.Name, where, d.UtilPct, d.IOPS, d.AwaitMs), "iostat -x 1 / iotop for the writer; give etcd its own low-latency disk; on a VM check the datastore and noisy neighbours")
+		case d.AwaitMs >= 50:
+			add(SevWarn, "node", name, fmt.Sprintf("disk %s%s answers slowly: average %.0f ms per I/O over %.0f IOPS (etcd wants single-digit ms)", d.Name, where, d.AwaitMs, d.IOPS), "check the storage path (iostat -x 1, multipath -ll, datastore latency)")
+		}
+	}
+	// ---- NIC ----
+	if g := ni.NICGrowth; len(g) > 0 {
+		var errs []string
+		for _, k := range []string{"rx_errors", "tx_errors", "rx_crc_errors", "rx_missed_errors"} {
+			if g[k] > 0 {
+				errs = append(errs, fmt.Sprintf("%s +%d", k, g[k]))
+			}
+		}
+		if len(errs) > 0 {
+			add(SevWarn, "node", name, fmt.Sprintf("%s counted new errors since the last refresh: %s", ni.NICDev, strings.Join(errs, ", ")), "ethtool -S "+ni.NICDev+" | grep -iE 'err|drop|miss'; cable/optic/switch port, or the vNIC ring size (ethtool -G)")
+		}
+		if n := g["carrier_changes"]; n > 0 {
+			add(SevWarn, "node", name, fmt.Sprintf("%s lost and regained its link %d time(s) since the last refresh: every connection through it broke", ni.NICDev, n/2+n%2), "journalctl -k | grep -i 'link is'; check cable, switch port and the bond/vSwitch")
+		}
+	}
+	for _, b := range ni.BondSlaves {
+		if !strings.EqualFold(b.Status, "up") {
+			add(SevWarn, "node", name, fmt.Sprintf("bond %s slave %s is %s: the node runs without link redundancy", b.Bond, b.Slave, b.Status), "cat /proc/net/bonding/"+b.Bond+"; check the cable and switch port of "+b.Slave)
+		}
+	}
+	if ni.GCThresh3 > 0 && ni.Neigh*100/ni.GCThresh3 >= 80 {
+		add(SevWarn, "node", name, fmt.Sprintf("ARP table holds %d entries of gc_thresh3=%d: at the limit the kernel drops traffic to new neighbours", ni.Neigh, ni.GCThresh3), "sysctl -w net.ipv4.neigh.default.gc_thresh1=4096 net.ipv4.neigh.default.gc_thresh2=8192 net.ipv4.neigh.default.gc_thresh3=16384 and persist it in /etc/sysctl.d/")
+	}
+	// ---- host-local IPAM ----
+	if len(ni.IPAMFiles) > 0 && in.Snap != nil {
+		pods := 0
+		for i := range in.Snap.Pods {
+			p := &in.Snap.Pods[i]
+			if p.Spec.NodeName == name && !p.Spec.HostNetwork && p.Status.PodIP != "" && p.Status.Phase != "Succeeded" && p.Status.Phase != "Failed" {
+				pods++
+			}
+		}
+		size := 254
+		if n := in.Snap.Node(name); n != nil && n.Spec.PodCIDR != "" && !strings.Contains(n.Spec.PodCIDR, ":") {
+			if _, bits, ok := strings.Cut(n.Spec.PodCIDR, "/"); ok {
+				if b := strutil.AtoiOr(bits, 24); b >= 16 && b <= 30 {
+					size = 1<<(32-b) - 2
+				}
+			}
+		}
+		for _, net := range strutil.SortedKeys(ni.IPAMFiles) {
+			n := ni.IPAMFiles[net]
+			switch {
+			case n*100/size >= 90:
+				add(SevCrit, "network", name, fmt.Sprintf("host-local IPAM %s has %d of %d pod IPs allocated (%d pods with an IP run here): new pods fail with \"no IP addresses available\"", net, n, size, pods), ipamHint(net, roleUnit(nv, ni.ControlPlane)))
+			case n > pods+20 && n > 2*pods:
+				add(SevWarn, "network", name, fmt.Sprintf("host-local IPAM %s holds %d allocations for %d pods: leaked IPs (the rke2 Canal known issue) eat the node's range", net, n, pods), ipamHint(net, roleUnit(nv, ni.ControlPlane)))
+			}
+		}
+	}
+	// ---- container runtime ----
+	if ni.RuntimeProbed {
+		switch {
+		case ni.RuntimeRC == 124:
+			add(SevCrit, "node", name, "the container runtime does not answer: crictl ps timed out after 10 s - the kubelet's PLEG relist hangs the same way (\"PLEG is not healthy\")", "look for D-state shims (ps -eo stat,pid,comm | awk '$1 ~ /^D/'); restart "+nv.Server+"/"+nv.Agent+" (rke2/k3s: containerd is its child, pods keep running) or containerd on kubeadm; D-state tasks need a reboot")
+		case ni.RuntimeRC != 0:
+			add(SevWarn, "node", name, fmt.Sprintf("crictl ps failed (exit %d): the runtime socket does not answer cleanly", ni.RuntimeRC), "crictl info; systemctl status containerd (kubeadm) or the "+nv.Name+" journal")
+		case ni.RuntimeMs > 5000:
+			add(SevWarn, "node", name, fmt.Sprintf("crictl ps took %.1f s: the runtime is slow to answer (the kubelet's relist sees the same)", float64(ni.RuntimeMs)/1000), "look for many sandboxes / a busy containerd; journalctl for 'context deadline exceeded'")
+		}
+		if ni.NotReadySandboxes > 50 {
+			add(SevWarn, "node", name, fmt.Sprintf("%d NotReady pod sandboxes are left on the node: leaked sandboxes slow every runtime call", ni.NotReadySandboxes), "crictl rmp $(crictl pods --state NotReady -q)")
+		}
+	}
+	// ---- SELinux denials ----
+	var k8sDeny, crit []string
+	for _, a := range ni.Preflight.AVCs {
+		if !k8sAVC(a) {
+			continue
+		}
+		txt := fmt.Sprintf("%s (%s -> %s %s) x%d", a.Comm, a.SType, a.TType, a.Class, a.Count)
+		k8sDeny = append(k8sDeny, txt)
+		if (a.Comm == "etcd" || a.Comm == "containerd" || strings.Contains(a.SType, "etcd")) && !a.Last.IsZero() && in.Now.Sub(a.Last) < time.Hour {
+			crit = append(crit, txt)
+		}
+	}
+	if len(k8sDeny) > 0 {
+		sev := SevWarn
+		if len(crit) > 0 {
+			sev = SevCrit
+		}
+		add(sev, "security", name, "SELinux denied container/Kubernetes access today: "+strutil.TruncList(k8sDeny, 3), "ausearch -m AVC -ts today -i | audit2why; files created over SSH or restored from tar keep the wrong label - restorecon -Rv "+strutil.FirstNonEmpty(ni.DataDir, "/var/lib/rancher")+" /var/lib/kubelet; keep "+nv.Name+"-selinux matching the "+nv.Name+" version; never setenforce 0 on a STIG host")
+	}
+}
+
+func ipamHint(net, unit string) string {
+	return "drain the node, systemctl stop " + unit + ", remove the files in /var/lib/cni/networks/" + net + " for IPs no pod uses (crictl pods -q; or all of them on a drained node), systemctl start " + unit + "; make sure iptables is installed on the host (missing binaries make the CNI leak)"
+}
+
+// roleUnit is the unit that runs the node's runtime: the server unit on a
+// control-plane node, the agent unit elsewhere (kubelet on kubeadm).
+func roleUnit(nv distro.Vocab, controlPlane bool) string {
+	if controlPlane || nv.Agent == "" {
+		return nv.Server
+	}
+	return nv.Agent
+}
+
+// k8sAVC: a denial that touches containers or the Kubernetes stack.
+func k8sAVC(a nodeinfo.AVCDeny) bool {
+	for _, t := range []string{a.SType, a.TType} {
+		if strings.HasPrefix(t, "container_") || strings.HasPrefix(t, "spc_") || strings.Contains(t, "kubelet") || strings.Contains(t, "rke2") || strings.Contains(t, "k3s") || strings.Contains(t, "etcd") {
+			return true
+		}
+	}
+	switch a.Comm {
+	case "etcd", "containerd", "containerd-shim", "runc", "kubelet", "rke2", "k3s", "kube-apiserver":
+		return true
+	}
+	return false
 }

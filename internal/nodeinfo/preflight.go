@@ -47,6 +47,8 @@ type Preflight struct {
 	CurlMissing    bool
 	Denies         []FapDeny // fapolicyd denials from the audit log (heavy)
 	DeniesProbed   bool
+	AVCs           []AVCDeny // SELinux denials from the audit log (journal tier)
+	AVCsProbed     bool
 	Pulls          []RegPull // crictl pull dry run per mirrored registry (heavy)
 	PullsProbed    bool
 	CrictlMissing  bool // no crictl on the node: the pull dry run did not happen
@@ -567,6 +569,20 @@ func parsePreflight(info *Info, secs map[string]string) {
 
 // parseHeavy reads the heavy-tier sections of preflight.sh.
 func parseHeavy(p *Preflight, secs map[string]string) {
+	if s, ok := secs["AVCDENY"]; ok {
+		p.AVCsProbed = true
+		for _, l := range nonEmpty(s) {
+			f := strings.Split(l, "|")
+			if len(f) != 6 {
+				continue
+			}
+			a := AVCDeny{Count: strutil.AtoiOr(f[0], 0), Comm: f[2], SType: f[3], TType: f[4], Class: f[5]}
+			if ts, err := strconv.ParseInt(f[1], 10, 64); err == nil && ts > 0 {
+				a.Last = time.Unix(ts, 0)
+			}
+			p.AVCs = append(p.AVCs, a)
+		}
+	}
 	if _, ok := secs["FAPDENY"]; ok {
 		parseFapDeny(p, secs["FAPDENY"])
 	}
@@ -625,6 +641,7 @@ func (p *Preflight) mergeConfig(prev *Preflight) {
 	}
 	swaps, units := p.Swaps, p.Units
 	denies, dp := p.Denies, p.DeniesProbed
+	avcs, ap := p.AVCs, p.AVCsProbed
 	pulls, pp, cm := p.Pulls, p.PullsProbed, p.CrictlMissing
 	devs, sessions, devsProbed := p.CSI.LonghornDevs, p.CSI.ISCSISessions, p.CSI.DevsProbed
 	*p = *prev
@@ -633,6 +650,7 @@ func (p *Preflight) mergeConfig(prev *Preflight) {
 		p.CSI.LonghornDevs, p.CSI.ISCSISessions, p.CSI.DevsProbed = devs, sessions, true
 	}
 	p.Denies, p.DeniesProbed = denies, dp
+	p.AVCs, p.AVCsProbed = avcs, ap
 	p.Pulls, p.PullsProbed, p.CrictlMissing = pulls, pp, cm
 }
 
@@ -642,6 +660,9 @@ func (p *Preflight) mergeTiers(prev *Preflight) {
 	}
 	if !p.DeniesProbed {
 		p.Denies, p.DeniesProbed = prev.Denies, prev.DeniesProbed
+	}
+	if !p.AVCsProbed {
+		p.AVCs, p.AVCsProbed = prev.AVCs, prev.AVCsProbed
 	}
 	if !p.PullsProbed {
 		p.Pulls, p.PullsProbed, p.CrictlMissing = prev.Pulls, prev.PullsProbed, prev.CrictlMissing

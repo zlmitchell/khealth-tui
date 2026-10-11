@@ -1336,6 +1336,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		m.info.CPUFromPrev(a.nodes[m.info.Node])
+		m.info.DeltasFromPrev(a.nodes[m.info.Node])
 		m.info.MergeTiers(a.nodes[m.info.Node])
 		m.info.MergeSTIG(a.nodes[m.info.Node])
 		m.info.MergeConfig(a.nodes[m.info.Node])

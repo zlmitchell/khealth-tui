@@ -137,6 +137,24 @@ type Info struct {
 	ResolvResolved []string
 	Offload        map[string]string
 	UnderlayDriver string
+	IPAMFiles      map[string]int // host-local IPAM network -> allocated IP files (config tier)
+	// every refresh: disk counters (diffed into DiskBusy), the underlay
+	// NIC's counters (diffed into NICGrowth), bonds, ARP table size
+	Disk       []DiskStat
+	DiskUp     float64 // /proc/uptime at the Disk sample
+	DMNames    map[string]string
+	DiskBusy   []DiskBusy
+	NICDev     string
+	NIC        map[string]int64
+	NICGrowth  map[string]int64
+	BondSlaves []BondSlave
+	Neigh      int
+	GCThresh3  int
+	// heavy: does the runtime answer, leaked sandboxes
+	RuntimeProbed     bool
+	RuntimeRC         int // crictl ps exit status (124 = timed out)
+	RuntimeMs         int
+	NotReadySandboxes int
 
 	// heavy
 	Images     []Image
@@ -627,6 +645,7 @@ func Parse(node, host, out string, sentAt time.Time) *Info {
 		info.ConntrackCount, _ = strconv.ParseInt(f[0], 10, 64)
 		info.ConntrackMax, _ = strconv.ParseInt(f[1], 10, 64)
 	}
+	parseNodeHealth(info, secs)
 	if _, ok := secs["CGROUP"]; ok {
 		info.CgroupFS = strings.TrimSpace(secs["CGROUP"])
 		for _, l := range nonEmpty(secs["RESOLV"]) {
@@ -1665,6 +1684,7 @@ func (i *Info) MergeConfig(prev *Info) {
 	i.CNI, i.Registries, i.RegistryMirrors, i.ContainerdHosts, i.ContainerdConfig = prev.CNI, prev.Registries, prev.RegistryMirrors, prev.ContainerdHosts, prev.ContainerdConfig
 	i.NetProbes, i.NetProbed = prev.NetProbes, prev.NetProbed
 	i.CgroupFS, i.ResolvEtc, i.ResolvResolved, i.Offload, i.UnderlayDriver = prev.CgroupFS, prev.ResolvEtc, prev.ResolvResolved, prev.Offload, prev.UnderlayDriver
+	i.IPAMFiles = prev.IPAMFiles
 	i.Preflight.mergeConfig(&prev.Preflight)
 	if i.Hardening == nil {
 		i.Hardening = map[string]string{}
@@ -1707,6 +1727,7 @@ func (i *Info) MergeTiers(prev *Info) {
 	}
 	if i.JournalAt.IsZero() {
 		i.Journal, i.KernelLog, i.LogFiles, i.JournalAt = prev.Journal, prev.KernelLog, prev.LogFiles, prev.JournalAt
+		i.RuntimeProbed, i.RuntimeRC, i.RuntimeMs, i.NotReadySandboxes = prev.RuntimeProbed, prev.RuntimeRC, prev.RuntimeMs, prev.NotReadySandboxes
 	}
 	if !i.ImagesAt.IsZero() || !i.PVsAt.IsZero() || !i.JournalAt.IsZero() {
 		i.Heavy = i.Heavy || prev.Heavy

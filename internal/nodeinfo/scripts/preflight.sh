@@ -325,6 +325,20 @@ if [ -z "$CRICTL" ]; then echo "crictl=missing"; elif [ -n "$R" ]; then
 fi
 fi
 if [ "__JOURNAL__" = 1 ]; then
+sec AVCDENY
+# SELinux denials (AVC/USER_AVC, today): count|last_epoch|comm|scontext type|tcontext type|tclass,
+# record types matched after a blank (name_format prefixes "node=<host> ")
+if command -v ausearch >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" != Disabled ]; then
+  timeout 20 ausearch -m AVC,USER_AVC -ts today --raw --input-logs </dev/null 2>/dev/null | awk '
+    /(^| )type=(USER_)?AVC / && / denied / {
+      ts=""; if (match($0,/audit\([0-9.]+:/)) ts=substr($0,RSTART+6,RLENGTH-7)
+      c="?"; if (match($0,/comm="[^"]*"/)) c=substr($0,RSTART+6,RLENGTH-7)
+      sc="?"; if (match($0,/scontext=[^ ]*/)) { split(substr($0,RSTART+9,RLENGTH-9),a,":"); sc=a[3] }
+      tc="?"; if (match($0,/tcontext=[^ ]*/)) { split(substr($0,RSTART+9,RLENGTH-9),a,":"); tc=a[3] }
+      cl="?"; if (match($0,/tclass=[^ ]*/)) cl=substr($0,RSTART+7,RLENGTH-7)
+      k=c "|" sc "|" tc "|" cl; n[k]++; if (ts+0>last[k]) last[k]=ts+0 }
+    END { for (k in n) print n[k] "|" int(last[k]) "|" k }' | sort -t'|' -k1,1nr | head -20
+fi
 sec FAPDENY
 # fapolicyd denials land in the audit log as FANOTIFY records (resp=2); the
 # SYSCALL/PATH records of the same event name the program and the file.
