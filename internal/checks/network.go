@@ -68,15 +68,18 @@ func evalNetwork(in Input, add func(Severity, string, string, string, string)) {
 			if cs.RestartCount == 0 {
 				continue
 			}
-			last := ""
-			if t := cs.LastTerminationState.Terminated; t != nil && !t.FinishedAt.IsZero() {
-				last = fmt.Sprintf(", last %s ago", strutil.HumanDur(in.Now.Sub(t.FinishedAt.Time)))
-				if t.Reason != "" {
-					last += " (" + t.Reason + ")"
-				}
+			// RestartCount covers the pod's whole life, node reboots
+			// included: only a restart within the day says something now
+			t := cs.LastTerminationState.Terminated
+			if t == nil || t.FinishedAt.IsZero() || in.Now.Sub(t.FinishedAt.Time) > 24*time.Hour {
+				continue
+			}
+			last := fmt.Sprintf(", last %s ago", strutil.HumanDur(in.Now.Sub(t.FinishedAt.Time)))
+			if t.Reason != "" {
+				last += " (" + t.Reason + ")"
 			}
 			sev := SevInfo
-			if cs.RestartCount >= 5 {
+			if cs.RestartCount >= 5 && !(t.Reason == "Unknown" && t.ExitCode == 255) { // 255/Unknown: the node restarted, not the agent
 				sev = SevWarn
 			}
 			add(sev, "network", p.Spec.NodeName, fmt.Sprintf("CNI pod %s container %s restarted %dx%s", p.Name, cs.Name, cs.RestartCount, last), "a CNI agent that keeps restarting drops every pod's network on the node while it is down: kubectl -n "+p.Namespace+" logs "+p.Name+" -c "+cs.Name+" -p")

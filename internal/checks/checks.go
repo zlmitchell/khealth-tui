@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 
 	"github.com/zlmitchell/khealth-tui/internal/config"
 	"github.com/zlmitchell/khealth-tui/internal/distro"
@@ -223,6 +224,7 @@ func Evaluate(in Input) []Finding {
 		}
 	}
 	evalAddresses(in, add) // node-ip pinned to a gone address, server: pointing at one (address.go)
+	evalClocks(in, add)
 	for name, ni := range in.Nodes {
 		if ni == nil {
 			continue
@@ -303,16 +305,20 @@ func Evaluate(in Input) []Finding {
 		if ni.NTPSynced != nil && !*ni.NTPSynced {
 			add(SevWarn, "node", name, "system clock not NTP-synchronized", "enable chrony/systemd-timesyncd")
 		}
-		if d := ni.ClockOffset; d > thr.ClockSkewWarn || d < -thr.ClockSkewWarn {
-			add(SevWarn, "node", name, fmt.Sprintf("clock offset %s vs this machine", d), "certificates and etcd need synchronized clocks")
-		}
 		for _, c := range ni.Certs {
 			left := c.NotAfter.Sub(in.Now)
+			renew := nv.CertRenew
+			if strings.HasSuffix(c.Path, "ca.crt") {
+				// CAs are never renewed by a restart or certs renew
+				renew = "a CA certificate: nothing renews it automatically; rotate the CA (rke2/k3s certificate rotate-ca, kubeadm: the manual CA rotation procedure) and redistribute it to every client"
+			}
 			switch {
 			case left <= 0:
-				add(SevCrit, "node", name, "certificate expired: "+c.Path, nv.CertRenew)
+				add(SevCrit, "node", name, "certificate expired: "+c.Path, renew)
+			case left < 7*24*time.Hour:
+				add(SevCrit, "node", name, fmt.Sprintf("certificate expires in %s: %s", strutil.HumanDur(left), c.Path), renew)
 			case left < thr.CertExpiryWarn:
-				add(SevWarn, "node", name, fmt.Sprintf("certificate expires in %dd: %s", int(left.Hours()/24), c.Path), "")
+				add(SevWarn, "node", name, fmt.Sprintf("certificate expires in %dd: %s", int(left.Hours()/24), c.Path), renew)
 			}
 		}
 		if ni.Hardening["reboot_required"] == "yes" {
@@ -366,7 +372,14 @@ func Evaluate(in Input) []Finding {
 			return " (last " + in.Now.Sub(m.Time).Round(time.Minute).String() + " ago)"
 		}
 		if n := ls.ByName["rancher-plan-failed"]; n > 0 {
-			add(SevCrit, "node", name, fmt.Sprintf("Rancher plan failed %d time(s)%s: node config may be half-applied", n, ago(ls.Last("rancher-plan-failed"))), "journalctl -u rancher-system-agent; compare config.yaml.d/50-rancher.yaml with the other nodes (RKE2 tab)")
+			failed, applied := ls.Last("rancher-plan-failed"), ls.Last("rancher-plan-applied")
+			if !applied.Time.IsZero() && applied.Time.After(failed.Time) {
+				// Rancher applied a plan again after the failure and that one
+				// has not failed: the window still holds the old error lines
+				add(SevInfo, "node", name, fmt.Sprintf("Rancher plan failed %d time(s)%s, then a later plan was applied%s without failing", n, ago(failed), ago(applied)), "journalctl -u rancher-system-agent for the earlier error")
+			} else {
+				add(SevCrit, "node", name, fmt.Sprintf("Rancher plan failed %d time(s)%s: node config may be half-applied", n, ago(failed)), "journalctl -u rancher-system-agent; compare config.yaml.d/50-rancher.yaml with the other nodes (RKE2 tab)")
+			}
 		}
 		if n := ls.ByName["rancher-plan-applied"]; n > 0 {
 			add(SevInfo, "node", name, fmt.Sprintf("Rancher applied a plan %d time(s)%s: config.yaml.d/50-rancher.yaml and the rke2 unit were rewritten from the Rancher cluster spec", n, ago(ls.Last("rancher-plan-applied"))), "expected after an upgrade or cluster edit in Rancher; otherwise check the RKE2 tab for drift from what the node ran before")
@@ -428,7 +441,13 @@ func Evaluate(in Input) []Finding {
 	for i := range s.Deployments {
 		d := &s.Deployments[i]
 		if d.Spec.Replicas != nil && *d.Spec.Replicas > 0 && d.Status.UnavailableReplicas > 0 {
-			add(SevWarn, "workload", d.Namespace+"/deploy/"+d.Name, fmt.Sprintf("%d/%d replicas available", d.Status.AvailableReplicas, *d.Spec.Replicas), "")
+			sev, hint := SevWarn, ""
+			// none left of a cluster service (CoreDNS, ingress, the CSI
+			// controller, Rancher's agent): what it serves is down for everyone
+			if d.Status.AvailableReplicas == 0 && d.Namespace != "default" && k8s.IsSystemNamespace(d.Namespace) && in.Now.Sub(d.CreationTimestamp.Time) > thr.PendingPodAge {
+				sev, hint = SevCrit, "no replica of a cluster service is available: kubectl -n "+d.Namespace+" describe deploy "+d.Name+"; the pods' findings say why"
+			}
+			add(sev, "workload", d.Namespace+"/deploy/"+d.Name, fmt.Sprintf("%d/%d replicas available", d.Status.AvailableReplicas, *d.Spec.Replicas), hint)
 		}
 	}
 	for i := range s.DaemonSets {
@@ -525,10 +544,29 @@ func Evaluate(in Input) []Finding {
 			add(SevWarn, "storage", "pvc/"+key, fmt.Sprintf("inodes %d%% used", u.InodesUsed*100/u.Inodes), "")
 		}
 	}
+	// WaitForFirstConsumer claims stay Pending until a pod uses them: an
+	// unused one is waiting by design (k3s local-path is such a class)
+	wffc := map[string]bool{}
+	for i := range s.StorageClasses {
+		if m := s.StorageClasses[i].VolumeBindingMode; m != nil && *m == storagev1.VolumeBindingWaitForFirstConsumer {
+			wffc[s.StorageClasses[i].Name] = true
+		}
+	}
+	claimUsed := map[string]bool{}
+	for i := range s.Pods {
+		for _, v := range s.Pods[i].Spec.Volumes {
+			if v.PersistentVolumeClaim != nil {
+				claimUsed[s.Pods[i].Namespace+"/"+v.PersistentVolumeClaim.ClaimName] = true
+			}
+		}
+	}
 	for i := range s.PVCs {
 		p := &s.PVCs[i]
 		switch p.Status.Phase {
 		case corev1.ClaimPending:
+			if sc := p.Spec.StorageClassName; sc != nil && wffc[*sc] && !claimUsed[p.Namespace+"/"+p.Name] {
+				continue
+			}
 			if in.Now.Sub(p.CreationTimestamp.Time) > thr.PendingPodAge {
 				add(SevWarn, "storage", p.Namespace+"/pvc/"+p.Name, "Pending", "no provisioner / storage class / capacity")
 			}
@@ -978,4 +1016,58 @@ func containerTrouble(p *corev1.Pod, now time.Time) []trouble {
 		check(cs, strutil.FirstNonEmpty(images[cs.Name], cs.Image), "container")
 	}
 	return out
+}
+
+// evalClocks: each node's clock against the other nodes. The offsets are
+// measured against the machine running khealth, so a skewed workstation
+// would otherwise flag every node; the nodes' own spread is what etcd
+// leases and certificate validity depend on. This machine takes part as
+// one more voter (offset 0): with two nodes it says which one drifted.
+func evalClocks(in Input, add func(Severity, string, string, string, string)) {
+	thr := in.Cfg.Thresholds.ClockSkewWarn
+	off := map[string]time.Duration{}
+	for name, ni := range in.Nodes {
+		if ni != nil && ni.Err == nil {
+			off[name] = ni.ClockOffset
+		}
+	}
+	names := strutil.SortedKeys(off)
+	far := func(d time.Duration) bool { return d > thr || d < -thr }
+	for _, n := range names {
+		apart, voters := 0, 1
+		if far(off[n]) { // this machine
+			apart++
+		}
+		for _, o := range names {
+			if o != n {
+				voters++
+				if far(off[n] - off[o]) {
+					apart++
+				}
+			}
+		}
+		if apart*2 > voters {
+			msg := fmt.Sprintf("clock offset %s vs this machine and the other nodes", off[n])
+			if len(names) == 1 {
+				msg = fmt.Sprintf("clock offset %s vs this machine", off[n])
+			}
+			add(SevWarn, "node", n, msg, "certificates and etcd need synchronized clocks: check chrony/timesyncd on this node")
+		}
+	}
+	// this machine against the nodes: off from most of them, it is the odd one
+	if len(names) < 2 {
+		return
+	}
+	apart := 0
+	ds := make([]time.Duration, 0, len(names))
+	for _, n := range names {
+		ds = append(ds, off[n])
+		if far(off[n]) {
+			apart++
+		}
+	}
+	sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
+	if apart*2 > len(names) {
+		add(SevInfo, "cluster", "clock", fmt.Sprintf("the nodes' clocks agree but differ from this machine by %s: this machine's clock is likely off", ds[len(ds)/2]), "the cluster is not affected; fix time sync where khealth runs (\"ago\" times shown here are off by that much)")
+	}
 }

@@ -189,7 +189,7 @@ done
 if [ "__CONFIG__" = 1 ]; then
 sec CERTS
 if command -v openssl >/dev/null 2>&1; then
-  for f in /var/lib/rancher/rke2/server/tls/*.crt /var/lib/rancher/rke2/server/tls/etcd/*.crt /var/lib/rancher/rke2/agent/*.crt /var/lib/rancher/k3s/server/tls/*.crt /var/lib/rancher/k3s/agent/*.crt /etc/kubernetes/pki/*.crt /etc/kubernetes/pki/etcd/*.crt /var/lib/kubelet/pki/kubelet.crt /var/lib/kubelet/pki/kubelet-client-current.pem /etc/ssl/etcd/ssl/*.pem; do
+  for f in "$RKE2_DD"/server/tls/*.crt "$RKE2_DD"/server/tls/etcd/*.crt "$RKE2_DD"/agent/*.crt "$K3S_DD"/server/tls/*.crt "$K3S_DD"/agent/*.crt /etc/kubernetes/pki/*.crt /etc/kubernetes/pki/etcd/*.crt /var/lib/kubelet/pki/kubelet.crt /var/lib/kubelet/pki/kubelet-client-current.pem /var/lib/kubelet/pki/kubelet-server-current.pem /etc/ssl/etcd/ssl/*.pem; do
     [ -f "$f" ] || continue
     case "$f" in *-key.pem) continue;; esac
     e=$(openssl x509 -enddate -noout -in "$f" 2>/dev/null | sed 's/^notAfter=//')
