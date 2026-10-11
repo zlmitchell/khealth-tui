@@ -260,7 +260,7 @@ func Evaluate(in Input) []Finding {
 		if ni.CPUs > 0 && ni.Load1/float64(ni.CPUs) >= thr.LoadPerCPUWarn {
 			add(SevWarn, "node", name, fmt.Sprintf("load %.1f on %d CPUs", ni.Load1, ni.CPUs), "")
 		}
-		evalPreflight(name, ni, in, add) // swap, fapolicyd, auditd, mounts, accounts, proxies, vSphere ISO, registries (preflight.go)
+		evalPreflight(name, ni, in, add)  // swap, fapolicyd, auditd, mounts, accounts, proxies, vSphere ISO, registries (preflight.go)
 		evalNodeHealth(name, ni, in, add) // read-only fs, conntrack, cgroup v1, CNI sysctls, resolver, VXLAN offload (nodehealth.go)
 		active := map[string]bool{}
 		for _, svc := range ni.Services {
@@ -425,7 +425,7 @@ func Evaluate(in Input) []Finding {
 			add(SevWarn, "workload", ref, "Failed: "+st, "")
 		case p.Status.Phase == corev1.PodUnknown:
 			add(SevWarn, "workload", ref, "Unknown phase", "node may be unreachable")
-		case st == "Terminating" && p.DeletionTimestamp != nil && in.Now.Sub(p.DeletionTimestamp.Time) > 10*time.Minute:
+		case st == "Terminating" && p.DeletionTimestamp != nil && in.Now.Sub(p.DeletionTimestamp.Time) > thr.StuckDeletion:
 			add(SevWarn, "workload", ref, "Terminating for "+strutil.HumanDur(in.Now.Sub(p.DeletionTimestamp.Time)), "stuck finalizer or unreachable node")
 		}
 		if !troubled && restarts >= thr.RestartWarn && !lastRestart.IsZero() && in.Now.Sub(lastRestart) < 24*time.Hour {
@@ -451,7 +451,12 @@ func Evaluate(in Input) []Finding {
 			if d.Status.AvailableReplicas == 0 && d.Namespace != "default" && k8s.IsSystemNamespace(d.Namespace) && in.Now.Sub(d.CreationTimestamp.Time) > thr.PendingPodAge {
 				sev, hint = SevCrit, "no replica of a cluster service is available: kubectl -n "+d.Namespace+" describe deploy "+d.Name+"; the pods' findings say why"
 			}
-			add(sev, "workload", d.Namespace+"/deploy/"+d.Name, fmt.Sprintf("%d/%d replicas available", d.Status.AvailableReplicas, *d.Spec.Replicas), hint)
+			msg := fmt.Sprintf("%d/%d replicas available", d.Status.AvailableReplicas, *d.Spec.Replicas)
+			if cause, h := replicaFailure(d); cause != "" {
+				msg += ": " + cause
+				hint = h
+			}
+			add(sev, "workload", d.Namespace+"/deploy/"+d.Name, msg, hint)
 		}
 	}
 	for i := range s.DaemonSets {
@@ -600,7 +605,8 @@ func Evaluate(in Input) []Finding {
 	}
 
 	// ---- addons / rancher ----
-	evalACE(in, add) // Authorized Cluster Endpoint on Rancher-managed clusters (ace.go)
+	evalACE(in, add)     // Authorized Cluster Endpoint on Rancher-managed clusters (ace.go)
+	evalControl(in, add) // webhooks, APIServices, stuck deletions, PDBs, CSRs, Service endpoints (control.go)
 	if r := s.Rancher; r != nil && r.Managed {
 		if !r.ClusterAgentOK {
 			add(SevCrit, "addons", "rancher", "cattle-cluster-agent not ready ("+r.ClusterAgent+") - cluster disconnected from Rancher "+r.Server, "check agent logs, Rancher URL/CA")
