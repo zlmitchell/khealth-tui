@@ -531,7 +531,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		if ni.Settings["selinux"] == "true" {
 			sev = SevCrit
 		}
-		if missing["container-selinux"] || (ni.Dist == "rke2" && missing["rke2-selinux"]) || (ni.Dist == "k3s" && missing["k3s-selinux"]) {
+		if missing["container-selinux"] || (v.Name == "rke2" && missing["rke2-selinux"]) || (v.Name == "k3s" && missing["k3s-selinux"]) {
 			add(sev, "node", name, "SELinux is enforcing but the "+ni.Dist+"-selinux/container-selinux policy packages are not installed: containers and the runtime run with the wrong labels and get denied", "dnf install "+ni.Dist+"-selinux container-selinux from the rancher repo (or use the RPM install), then restart "+ni.Dist)
 		}
 		// a Rancher-provisioned node also runs rancher-system-agent, which
@@ -543,7 +543,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		// not - selinux: true is what makes containerd label containers
 		// (container_t with MCS categories); without it they run unconfined
 		// however hardened the host looks
-		if !missing["container-selinux"] && !missing[ni.Dist+"-selinux"] && ni.Settings["selinux"] != "true" {
+		if !missing["container-selinux"] && !missing[v.Name+"-selinux"] && ni.Settings["selinux"] != "true" {
 			add(SevWarn, "node", name, "SELinux is enforcing and the policy packages are installed, but "+v.ConfigName+" has no selinux: true: containerd runs the pods unconfined (no container_t label), the host policy protects "+ni.Dist+" only", "add selinux: true to "+v.ConfigFile+" and restart "+v.Server+" / "+v.Agent+" (one node at a time; pods restart with labels)")
 		}
 	}

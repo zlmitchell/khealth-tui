@@ -350,7 +350,8 @@ func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, 
 			if !n.Schedulable && n.AllowScheduling {
 				add(SevWarn, "storage", n.Name, "Longhorn cannot schedule replicas on the node: "+strutil.FirstNonEmpty(n.SchedulableMsg, "no schedulable disk"), "kubectl -n "+li.NS()+" describe nodes.longhorn.io "+n.Name)
 			}
-			for cname, c := range n.Conditions {
+			for _, cname := range strutil.SortedKeys(n.Conditions) {
+				c := n.Conditions[cname]
 				if c.Status {
 					continue
 				}

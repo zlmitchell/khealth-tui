@@ -159,7 +159,7 @@ for u in $( { echo "${SUDO_USER:-}"; grep -hsE '^[^#]+ALL' /etc/sudoers.d/90-clo
     grep -hsE "^[[:space:]]*$g[[:space:]].*NOPASSWD" /etc/sudoers /etc/sudoers.d/* >/dev/null 2>&1 && np=yes
   done
   h=$(getent passwd "$u" 2>/dev/null | cut -d: -f6)
-  keys=$(grep -cE '^(ssh|ecdsa)-' "$h/.ssh/authorized_keys" 2>/dev/null)
+  keys=$(grep -cE '(^|[[:space:]])(ssh-|ecdsa-|sk-)[a-z0-9@.-]+[[:space:]]+AAAA' "$h/.ssh/authorized_keys" 2>/dev/null)
   echo "sudo|$u|nopasswd=$np|keys=${keys:-0}"
 done
 sec PROXY
