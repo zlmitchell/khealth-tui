@@ -1,0 +1,21 @@
+# The kubeadm lab on an external etcd: kubeadm-config carries
+# etcd.external and no etcd static pod runs on the node. khealth must say
+# it does not probe that etcd instead of reporting the missing etcd
+# container as an outage. Layered over the kubeadm lab:
+#
+#   docker compose -f test/gatherlab/compose.kubeadm.yaml -f test/gatherlab/compose.kubeadm-extetcd.yaml up -d --build
+#   docker compose -f test/gatherlab/compose.kubeadm.yaml -f test/gatherlab/compose.kubeadm-extetcd.yaml down -v
+services:
+  etcd:
+    image: registry.k8s.io/etcd:3.6.4-0
+    command:
+      - etcd
+      - --name=external
+      - --data-dir=/var/lib/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    volumes: [/var/lib/etcd]
+  kubeadm:
+    depends_on: [etcd]
+    environment:
+      LAB_EXTERNAL_ETCD: http://etcd:2379

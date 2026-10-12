@@ -34,6 +34,14 @@ for u in NetworkManager.service nm-cloud-setup.service nm-cloud-setup.timer vmto
   e=disabled; case "$WANTS" in *" $u "*) e=enabled;; esac
   echo "$u|$a|$e"
 done
+sec LHDEV
+# block devices Longhorn still presents on this node and the iSCSI sessions
+# behind them, compared with where the cluster says each volume is attached:
+# every refresh (only /dev and /sys are read), because the cluster's side is
+# re-listed every refresh too - a config-tier copy would be a stale device
+# list next to a fresh attachment
+for d in /dev/longhorn/*; do [ -b "$d" ] && echo "lhdev=${d##*/}"; done
+for s in /sys/class/iscsi_session/session*; do [ -d "$s" ] && echo "iscsi=$(cat "$s/targetname" 2>/dev/null)|$(cat "$s/state" 2>/dev/null)"; done
 # registries.yaml parser, field separator and the airgap marker are shared
 # by the curl probe (config tier) and the crictl pull dry run (heavy tier)
 T=$(printf '\037')
@@ -119,14 +127,14 @@ sec CSI
 ls /var/lib/kubelet/plugins_registry 2>/dev/null | sed -E 's/-reg\.sock$/|/; s/\.sock$/|/' | sed 's/^/driver=/'
 for d in /var/lib/longhorn/engine-binaries /var/lib/longhorn /opt/pwx/bin /var/lib/kubelet/volumeplugins /usr/libexec/kubernetes/kubelet-plugins/volume/exec /var/lib/rook /var/lib/trident /var/openebs; do [ -d "$d" ] && echo "dir=$d"; done
 { [ -L /run/systemd/units/invocation:iscsid.service ] || [ -e /run/systemd/units/invocation:iscsid.service ]; } && echo "iscsid=active"
-[ -f /etc/multipath.conf ] && echo "multipath_blacklist=$(grep -c '^[[:space:]]*blacklist' /etc/multipath.conf 2>/dev/null)"
+# socket-activated (Ubuntu, RHEL): iscsid starts on the first login; sockets
+# leave no invocation entry, the enablement link is what says it is armed
+[ -e /etc/systemd/system/sockets.target.wants/iscsid.socket ] && echo "iscsid=socket"
+# entries inside blacklist { } (not blacklist_exceptions, not an empty stanza)
+[ -f /etc/multipath.conf ] && echo "multipath_blacklist=$(awk '/^[[:space:]]*blacklist[[:space:]]*\{/{b=1; next} b && /^[[:space:]]*(devnode|wwid|device|property)/{n++} b && /^\}/{b=0} END{print n+0}' /etc/multipath.conf 2>/dev/null)"
 # Trident iSCSI wants multipathd with find_multipaths no; NAS backends need mount.nfs
 [ -f /etc/multipath.conf ] && echo "find_multipaths=$(grep -hsE '^[[:space:]]*find_multipaths' /etc/multipath.conf 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '"')"
 command -v mount.nfs >/dev/null 2>&1 && echo "mount_nfs=yes"
-# block devices Longhorn still presents on this node and the iSCSI sessions
-# behind them (the cluster's idea of where a volume is attached may differ)
-for d in /dev/longhorn/*; do [ -b "$d" ] && echo "lhdev=${d##*/}"; done
-for s in /sys/class/iscsi_session/session*; do [ -d "$s" ] && echo "iscsi=$(cat "$s/targetname" 2>/dev/null)|$(cat "$s/state" 2>/dev/null)"; done
 sec AUDITD
 grep -hsE '^[[:space:]]*(log_file|max_log_file|max_log_file_action|num_logs|space_left|space_left_action|admin_space_left|admin_space_left_action|disk_full_action|disk_error_action)[[:space:]]*=' /etc/audit/auditd.conf 2>/dev/null | tr -d ' \t'
 sec ACCOUNTS
@@ -140,8 +148,12 @@ echo "default_inactive=$(useradd -D 2>/dev/null | sed -n 's/^INACTIVE=//p')"
 awk -F: -v su="${SUDO_USER:-}" 'NR==FNR{if($7 !~ /(nologin|false|sync|halt|shutdown)$/ || $1=="root" || $1==su || $1=="etcd") keep[$1]=$3"|"$7; next} ($1 in keep){h=$2; s=(h==""||h=="*"||h=="!!"||h=="!*"||h=="!"?"none":(h ~ /^!/?"locked":"set")); print "user|"$1"|"keep[$1]"|"s"|"$3"|"$4"|"$5"|"$6"|"$7"|"$8}' /etc/passwd /etc/shadow 2>/dev/null
 if command -v faillock >/dev/null 2>&1; then
   echo "faillock_deny=$(grep -hsE '^[[:space:]]*deny[[:space:]]*=' /etc/security/faillock.conf 2>/dev/null | tail -1 | sed 's/.*=[[:space:]]*//')"
+  echo "faillock_deny_pam=$(grep -hsoE '^[^#]*pam_faillock\.so.*deny=[0-9]+' /etc/pam.d/system-auth /etc/pam.d/password-auth /etc/pam.d/common-auth 2>/dev/null | sed -E 's/.*deny=([0-9]+).*/\1/' | head -1)"
+  echo "faillock_unlock=$(grep -hsE '^[[:space:]]*unlock_time[[:space:]]*=' /etc/security/faillock.conf 2>/dev/null | tail -1 | sed 's/.*=[[:space:]]*//')"
+  # faillock|user|valid failures|seconds since the newest one
+  now=$(date +%s)
   for u in root ${SUDO_USER:-}; do
-    echo "faillock|$u|$(faillock --user "$u" 2>/dev/null | grep -c ' V$')"
+    faillock --user "$u" 2>/dev/null | awk -v u="$u" -v now="$now" '$NF=="V"{n++; t=$1" "$2} END{a=""; if(t!=""){c="date -d \""t"\" +%s"; c | getline e; close(c); if(e!="") a=now-e}; print "faillock|"u"|"n+0"|"a}'
   done
 fi
 # the provisioning user cloud-init created (Rancher's vSphere/AWS templates):
@@ -155,7 +167,7 @@ for u in $( { echo "${SUDO_USER:-}"; grep -hsE '^[^#]+ALL' /etc/sudoers.d/90-clo
     grep -hsE "^[[:space:]]*$g[[:space:]].*NOPASSWD" /etc/sudoers /etc/sudoers.d/* >/dev/null 2>&1 && np=yes
   done
   h=$(getent passwd "$u" 2>/dev/null | cut -d: -f6)
-  keys=$(grep -cE '^(ssh|ecdsa)-' "$h/.ssh/authorized_keys" 2>/dev/null)
+  keys=$(grep -cE '(^|[[:space:]])(ssh-|ecdsa-|sk-)[a-z0-9@.-]+[[:space:]]+AAAA' "$h/.ssh/authorized_keys" 2>/dev/null)
   echo "sudo|$u|nopasswd=$np|keys=${keys:-0}"
 done
 sec PROXY
@@ -313,19 +325,35 @@ if [ -z "$CRICTL" ]; then echo "crictl=missing"; elif [ -n "$R" ]; then
 fi
 fi
 if [ "__JOURNAL__" = 1 ]; then
+sec AVCDENY
+# SELinux denials (AVC/USER_AVC, today): count|last_epoch|comm|scontext type|tcontext type|tclass,
+# record types matched after a blank (name_format prefixes "node=<host> ")
+if command -v ausearch >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" != Disabled ]; then
+  timeout 20 ausearch -m AVC,USER_AVC -ts today --raw --input-logs </dev/null 2>/dev/null | awk '
+    /(^| )type=(USER_)?AVC / && / denied / {
+      ts=""; if (match($0,/audit\([0-9.]+:/)) ts=substr($0,RSTART+6,RLENGTH-7)
+      c="?"; if (match($0,/comm="[^"]*"/)) c=substr($0,RSTART+6,RLENGTH-7)
+      sc="?"; if (match($0,/scontext=[^ ]*/)) { split(substr($0,RSTART+9,RLENGTH-9),a,":"); sc=a[3] }
+      tc="?"; if (match($0,/tcontext=[^ ]*/)) { split(substr($0,RSTART+9,RLENGTH-9),a,":"); tc=a[3] }
+      cl="?"; if (match($0,/tclass=[^ ]*/)) cl=substr($0,RSTART+7,RLENGTH-7)
+      k=c "|" sc "|" tc "|" cl; n[k]++; if (ts+0>last[k]) last[k]=ts+0 }
+    END { for (k in n) print n[k] "|" int(last[k]) "|" k }' | sort -t'|' -k1,1nr | head -20
+fi
 sec FAPDENY
 # fapolicyd denials land in the audit log as FANOTIFY records (resp=2); the
 # SYSCALL/PATH records of the same event name the program and the file.
-# count|last_epoch|exe|path, most frequent first.
+# count|last_epoch|exe|path, most frequent first. With name_format set in
+# auditd.conf (the STIG does) every record starts with "node=<host> ", so the
+# record types are matched after a blank, not at the start of the line.
 if { [ -L /run/systemd/units/invocation:fapolicyd.service ] || [ -e /run/systemd/units/invocation:fapolicyd.service ]; } && command -v ausearch >/dev/null 2>&1; then
   # --input-logs and </dev/null: ausearch reads events from stdin when stdin
   # is a pipe, and this script arrives on stdin (sh -s) - it would swallow
   # the rest of the probe
   timeout 20 ausearch -m FANOTIFY -ts today --raw --input-logs </dev/null 2>/dev/null | awk '
     { if (match($0,/audit\([0-9.]+:[0-9]+\)/)) { id=substr($0,RSTART+6,RLENGTH-7); split(id,tt,":"); ts=tt[1]; sn=tt[2] } else next }
-    /^type=FANOTIFY/ { if (match($0,/resp=[0-9]+/) && substr($0,RSTART+5,RLENGTH-5)=="2") { deny[sn]=1; when[sn]=ts } }
-    /^type=SYSCALL/ { if (match($0,/exe="[^"]*"/)) exe[sn]=substr($0,RSTART+5,RLENGTH-6) }
-    /^type=PATH/ { if (!(sn in path) && match($0,/name="[^"]*"/)) path[sn]=substr($0,RSTART+6,RLENGTH-7) }
+    /(^| )type=FANOTIFY / { if (match($0,/resp=[0-9]+/) && substr($0,RSTART+5,RLENGTH-5)=="2") { deny[sn]=1; when[sn]=ts } }
+    /(^| )type=SYSCALL / { if (match($0,/exe="[^"]*"/)) exe[sn]=substr($0,RSTART+5,RLENGTH-6) }
+    /(^| )type=PATH / { if (!(sn in path) && match($0,/name="[^"]*"/)) path[sn]=substr($0,RSTART+6,RLENGTH-7) }
     END { for (s in deny) { k=exe[s] "|" path[s]; n[k]++; if (when[s]>last[k]) last[k]=when[s] } for (k in n) print n[k] "|" int(last[k]) "|" k }' | sort -t'|' -k1,1nr | head -20
 fi
 fi

@@ -134,7 +134,10 @@ func (c *Client) cephInfo(ctx context.Context) *CephInfo {
 // telemetry, old crashes) last.
 func cephCheckWeight(name string) int {
 	switch {
-	case strings.HasPrefix(name, "PG_AVAILABILITY"), strings.HasPrefix(name, "OSD_FULL"), strings.HasPrefix(name, "POOL_FULL"), strings.HasPrefix(name, "MON_DOWN"), strings.HasPrefix(name, "MDS_ALL_DOWN"), strings.HasPrefix(name, "OSD_NEARFULL"), strings.HasPrefix(name, "OSD_BACKFILLFULL"):
+	// MON_DOWN is only reported while the remaining monitors hold quorum
+	// (without it nothing answers ceph health), and NEARFULL is the 85%
+	// early warning: both are warnings, I/O continues
+	case strings.HasPrefix(name, "PG_AVAILABILITY"), strings.HasPrefix(name, "OSD_FULL"), strings.HasPrefix(name, "POOL_FULL"), strings.HasPrefix(name, "MDS_ALL_DOWN"), strings.HasPrefix(name, "OSD_BACKFILLFULL"):
 		return 0
 	case strings.HasPrefix(name, "OSD_"), strings.HasPrefix(name, "PG_"), strings.HasPrefix(name, "MDS_"), strings.HasPrefix(name, "OBJECT_"), strings.HasPrefix(name, "MON_"), strings.HasPrefix(name, "MGR_"):
 		return 1
@@ -163,7 +166,8 @@ func (ci *CephInfo) Unhealthy() []CephResource {
 	var out []CephResource
 	for _, l := range [][]CephResource{ci.Pools, ci.Filesys, ci.Stores} {
 		for _, r := range l {
-			if !strings.EqualFold(r.Phase, "Ready") {
+			// external clusters' resources report Connected when healthy
+			if !strings.EqualFold(r.Phase, "Ready") && !strings.EqualFold(r.Phase, "Connected") {
 				out = append(out, r)
 			}
 		}

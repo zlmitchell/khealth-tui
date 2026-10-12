@@ -286,6 +286,7 @@ type Thresholds struct {
 	LoadPerCPUWarn  float64       `yaml:"load_per_cpu_warn"`
 	RestartWarn     int32         `yaml:"restart_warn"`
 	PendingPodAge   time.Duration `yaml:"pending_pod_age"`
+	StuckDeletion   time.Duration `yaml:"stuck_deletion"` // pods, namespaces, PVCs, PVs still terminating after this long
 	CertExpiryWarn  time.Duration `yaml:"cert_expiry_warn"`
 	ClockSkewWarn   time.Duration `yaml:"clock_skew_warn"`
 	EtcdDBWarnPct   int           `yaml:"etcd_db_warn_pct"`
@@ -328,6 +329,7 @@ func Default() Config {
 			LoadPerCPUWarn:  2.0,
 			RestartWarn:     5,
 			PendingPodAge:   5 * time.Minute,
+			StuckDeletion:   10 * time.Minute,
 			CertExpiryWarn:  30 * 24 * time.Hour,
 			ClockSkewWarn:   5 * time.Second,
 			EtcdDBWarnPct:   80,

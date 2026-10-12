@@ -38,13 +38,15 @@ func evalSnapshotConfigMap(in Input, add func(Severity, string, string, string, 
 	servers = max(servers, 1)
 	// retention and targets from the servers' config.yaml (probes), else
 	// the rke2 defaults: 5 local, S3 doubles it
-	retention, s3 := 5, false
+	// servers may disagree; the largest retention is what the steady state
+	// allows (and does not depend on map order)
+	retention, s3, set := 5, false, false
 	for _, ni := range in.Nodes {
 		if ni == nil || ni.Err != nil || !ni.ControlPlane {
 			continue
 		}
-		if v, err := strconv.Atoi(strings.TrimSpace(ni.Settings["etcd-snapshot-retention"])); err == nil && v > 0 {
-			retention = v
+		if v, err := strconv.Atoi(strings.TrimSpace(ni.Settings["etcd-snapshot-retention"])); err == nil && v > 0 && (!set || v > retention) {
+			retention, set = v, true
 		}
 		if ni.Settings["etcd-s3"] == "true" {
 			s3 = true
@@ -62,9 +64,27 @@ func evalSnapshotConfigMap(in Input, add func(Severity, string, string, string, 
 	steady := servers * retention * targets
 
 	// what is piling up: per node, and for nodes that are gone
+	// S3 copies are recorded under the node name "s3", not the server that
+	// took them: they are one cluster-wide set with their own retention
 	perNode := map[string]int{}
+	s3Records := 0
 	for i := range s.RKE2Snapshots {
+		if s.RKE2Snapshots[i].S3 || s.RKE2Snapshots[i].Node == "s3" {
+			s3Records++
+			continue
+		}
 		perNode[s.RKE2Snapshots[i].Node]++
+	}
+	s3Retention := 0
+	for _, ni := range in.Nodes {
+		if ni != nil && ni.Err == nil && ni.ControlPlane {
+			if v, err := strconv.Atoi(strings.TrimSpace(ni.Settings["etcd-s3-retention"])); err == nil && v > s3Retention {
+				s3Retention = v
+			}
+		}
+	}
+	if s3Retention == 0 {
+		s3Retention = retention
 	}
 	var over, gone []string
 	for _, n := range strutil.SortedKeys(perNode) {
@@ -72,9 +92,12 @@ func evalSnapshotConfigMap(in Input, add func(Severity, string, string, string, 
 		switch {
 		case n != "" && !current[n]:
 			gone = append(gone, fmt.Sprintf("%s (%d)", n, c))
-		case c > retention*targets+1:
-			over = append(over, fmt.Sprintf("%s (%d, retention allows %d)", n, c, retention*targets))
+		case c > retention+1:
+			over = append(over, fmt.Sprintf("%s (%d, retention allows %d)", n, c, retention))
 		}
+	}
+	if s3Records > s3Retention*servers+1 {
+		over = append(over, fmt.Sprintf("S3 (%d, retention allows %d per server)", s3Records, s3Retention))
 	}
 	sort.Strings(over)
 	piling := len(gone) > 0 || len(over) > 0 || cm.Entries > steady*3/2+2

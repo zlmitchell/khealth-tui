@@ -79,14 +79,11 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 	fapActive := p.Units["fapolicyd.service"].Active || strings.HasPrefix(ni.ServiceState("fapolicyd"), "active")
 	if fapActive && p.Probed {
 		fa := p.Fapolicyd
-		var covered bool
+		_, covered := fa.Covers(dataDir)
 		var ruleFiles []string
 		for _, r := range fa.K8sRules {
-			file, rule, _ := strings.Cut(r, ":")
+			file, _, _ := strings.Cut(r, ":")
 			ruleFiles = append(ruleFiles, file)
-			if d := ruleDir(rule); d != "" && (strings.HasPrefix(dataDir+"/", d) || strings.HasPrefix(dataDir, strings.TrimSuffix(d, "/"))) {
-				covered = true
-			}
 		}
 		rulesFile := v.FapolicydFile
 		if i := strings.LastIndex(rulesFile, "/"); i >= 0 {
@@ -100,7 +97,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		case len(fa.K8sRules) == 0:
 			add(SevCrit, "node", name, "fapolicyd is enforcing but no rules.d rule allows the "+v.Name+" paths: containerd-shim/runc under "+dataDir+" are denied ('operation not permitted') and pods stay ContainerCreating", "write "+v.FapolicydFile+" with 'allow perm=any all : dir=<dir>' for "+strings.Join(v.FapolicydDirs, " ")+", then fagenrules --load && systemctl restart fapolicyd")
 		case !covered:
-			add(SevCrit, "node", name, "fapolicyd rules allow /var/lib/rancher but data-dir is "+dataDir+": "+v.Binaries+" there are denied", "add 'allow perm=any all : dir="+dataDir+"/' to "+v.FapolicydFile+"; fagenrules --load; systemctl restart fapolicyd")
+			add(SevCrit, "node", name, "fapolicyd rules allow the default "+v.Name+" paths but data-dir is "+dataDir+": "+v.Binaries+" there are denied", "add 'allow perm=any all : dir="+dataDir+"/' to "+v.FapolicydFile+"; fagenrules --load; systemctl restart fapolicyd")
 		case fa.CompiledK8s == 0:
 			add(SevCrit, "node", name, "fapolicyd rules.d has the "+v.Name+" rules but compiled.rules does not: fagenrules --load never ran, the daemon enforces the old rule set", "fagenrules --load && systemctl restart fapolicyd")
 		default:
@@ -147,11 +144,16 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				}
 			}
 			if top != nil {
-				ago := ""
+				ago, sev := "", SevCrit
 				if !top.Last.IsZero() {
 					ago = " (last " + strutil.HumanDur(in.Now.Sub(top.Last)) + " ago)"
+					// the count runs from midnight: an hour without a new
+					// denial means the rule is likely fixed already
+					if in.Now.Sub(top.Last) > time.Hour {
+						sev = SevWarn
+					}
 				}
-				add(SevCrit, "node", name, fmt.Sprintf("fapolicyd denied %d executions of %s/CSI binaries today, e.g. %s -> %s%s", k8sCount, v.Name, top.Exe, top.Path, ago), "ausearch -m FANOTIFY -ts today -i; add the path to "+v.FapolicydFile+" and fagenrules --load")
+				add(sev, "node", name, fmt.Sprintf("fapolicyd denied %d executions of %s/CSI binaries today, e.g. %s -> %s%s", k8sCount, v.Name, top.Exe, top.Path, ago), "ausearch -m FANOTIFY -ts today -i; add the path to "+v.FapolicydFile+" and fagenrules --load")
 			} else if other > 0 {
 				add(SevInfo, "security", name, fmt.Sprintf("fapolicyd denied %d executions today (none under %s paths)", other, v.Name), "ausearch -m FANOTIFY -ts today -i")
 			}
@@ -163,8 +165,12 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		if !p.CSI.ISCSID {
 			add(SevWarn, "storage", name, "Longhorn CSI is registered but iscsid is not running: v1 volumes cannot attach on this node", "install open-iscsi / iscsi-initiator-utils and systemctl enable --now iscsid")
 		}
-		if p.Units["multipathd.service"].Active && p.CSI.MultipathBlacklist <= 0 {
-			add(SevWarn, "storage", name, "multipathd is running without a blacklist while Longhorn is installed: multipath claims Longhorn block devices and volumes fail to mount", "blacklist Longhorn devices in /etc/multipath.conf (devnode \"^sd[a-z0-9]+\") or disable multipathd; see Longhorn troubleshooting")
+		// find_multipaths yes/strict: multipathd only claims devices with a
+		// second path or a known WWID, never a single-path Longhorn disk
+		fm := strings.ToLower(p.CSI.FindMultipaths)
+		safeFind := fm == "yes" || fm == "on" || fm == "strict"
+		if p.Units["multipathd.service"].Active && p.CSI.MultipathBlacklist <= 0 && !safeFind {
+			add(SevWarn, "storage", name, "multipathd is running without a blacklist (find_multipaths "+strutil.FirstNonEmpty(p.CSI.FindMultipaths, "unset")+") while Longhorn is installed: multipath claims Longhorn block devices and volumes fail to mount", `blacklist only Longhorn's iSCSI disks in /etc/multipath.conf: blacklist { device { vendor "IET" product "VIRTUAL-DISK" } }, then systemctl reload multipathd (a devnode "^sd" blacklist would also drop SAN LUNs that need multipath); or disable multipathd if nothing uses it`)
 		}
 	}
 
@@ -188,13 +194,16 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 			freeMB := m.AvailKB / 1024
 			keep := strings.EqualFold(p.Auditd["max_log_file_action"], "keep_logs")
 			var actions []string
-			for _, k := range []string{"admin_space_left_action", "disk_full_action", "disk_error_action"} {
+			for _, k := range []string{"admin_space_left_action", "disk_full_action"} { // disk_error_action is about I/O errors, not space
 				if fatal(k) {
 					actions = append(actions, k+"="+p.Auditd[k])
 				}
 			}
 			if len(actions) > 0 {
-				near := m.UsePct >= thr.DiskWarnPct || (adminMB > 0 && freeMB < adminMB*4) || (spaceMB > 0 && freeMB < spaceMB*2)
+				// space_left already passed, or within twice admin_space_left
+				// (STIG space_left=25% would otherwise make every node "near"
+				// at half full)
+				near := m.UsePct >= thr.DiskWarnPct || (adminMB > 0 && freeMB < adminMB*2) || (spaceMB > 0 && freeMB < spaceMB)
 				msg := fmt.Sprintf("auditd %s: the node halts or drops to single-user when %s runs out of space (%s free, %d%% used, admin_space_left=%s)", strings.Join(actions, ","), m.Mountpoint, strutil.HumanBytes(float64(freeMB)*1024*1024), m.UsePct, p.Auditd["admin_space_left"])
 				hint := "rotate/archive audit logs, grow the partition, or set the actions to syslog/rotate"
 				if keep {
@@ -225,7 +234,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				sev = SevWarn
 				what = "pod volumes under /var/lib/kubelet cannot hold executables (init scripts, helper binaries)"
 			}
-			add(sev, "node", name, fmt.Sprintf("%s is on %s mounted noexec: %s", path, m.Mountpoint, what), "remount without noexec or give "+path+" its own mount; STIG only requires noexec on /tmp, /var/tmp, /dev/shm and removable media")
+			add(sev, "node", name, fmt.Sprintf("%s is on %s mounted noexec: %s", path, m.Mountpoint, what), "remount without noexec or give "+path+" its own mount; the STIG requires noexec on /tmp, /var/tmp, /dev/shm, /var/log, /var/log/audit, /boot and home directories, not on /var, the data-dir or /var/lib/kubelet")
 		}
 	}
 
@@ -285,14 +294,29 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 				add(SevInfo, "security", name, "password of ssh user "+a.Name+" is locked: key logins work, password sudo does not", "keep NOPASSWD sudo for this account")
 			}
 		}
-		for user, n := range p.Faillock {
-			if p.FaillockDeny > 0 && n >= p.FaillockDeny {
-				sev := SevWarn
-				if user == sshUser {
-					sev = SevCrit
-				}
-				add(sev, "security", name, fmt.Sprintf("%s is locked out by pam_faillock (%d failed attempts, deny=%d)", user, n, p.FaillockDeny), "faillock --user "+user+" --reset; find the client retrying with stale credentials")
+		for _, user := range strutil.SortedKeys(p.Faillock) {
+			n := p.Faillock[user]
+			if p.FaillockDeny <= 0 || n < p.FaillockDeny {
+				continue
 			}
+			// unlock_time passed since the newest failure: unlocked again
+			unlock := p.FaillockUnlock
+			if unlock < 0 {
+				unlock = 600 // pam_faillock's default
+			}
+			if age := p.FaillockAge[user]; unlock > 0 && age >= 0 && age > unlock {
+				continue
+			}
+			msg := fmt.Sprintf("%s is locked out by pam_faillock (%d failed attempts, deny=%d)", user, n, p.FaillockDeny)
+			if user == sshUser {
+				// this probe got in: key login and its sudo work, password
+				// and console logins (and password sudo) are what is refused
+				msg += ": password and console logins are refused (key login works, it ran this probe)"
+			}
+			if unlock > 0 {
+				msg += fmt.Sprintf("; unlocks %ds after the last failure", unlock)
+			}
+			add(SevWarn, "security", name, msg, "faillock --user "+user+" --reset; find the client retrying with stale credentials")
 		}
 		// the provisioning user cloud-init created for Rancher: it must not be
 		// subject to STIG password aging (no password, key auth) and must keep
@@ -348,36 +372,66 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 	}
 
 	// ---- proxies ----
+	// HTTP(S)_PROXY in the unit's environment reaches the supervisor, the
+	// kubelet and containerd; CONTAINERD_* reach containerd (image pulls)
+	// alone; /etc/environment is read by login shells, never by a unit
 	if p.Probed && len(p.Proxy) > 0 {
-		var proxySet, noProxy []string
-		var files []string
+		type group struct{ set, noProxy, files []string }
+		var svc, ctrd, shell group
 		for _, l := range p.Proxy {
-			switch l.Key {
-			case "HTTP_PROXY", "HTTPS_PROXY", "CONTAINERD_HTTP_PROXY", "CONTAINERD_HTTPS_PROXY":
+			g := &svc
+			switch {
+			case l.File == "/etc/environment":
+				g = &shell
+			case strings.HasPrefix(l.Key, "CONTAINERD_"):
+				g = &ctrd
+			}
+			switch strings.TrimPrefix(l.Key, "CONTAINERD_") {
+			case "HTTP_PROXY", "HTTPS_PROXY":
 				if l.Value != "" {
-					proxySet = append(proxySet, l.Key)
-					files = append(files, l.File)
+					g.set = append(g.set, l.Key)
+					g.files = append(g.files, l.File)
 				}
-			case "NO_PROXY", "CONTAINERD_NO_PROXY":
-				noProxy = append(noProxy, strings.Split(l.Value, ",")...)
+			case "NO_PROXY":
+				g.noProxy = append(g.noProxy, strings.Split(l.Value, ",")...)
 			}
 		}
-		if len(proxySet) > 0 {
-			if len(noProxy) == 0 {
-				add(SevWarn, "node", name, strings.Join(strutil.Uniq(proxySet), ",")+" set in "+strutil.Uniq(files)[0]+" without NO_PROXY: node-to-node traffic (supervisor 9345, kubelet 10250, etcd) goes through the proxy", "add NO_PROXY=127.0.0.0/8,<node CIDRs>,<cluster/service CIDRs>,.svc,.cluster.local")
-			} else if in.Snap != nil {
-				var uncovered []string
-				for i := range in.Snap.Nodes {
-					for _, ad := range in.Snap.Nodes[i].Status.Addresses {
-						if ad.Type == corev1.NodeInternalIP && !noProxyCovers(noProxy, ad.Address) {
-							uncovered = append(uncovered, ad.Address)
-						}
+		uncovered := func(noProxy []string) []string {
+			var out []string
+			if in.Snap == nil {
+				return nil
+			}
+			for i := range in.Snap.Nodes {
+				for _, ad := range in.Snap.Nodes[i].Status.Addresses {
+					if ad.Type == corev1.NodeInternalIP && !noProxyCovers(noProxy, ad.Address) {
+						out = append(out, ad.Address)
 					}
 				}
-				if len(uncovered) > 0 {
-					add(SevWarn, "node", name, fmt.Sprintf("NO_PROXY does not cover node IPs %s: supervisor/kubelet/etcd traffic to them goes through the proxy", strutil.TruncList(uncovered, 4)), "add the node subnet to NO_PROXY in "+strutil.Uniq(files)[0]+" and "+v.Restart(ni.ControlPlane))
-				}
 			}
+			return out
+		}
+		check := func(g group, what, noProxyKey string) {
+			if len(g.set) == 0 {
+				return
+			}
+			file := strutil.Uniq(g.files)[0]
+			if len(g.noProxy) == 0 {
+				add(SevWarn, "node", name, strings.Join(strutil.Uniq(g.set), ",")+" set in "+file+" without NO_PROXY: "+what+" go through the proxy", "add "+noProxyKey+"=127.0.0.0/8,<node CIDRs>,<cluster/service CIDRs>,.svc,.cluster.local to "+file+" and "+v.Restart(ni.ControlPlane))
+			} else if u := uncovered(g.noProxy); len(u) > 0 {
+				add(SevWarn, "node", name, fmt.Sprintf("NO_PROXY in %s does not cover node IPs %s: %s to them go through the proxy", file, strutil.TruncList(u, 4), what), "add the node subnet to "+noProxyKey+" in "+file+" and "+v.Restart(ni.ControlPlane))
+			}
+		}
+		check(svc, "node-to-node connections (supervisor 9345, kubelet 10250, etcd)", "NO_PROXY")
+		if len(ctrd.noProxy) == 0 && len(ctrd.set) > 0 {
+			ctrd.noProxy = svc.noProxy // without CONTAINERD_NO_PROXY containerd takes NO_PROXY
+		}
+		check(ctrd, "containerd's image pulls from in-cluster and node-local registries", "CONTAINERD_NO_PROXY")
+		if len(shell.set) > 0 && len(svc.set)+len(ctrd.set) == 0 {
+			unit := v.Agent
+			if ni.ControlPlane || unit == "" {
+				unit = v.Server
+			}
+			add(SevInfo, "node", name, strings.Join(strutil.Uniq(shell.set), ",")+" set in /etc/environment only: login shells use it, "+unit+" and containerd do not (systemd units never read that file)", "if the cluster's traffic needs the proxy, set it in /etc/default/"+unit+" (Debian/Ubuntu) or /etc/sysconfig/"+unit+" (RHEL) with NO_PROXY")
 		}
 	}
 
@@ -481,7 +535,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		if ni.Settings["selinux"] == "true" {
 			sev = SevCrit
 		}
-		if missing["container-selinux"] || (ni.Dist == "rke2" && missing["rke2-selinux"]) || (ni.Dist == "k3s" && missing["k3s-selinux"]) {
+		if missing["container-selinux"] || (v.Name == "rke2" && missing["rke2-selinux"]) || (v.Name == "k3s" && missing["k3s-selinux"]) {
 			add(sev, "node", name, "SELinux is enforcing but the "+ni.Dist+"-selinux/container-selinux policy packages are not installed: containers and the runtime run with the wrong labels and get denied", "dnf install "+ni.Dist+"-selinux container-selinux from the rancher repo (or use the RPM install), then restart "+ni.Dist)
 		}
 		// a Rancher-provisioned node also runs rancher-system-agent, which
@@ -493,7 +547,7 @@ func evalPreflight(name string, ni *nodeinfo.Info, in Input, add func(Severity, 
 		// not - selinux: true is what makes containerd label containers
 		// (container_t with MCS categories); without it they run unconfined
 		// however hardened the host looks
-		if !missing["container-selinux"] && !missing[ni.Dist+"-selinux"] && ni.Settings["selinux"] != "true" {
+		if !missing["container-selinux"] && !missing[v.Name+"-selinux"] && ni.Settings["selinux"] != "true" {
 			add(SevWarn, "node", name, "SELinux is enforcing and the policy packages are installed, but "+v.ConfigName+" has no selinux: true: containerd runs the pods unconfined (no container_t label), the host policy protects "+ni.Dist+" only", "add selinux: true to "+v.ConfigFile+" and restart "+v.Server+" / "+v.Agent+" (one node at a time; pods restart with labels)")
 		}
 	}

@@ -17,42 +17,46 @@ import (
 // rest comes with the config tier (Probed); Denies and Pulls with the
 // heavy tier.
 type Preflight struct {
-	Swaps         []SwapDev
-	Units         map[string]PFUnit // NetworkManager, nm-cloud-setup, vmtoolsd, cloud-init, multipathd, fapolicyd, auditd, firewalld
-	Probed        bool
-	FstabSwap     []string
-	FailSwapOn    string // kubelet config failSwapOn from the drop-ins ("" when not set: upstream default true)
-	SwapBehavior  string // kubelet memorySwap.swapBehavior
-	MountOpts     []MountOpt
-	Modprobe      []ModprobeLine  // install/blacklist lines from modprobe.d for the modules that matter
-	Modules       map[string]bool // loaded kernel modules among the ones that matter
-	Virt          VirtInfo
-	CloudInit     CloudInit
-	Fapolicyd     Fapolicyd
-	Auditd        map[string]string // auditd.conf keys
-	Accounts      []Account
-	SudoUser      string // the ssh user (SUDO_USER on the node)
-	Today         int    // days since the epoch on the node
-	LoginDefs     map[string]string
-	Faillock      map[string]int // user -> valid failed attempts
-	FaillockDeny  int
-	Proxy         []ProxyLine
-	Iptables      string
-	SEPkgs        []string // rpm -q rke2-selinux k3s-selinux container-selinux rancher-selinux
-	NMUnmanaged   []string
-	RegProbes     []RegProbe
-	RegFiles      []RegFile
-	CurlMissing   bool
-	Denies        []FapDeny // fapolicyd denials from the audit log (heavy)
-	DeniesProbed  bool
-	Pulls         []RegPull // crictl pull dry run per mirrored registry (heavy)
-	PullsProbed   bool
-	CrictlMissing bool // no crictl on the node: the pull dry run did not happen
-	CSI           CSIInfo
-	CIUsers       []string            // users cloud-init created (sudoers.d/90-cloud-init-users)
-	CIDefault     string              // default_user from /etc/cloud/cloud.cfg
-	Sudo          map[string]SudoInfo // ssh user and cloud-init users
-	VCenters      []VCenterProbe
+	Swaps          []SwapDev
+	Units          map[string]PFUnit // NetworkManager, nm-cloud-setup, vmtoolsd, cloud-init, multipathd, fapolicyd, auditd, firewalld
+	Probed         bool
+	FstabSwap      []string
+	FailSwapOn     string // kubelet config failSwapOn from the drop-ins ("" when not set: upstream default true)
+	SwapBehavior   string // kubelet memorySwap.swapBehavior
+	MountOpts      []MountOpt
+	Modprobe       []ModprobeLine  // install/blacklist lines from modprobe.d for the modules that matter
+	Modules        map[string]bool // loaded kernel modules among the ones that matter
+	Virt           VirtInfo
+	CloudInit      CloudInit
+	Fapolicyd      Fapolicyd
+	Auditd         map[string]string // auditd.conf keys
+	Accounts       []Account
+	SudoUser       string // the ssh user (SUDO_USER on the node)
+	Today          int    // days since the epoch on the node
+	LoginDefs      map[string]string
+	Faillock       map[string]int // user -> valid failed attempts
+	FaillockAge    map[string]int // user -> seconds since the newest failure (-1 unknown)
+	FaillockDeny   int            // faillock.conf deny, else the PAM line's deny=, else pam_faillock's default 3
+	FaillockUnlock int            // unlock_time seconds; 0 = locked until an admin resets it, -1 unset (pam default 600)
+	Proxy          []ProxyLine
+	Iptables       string
+	SEPkgs         []string // rpm -q rke2-selinux k3s-selinux container-selinux rancher-selinux
+	NMUnmanaged    []string
+	RegProbes      []RegProbe
+	RegFiles       []RegFile
+	CurlMissing    bool
+	Denies         []FapDeny // fapolicyd denials from the audit log (heavy)
+	DeniesProbed   bool
+	AVCs           []AVCDeny // SELinux denials from the audit log (journal tier)
+	AVCsProbed     bool
+	Pulls          []RegPull // crictl pull dry run per mirrored registry (heavy)
+	PullsProbed    bool
+	CrictlMissing  bool // no crictl on the node: the pull dry run did not happen
+	CSI            CSIInfo
+	CIUsers        []string            // users cloud-init created (sudoers.d/90-cloud-init-users)
+	CIDefault      string              // default_user from /etc/cloud/cloud.cfg
+	Sudo           map[string]SudoInfo // ssh user and cloud-init users
+	VCenters       []VCenterProbe
 }
 
 // CSIInfo is what storage drivers left on the host: the CSI node plugins
@@ -71,6 +75,7 @@ type CSIInfo struct {
 	// gave up on is the split-brain case.
 	LonghornDevs  []string
 	ISCSISessions []ISCSISession
+	DevsProbed    bool // LonghornDevs/ISCSISessions come from this probe (every refresh), not a carried config tier
 }
 
 // ISCSISession is one entry of /sys/class/iscsi_session.
@@ -337,6 +342,14 @@ func parsePreflight(info *Info, secs map[string]string) {
 			p.Units[f[0]] = PFUnit{Active: f[1] == "active", Enabled: f[2] == "enabled"}
 		}
 	}
+	// Longhorn devices and iSCSI sessions: every refresh (LHDEV)
+	if lines, ok := secs["LHDEV"]; ok {
+		p.CSI.DevsProbed = true
+		for _, l := range nonEmpty(lines) {
+			k, v, _ := strings.Cut(l, "=")
+			parseLonghornDev(&p.CSI, k, v)
+		}
+	}
 	if _, ok := secs["MOUNTOPTS"]; !ok {
 		parseHeavy(p, secs)
 		return
@@ -460,18 +473,17 @@ func parsePreflight(info *Info, secs map[string]string) {
 		case "dir":
 			p.CSI.HostDirs = append(p.CSI.HostDirs, strings.TrimSpace(v))
 		case "iscsid":
-			p.CSI.ISCSID = v == "active"
+			p.CSI.ISCSID = p.CSI.ISCSID || v == "active" || v == "socket"
 		case "multipath_blacklist":
 			p.CSI.MultipathBlacklist = strutil.AtoiOr(v, 0)
 		case "find_multipaths":
 			p.CSI.FindMultipaths = strings.TrimSpace(v)
 		case "mount_nfs":
 			p.CSI.MountNFS = v == "yes"
-		case "lhdev":
-			p.CSI.LonghornDevs = append(p.CSI.LonghornDevs, strings.TrimSpace(v))
-		case "iscsi":
-			t, st, _ := strings.Cut(strings.TrimSpace(v), "|")
-			p.CSI.ISCSISessions = append(p.CSI.ISCSISessions, ISCSISession{Target: t, State: st})
+		case "lhdev", "iscsi": // bundles from before LHDEV carry them here
+			if !p.CSI.DevsProbed {
+				parseLonghornDev(&p.CSI, k, v)
+			}
 		}
 	}
 	p.Auditd = kvLines(secs["AUDITD"])
@@ -488,7 +500,14 @@ func parsePreflight(info *Info, secs map[string]string) {
 		p.LoginDefs["INACTIVE"] = v
 	}
 	p.FaillockDeny = strutil.AtoiOr(acc["faillock_deny"], 0)
-	p.Faillock = map[string]int{}
+	if p.FaillockDeny == 0 {
+		p.FaillockDeny = strutil.AtoiOr(acc["faillock_deny_pam"], 0)
+	}
+	if _, ok := acc["faillock_deny"]; ok && p.FaillockDeny == 0 {
+		p.FaillockDeny = 3 // pam_faillock's default
+	}
+	p.FaillockUnlock = strutil.AtoiOr(acc["faillock_unlock"], -1)
+	p.Faillock, p.FaillockAge = map[string]int{}, map[string]int{}
 	p.CIDefault = acc["ci_default"]
 	p.Sudo = map[string]SudoInfo{}
 	for _, l := range nonEmpty(secs["ACCOUNTS"]) {
@@ -497,8 +516,12 @@ func parsePreflight(info *Info, secs map[string]string) {
 		case f[0] == "user" && len(f) == 11:
 			a := Account{Name: f[1], UID: strutil.AtoiOr(f[2], -1), Shell: f[3], PW: f[4], LastChange: strutil.AtoiOr(f[5], -1), Min: strutil.AtoiOr(f[6], -1), Max: strutil.AtoiOr(f[7], -1), Warn: strutil.AtoiOr(f[8], -1), Inactive: strutil.AtoiOr(f[9], -1), Expire: strutil.AtoiOr(f[10], -1)}
 			p.Accounts = append(p.Accounts, a)
-		case f[0] == "faillock" && len(f) == 3:
+		case f[0] == "faillock" && (len(f) == 3 || len(f) == 4):
 			p.Faillock[f[1]] = strutil.AtoiOr(f[2], 0)
+			p.FaillockAge[f[1]] = -1
+			if len(f) == 4 {
+				p.FaillockAge[f[1]] = strutil.AtoiOr(f[3], -1)
+			}
 		case strings.HasPrefix(f[0], "ci_user="):
 			p.CIUsers = append(p.CIUsers, strings.TrimPrefix(f[0], "ci_user="))
 		case f[0] == "sudo" && len(f) == 4:
@@ -546,6 +569,20 @@ func parsePreflight(info *Info, secs map[string]string) {
 
 // parseHeavy reads the heavy-tier sections of preflight.sh.
 func parseHeavy(p *Preflight, secs map[string]string) {
+	if s, ok := secs["AVCDENY"]; ok {
+		p.AVCsProbed = true
+		for _, l := range nonEmpty(s) {
+			f := strings.Split(l, "|")
+			if len(f) != 6 {
+				continue
+			}
+			a := AVCDeny{Count: strutil.AtoiOr(f[0], 0), Comm: f[2], SType: f[3], TType: f[4], Class: f[5]}
+			if ts, err := strconv.ParseInt(f[1], 10, 64); err == nil && ts > 0 {
+				a.Last = time.Unix(ts, 0)
+			}
+			p.AVCs = append(p.AVCs, a)
+		}
+	}
 	if _, ok := secs["FAPDENY"]; ok {
 		parseFapDeny(p, secs["FAPDENY"])
 	}
@@ -604,10 +641,16 @@ func (p *Preflight) mergeConfig(prev *Preflight) {
 	}
 	swaps, units := p.Swaps, p.Units
 	denies, dp := p.Denies, p.DeniesProbed
+	avcs, ap := p.AVCs, p.AVCsProbed
 	pulls, pp, cm := p.Pulls, p.PullsProbed, p.CrictlMissing
+	devs, sessions, devsProbed := p.CSI.LonghornDevs, p.CSI.ISCSISessions, p.CSI.DevsProbed
 	*p = *prev
 	p.Swaps, p.Units = swaps, units
+	if devsProbed {
+		p.CSI.LonghornDevs, p.CSI.ISCSISessions, p.CSI.DevsProbed = devs, sessions, true
+	}
 	p.Denies, p.DeniesProbed = denies, dp
+	p.AVCs, p.AVCsProbed = avcs, ap
 	p.Pulls, p.PullsProbed, p.CrictlMissing = pulls, pp, cm
 }
 
@@ -617,6 +660,9 @@ func (p *Preflight) mergeTiers(prev *Preflight) {
 	}
 	if !p.DeniesProbed {
 		p.Denies, p.DeniesProbed = prev.Denies, prev.DeniesProbed
+	}
+	if !p.AVCsProbed {
+		p.AVCs, p.AVCsProbed = prev.AVCs, prev.AVCsProbed
 	}
 	if !p.PullsProbed {
 		p.Pulls, p.PullsProbed, p.CrictlMissing = prev.Pulls, prev.PullsProbed, prev.CrictlMissing
@@ -646,4 +692,14 @@ func (p *Preflight) MountOpt(path string) *MountOpt {
 		}
 	}
 	return best
+}
+
+func parseLonghornDev(c *CSIInfo, k, v string) {
+	switch k {
+	case "lhdev":
+		c.LonghornDevs = append(c.LonghornDevs, strings.TrimSpace(v))
+	case "iscsi":
+		t, st, _ := strings.Cut(strings.TrimSpace(v), "|")
+		c.ISCSISessions = append(c.ISCSISessions, ISCSISession{Target: t, State: st})
+	}
 }

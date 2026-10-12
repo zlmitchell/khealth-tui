@@ -48,6 +48,18 @@ func TestAddressChangeFindings(t *testing.T) {
 			t.Errorf("unexpected: %s", f.Message)
 		}
 	}
+	// dual-stack: one address per family, both held
+	in.Nodes["cp-1"] = node("cp-1", map[string]string{"node-ip": "10.0.0.191,fd00::1"}, "10.0.0.191", "fd00::1")
+	for _, f := range Evaluate(in) {
+		if strings.Contains(f.Message, "pins node-ip") {
+			t.Errorf("dual-stack node-ip held: %s", f.Message)
+		}
+	}
+	// dual-stack with the IPv6 address gone
+	in.Nodes["cp-1"] = node("cp-1", map[string]string{"node-ip": "10.0.0.191,fd00::9"}, "10.0.0.191", "fd00::1")
+	if f := findingWith(Evaluate(in), SevCrit, "node", "pins node-ip: fd00::9 but"); f == nil {
+		t.Error("dual-stack node-ip with a missing address not reported")
+	}
 	// a probe without addresses (older output) never second-guesses
 	in.Nodes["cp-1"] = node("cp-1", map[string]string{"node-ip": "10.0.0.143"})
 	for _, f := range Evaluate(in) {

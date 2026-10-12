@@ -14,6 +14,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -92,6 +93,15 @@ type Snapshot struct {
 	HelmReleases    []HelmRelease
 	Rancher         *RancherInfo
 	Upgrade         *UpgradeInfo // system-upgrade-controller plans; v2prov clusters on a management cluster (upgrade.go)
+
+	// control-plane plumbing (control.go); empty when the token cannot list it
+	Webhooks     []Webhook
+	ServiceReady map[string]int // "ns/service" -> ready endpoints (EndpointSlices); absent = no slices
+	APIServices  []APIService
+	CSRs         []CSR
+	PDBs         []policyv1.PodDisruptionBudget
+	APIMetrics   *APIMetrics  // apiserver /metrics: APF rejections, objects in storage (apimetrics.go)
+	CertManager  *CertManager // nil without cert-manager (certmanager.go)
 
 	Errors []string
 
@@ -505,6 +515,9 @@ func (c *Client) Fetch(ctx context.Context) *Snapshot {
 		mu.Unlock()
 		return nil
 	})
+	c.fetchControl(ctx, s, &mu, optional)
+	c.fetchAPIMetrics(ctx, s, &mu, optional)
+	c.fetchCertManager(ctx, s, &mu, optional)
 	run("readyz", func() error {
 		checks, err := c.healthz(ctx, "/readyz")
 		if err != nil {

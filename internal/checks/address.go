@@ -34,7 +34,7 @@ func evalAddresses(in Input, add func(Severity, string, string, string, string))
 				}
 			}
 		}
-		if ip := ni.Settings["node-ip"]; ip != "" && !ni.HasAddr(ip) {
+		for _, ip := range missingNodeIPs(ni) {
 			stale[ip] = name
 		}
 	}
@@ -44,8 +44,9 @@ func evalAddresses(in Input, add func(Severity, string, string, string, string))
 			continue
 		}
 		v := distro.For(ni.Dist)
-		if ip := ni.Settings["node-ip"]; ip != "" && !ni.HasAddr(ip) {
-			add(SevCrit, "node", name, fmt.Sprintf("%s pins node-ip: %s but the node holds %s: etcd and the kubelet bind their listeners to node-ip, so %s cannot come up (etcd: listen tcp %s:2380: bind: cannot assign requested address)", v.ConfigName, ip, strutil.TruncList(ni.Addrs, 3), v.Server, ip),
+		if missing := missingNodeIPs(ni); len(missing) > 0 {
+			ip := strings.Join(missing, ",")
+			add(SevCrit, "node", name, fmt.Sprintf("%s pins node-ip: %s but the node holds %s: etcd and the kubelet bind their listeners to node-ip, so %s cannot come up (etcd: listen tcp %s:2380: bind: cannot assign requested address)", v.ConfigName, ip, strutil.TruncList(ni.Addrs, 3), v.Server, missing[0]),
 				fmt.Sprintf("set node-ip to %s (or remove it) in %s and restart %s; the etcd tab's rescue rejoins the member under its new address (X > rejoin one server) - the cluster still lists the member at %s, which the rejoin removes", nodeinfo.FirstAddr(ni), v.ConfigFile, v.Server, ip))
 		}
 		srv := ni.Settings["server"]
@@ -77,4 +78,16 @@ func evalAddresses(in Input, add func(Severity, string, string, string, string))
 			add(SevInfo, "node", name, fmt.Sprintf("%s server: %s is no address of a known server node: a VIP / load balancer (fine), or a server that is gone", v.ConfigName, srv), "")
 		}
 	}
+}
+
+// missingNodeIPs: the node-ip entries the node does not hold. Dual-stack
+// nodes pin one address per family as a comma list (node-ip: 10.0.0.5,fd00::5).
+func missingNodeIPs(ni *nodeinfo.Info) []string {
+	var out []string
+	for _, ip := range strings.Split(ni.Settings["node-ip"], ",") {
+		if ip = strings.TrimSpace(ip); ip != "" && !ni.HasAddr(ip) {
+			out = append(out, ip)
+		}
+	}
+	return out
 }

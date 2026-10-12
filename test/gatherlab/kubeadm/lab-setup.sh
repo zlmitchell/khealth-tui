@@ -5,6 +5,11 @@
 set -e
 env1() { tr '\0' '\n' < /proc/1/environ | sed -n "s/^$1=//p" | head -1; }
 HEADROOM=$(env1 LAB_EVICT_HEADROOM_MI); HEADROOM=${HEADROOM:-3584}
+# LAB_EXTERNAL_ETCD=http://host:2379 (compose.kubeadm-extetcd.yaml): the
+# control plane uses that etcd instead of a stacked static pod
+EXTETCD=$(env1 LAB_EXTERNAL_ETCD)
+ETCD_CFG=""
+[ -n "$EXTETCD" ] && ETCD_CFG="etcd: {external: {endpoints: [\"$EXTETCD\"]}}"
 
 # a throwaway key pair in the shared out/: khealth logs in with out/id_lab
 if [ ! -s /out/id_lab ]; then
@@ -42,6 +47,7 @@ controlPlaneEndpoint: lab-node:6443
 apiServer:
   certSANs: [127.0.0.1, localhost, lab-node, kubeadm]
 networking: {podSubnet: 10.244.0.0/16, serviceSubnet: 10.96.0.0/16}
+$ETCD_CFG
 ---
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration

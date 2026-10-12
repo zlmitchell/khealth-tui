@@ -50,6 +50,9 @@ func evalVolumeAttachments(in Input, add func(Severity, string, string, string, 
 	usersOf := map[string][]user{}
 	for i := range s.Pods {
 		p := &s.Pods[i]
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue // a finished Job pod does not wait for the volume
+		}
 		for _, v := range p.Spec.Volumes {
 			if v.PersistentVolumeClaim == nil {
 				continue
@@ -145,13 +148,37 @@ func evalSnapshots(in Input, add func(Severity, string, string, string, string))
 	// the external snapshot-controller (rke2: rke2-snapshot-controller) turns
 	// VolumeSnapshots into contents; without it every snapshot stays pending
 	controller := false
+	idle := "" // a snapshot-controller Deployment with no available replica
 	for i := range s.Deployments {
-		if strings.Contains(s.Deployments[i].Name, "snapshot-controller") {
+		if !strings.Contains(s.Deployments[i].Name, "snapshot-controller") {
+			continue
+		}
+		// it has to run, not only exist (scaled to 0, crash-looping)
+		if s.Deployments[i].Status.AvailableReplicas == 0 {
+			idle = s.Deployments[i].Namespace + "/" + s.Deployments[i].Name
+		} else {
 			controller = true
 		}
 	}
 	if !controller && len(si.Snapshots) > 0 {
-		add(SevCrit, "storage", "snapshot-controller", fmt.Sprintf("%d VolumeSnapshots exist but no snapshot-controller Deployment runs: none of them will ever be taken", len(si.Snapshots)), "install the CSI external snapshot-controller (rke2: the rke2-snapshot-controller chart; upstream: kubernetes-csi/external-snapshotter deploy/kubernetes/snapshot-controller)")
+		// snapshots already taken stay usable; only the waiting ones and
+		// every new one are stuck
+		waiting := 0
+		for _, vs := range si.Snapshots {
+			if !vs.Ready && !vs.Deleting {
+				waiting++
+			}
+		}
+		hint := "install the CSI external snapshot-controller (rke2: the rke2-snapshot-controller chart; upstream: kubernetes-csi/external-snapshotter deploy/kubernetes/snapshot-controller)"
+		if idle != "" {
+			ns, name, _ := strings.Cut(idle, "/")
+			hint = "deployment " + idle + " has no available replica: kubectl -n " + ns + " get deploy " + name + "; scale it up or see why its pod does not run (kubectl -n " + ns + " describe deploy " + name + ")"
+		}
+		if waiting > 0 {
+			add(SevCrit, "storage", "snapshot-controller", fmt.Sprintf("%d VolumeSnapshots are waiting to be taken but no snapshot-controller Deployment runs: they never will be", waiting), hint)
+		} else {
+			add(SevWarn, "storage", "snapshot-controller", fmt.Sprintf("no snapshot-controller Deployment runs: the %d existing VolumeSnapshots stay usable, but new ones (backup jobs, Velero, Trident Protect) will never be taken", len(si.Snapshots)), hint)
+		}
 	}
 	for _, c := range si.Classes {
 		if !drivers[c.Driver] {
@@ -350,7 +377,8 @@ func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, 
 			if !n.Schedulable && n.AllowScheduling {
 				add(SevWarn, "storage", n.Name, "Longhorn cannot schedule replicas on the node: "+strutil.FirstNonEmpty(n.SchedulableMsg, "no schedulable disk"), "kubectl -n "+li.NS()+" describe nodes.longhorn.io "+n.Name)
 			}
-			for cname, c := range n.Conditions {
+			for _, cname := range strutil.SortedKeys(n.Conditions) {
+				c := n.Conditions[cname]
 				if c.Status {
 					continue
 				}
@@ -506,13 +534,20 @@ func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, 
 		if v.State == "attached" && v.Robustness != "unknown" && nodeDown(v.Node) {
 			add(SevCrit, "storage", obj, fmt.Sprintf("Longhorn volume %s is attached on %s which is NotReady%s", v.Name, v.Node, pods), "see the VolumeAttachment finding for this volume")
 		}
-		if !v.Scheduled && v.Robustness != "degraded" {
+		if !v.Scheduled && v.Robustness != "degraded" && !(v.Robustness == "faulted" && everScheduled) {
+			// no replica ever placed: the volume cannot attach at all.
+			// Placed ones but not all (more replicas than nodes, detached
+			// so robustness reads "unknown"): it works, just short of copies
+			sev := SevCrit
+			if everScheduled {
+				sev = SevWarn
+			}
 			msg := fmt.Sprintf("Longhorn volume %s cannot schedule its replicas: %s", v.Name, strutil.FirstNonEmpty(v.SchedMessage, "replica scheduling failed"))
 			hint := "kubectl -n " + li.NS() + " describe volumes.longhorn.io " + v.Name + "; disk space (storage-over-provisioning-percentage, storage-minimal-available-percentage), node/disk tags, replica count vs nodes"
 			if strings.Contains(v.SchedMessage, "insufficient storage") {
 				msg += fmt.Sprintf(" - the %s volume does not fit the schedulable disks (the PVC is Bound anyway, so the pod will hang in ContainerCreating)", strutil.HumanBytes(float64(v.Size)))
 			}
-			add(SevCrit, "storage", obj, msg, hint)
+			add(sev, "storage", obj, msg, hint)
 		}
 		if v.AccessMode == "rwx" && v.State == "attached" && v.ShareState != "" && v.ShareState != "running" {
 			add(SevCrit, "storage", obj, fmt.Sprintf("Longhorn RWX volume %s share manager is %s: the NFS export is down, every pod mounting it hangs", v.Name, v.ShareState), "kubectl -n "+li.NS()+" get pods -l longhorn.io/share-manager="+v.Name+"; share-manager logs; nfs-utils on the nodes")
@@ -610,7 +645,7 @@ func evalLonghorn(in Input, d k8s.CSIStatus, add func(Severity, string, string, 
 	}
 
 	// ---- settings ----
-	if rc := li.SettingInt("default-replica-count", 3); rc > allowed && allowed > 0 {
+	if rc := li.SettingInt("default-replica-count", 3); rc > allowed && allowed > 0 && li.Setting("replica-soft-anti-affinity") != "true" {
 		add(SevWarn, "storage", d.Driver, fmt.Sprintf("default-replica-count is %d but only %d Longhorn nodes allow scheduling: every new volume with the default class starts degraded", rc, allowed), "lower default-replica-count / numberOfReplicas, or add schedulable nodes")
 	}
 	if li.Setting("replica-soft-anti-affinity") == "true" && allowed > 1 {
@@ -664,16 +699,22 @@ func evalCeph(in Input, d k8s.CSIStatus, seen map[string]bool, add func(Severity
 			add(SevCrit, "storage", obj, "Ceph reports HEALTH_ERR: "+strutil.TruncList(append(errs, warns...), 3)+" - I/O on the affected pools stalls or fails", "kubectl -n "+cc.Namespace+" exec deploy/rook-ceph-tools -- ceph health detail; ceph -s")
 		case "HEALTH_WARN":
 			if crit, why := cc.Critical(); crit {
-				add(SevCrit, "storage", obj, "Ceph reports HEALTH_WARN but "+why+" - PGs inactive, OSDs full or a monitor down mean I/O stalls or data at risk", "kubectl -n "+cc.Namespace+" exec deploy/rook-ceph-tools -- ceph health detail; ceph osd df; ceph mon stat")
+				add(SevCrit, "storage", obj, "Ceph reports HEALTH_WARN but "+why+" - inactive PGs, full OSDs/pools or no MDS mean I/O stalls or data at risk", "kubectl -n "+cc.Namespace+" exec deploy/rook-ceph-tools -- ceph health detail; ceph osd df; ceph pg stat")
 			} else {
 				add(SevWarn, "storage", obj, "Ceph reports HEALTH_WARN: "+strutil.TruncList(warns, 3), "kubectl -n "+cc.Namespace+" exec deploy/rook-ceph-tools -- ceph health detail")
 			}
 		case "":
-			if cc.Phase != "" && !strings.EqualFold(cc.Phase, "Ready") {
-				add(SevCrit, "storage", obj, "Rook has not reached the Ceph cluster yet (phase "+cc.Phase+", no health reported): "+strutil.FirstNonEmpty(strutil.FirstLine(cc.Message), "see the operator log"), "kubectl -n "+cc.Namespace+" logs deploy/rook-ceph-operator")
+			// Progressing / Connecting is a cluster being created or an
+			// external one being connected: WARN until it fails
+			sev := SevWarn
+			if strings.EqualFold(cc.Phase, "Failure") || strings.EqualFold(cc.Phase, "Error") {
+				sev = SevCrit
+			}
+			if cc.Phase != "" && !strings.EqualFold(cc.Phase, "Ready") && !strings.EqualFold(cc.Phase, "Connected") {
+				add(sev, "storage", obj, "Rook has not reached the Ceph cluster yet (phase "+cc.Phase+", no health reported): "+strutil.FirstNonEmpty(strutil.FirstLine(cc.Message), "see the operator log"), "kubectl -n "+cc.Namespace+" logs deploy/rook-ceph-operator")
 			}
 		}
-		if cc.Health != "" && cc.Phase != "" && !strings.EqualFold(cc.Phase, "Ready") && !strings.EqualFold(cc.Phase, "Progressing") && !strings.EqualFold(cc.Phase, "Updating") {
+		if cc.Health != "" && cc.Phase != "" && !strings.EqualFold(cc.Phase, "Ready") && !strings.EqualFold(cc.Phase, "Progressing") && !strings.EqualFold(cc.Phase, "Updating") && !strings.EqualFold(cc.Phase, "Connected") {
 			add(SevWarn, "storage", obj, "Rook CephCluster phase is "+cc.Phase+": "+strutil.FirstNonEmpty(strutil.FirstLine(cc.Message), "the operator cannot reconcile the cluster"), "kubectl -n "+cc.Namespace+" logs deploy/rook-ceph-operator")
 		}
 		if cc.Capacity.Total > 0 {
@@ -931,6 +972,8 @@ func evalStorageNode(name string, ni *nodeinfo.Info, in Input, add func(Severity
 		case v == nil:
 			add(SevWarn, "storage", name, fmt.Sprintf("/dev/longhorn/%s is still present on the node but the Longhorn volume no longer exists%s", dev, st), "iscsiadm -m session; log out of the stale target (iscsiadm -m node -T iqn.2019-10.io.longhorn:"+dev+" -u) once nothing uses the device")
 		case v.State == "attached" && v.Node == name:
+		case v.Node == name && (v.State == "attaching" || v.State == "detaching"):
+			// moving on or off this node right now: the device follows
 		default:
 			where := "detached"
 			if v.Node != "" {

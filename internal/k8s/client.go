@@ -87,6 +87,14 @@ type Client struct {
 	lhSettingsAt time.Time
 	lhEngines    map[string]lhEngineFacts
 	lhEnginesAt  time.Time
+	// webhook configurations (~300 KB with their caBundles, rarely changed)
+	// and CSRs are kept for DiscoveryTTL; whether a webhook has endpoints
+	// comes from the EndpointSlices, listed every refresh
+	webhooks   []Webhook
+	webhooksAt time.Time
+	csrs       []CSR
+	csrsAt     time.Time
+	apiMetrics *APIMetrics // apiserver /metrics, read at most every apiMetricsTTL
 }
 
 type deniedEntry struct {
@@ -157,6 +165,7 @@ func (c *Client) ResetDenied() {
 	c.cacheMu.Lock()
 	c.denied = nil
 	c.lhSettings, c.lhEngines = nil, nil
+	c.webhooksAt, c.csrsAt = time.Time{}, time.Time{}
 	c.cacheMu.Unlock()
 }
 

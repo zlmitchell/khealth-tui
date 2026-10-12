@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 
 	"github.com/zlmitchell/khealth-tui/internal/config"
 	"github.com/zlmitchell/khealth-tui/internal/distro"
@@ -223,6 +224,7 @@ func Evaluate(in Input) []Finding {
 		}
 	}
 	evalAddresses(in, add) // node-ip pinned to a gone address, server: pointing at one (address.go)
+	evalClocks(in, add)
 	for name, ni := range in.Nodes {
 		if ni == nil {
 			continue
@@ -258,7 +260,9 @@ func Evaluate(in Input) []Finding {
 		if ni.CPUs > 0 && ni.Load1/float64(ni.CPUs) >= thr.LoadPerCPUWarn {
 			add(SevWarn, "node", name, fmt.Sprintf("load %.1f on %d CPUs", ni.Load1, ni.CPUs), "")
 		}
-		evalPreflight(name, ni, in, add) // swap, fapolicyd, auditd, mounts, accounts, proxies, vSphere ISO, registries (preflight.go)
+		evalPreflight(name, ni, in, add)   // swap, fapolicyd, auditd, mounts, accounts, proxies, vSphere ISO, registries (preflight.go)
+		evalNodeHealth(name, ni, in, add)  // read-only fs, conntrack, cgroup v1, CNI sysctls, resolver, VXLAN offload (nodehealth.go)
+		evalNodeRuntime(name, ni, in, add) // disk saturation, NIC errors, bonds, ARP, IPAM leaks, runtime, SELinux (nodehealth.go)
 		active := map[string]bool{}
 		for _, svc := range ni.Services {
 			if svc.Active == "active" {
@@ -303,16 +307,20 @@ func Evaluate(in Input) []Finding {
 		if ni.NTPSynced != nil && !*ni.NTPSynced {
 			add(SevWarn, "node", name, "system clock not NTP-synchronized", "enable chrony/systemd-timesyncd")
 		}
-		if d := ni.ClockOffset; d > thr.ClockSkewWarn || d < -thr.ClockSkewWarn {
-			add(SevWarn, "node", name, fmt.Sprintf("clock offset %s vs this machine", d), "certificates and etcd need synchronized clocks")
-		}
 		for _, c := range ni.Certs {
 			left := c.NotAfter.Sub(in.Now)
+			renew := nv.CertRenew
+			if strings.HasSuffix(c.Path, "ca.crt") {
+				// CAs are never renewed by a restart or certs renew
+				renew = "a CA certificate: nothing renews it automatically; rotate the CA (rke2/k3s certificate rotate-ca, kubeadm: the manual CA rotation procedure) and redistribute it to every client"
+			}
 			switch {
 			case left <= 0:
-				add(SevCrit, "node", name, "certificate expired: "+c.Path, nv.CertRenew)
+				add(SevCrit, "node", name, "certificate expired: "+c.Path, renew)
+			case left < 7*24*time.Hour:
+				add(SevCrit, "node", name, fmt.Sprintf("certificate expires in %s: %s", strutil.HumanDur(left), c.Path), renew)
 			case left < thr.CertExpiryWarn:
-				add(SevWarn, "node", name, fmt.Sprintf("certificate expires in %dd: %s", int(left.Hours()/24), c.Path), "")
+				add(SevWarn, "node", name, fmt.Sprintf("certificate expires in %dd: %s", int(left.Hours()/24), c.Path), renew)
 			}
 		}
 		if ni.Hardening["reboot_required"] == "yes" {
@@ -365,8 +373,16 @@ func Evaluate(in Input) []Finding {
 			}
 			return " (last " + in.Now.Sub(m.Time).Round(time.Minute).String() + " ago)"
 		}
+		evalKernelLog(name, ls, ago, add) // hung tasks, lockups, disk/NIC errors from journalctl -k (nodehealth.go)
 		if n := ls.ByName["rancher-plan-failed"]; n > 0 {
-			add(SevCrit, "node", name, fmt.Sprintf("Rancher plan failed %d time(s)%s: node config may be half-applied", n, ago(ls.Last("rancher-plan-failed"))), "journalctl -u rancher-system-agent; compare config.yaml.d/50-rancher.yaml with the other nodes (RKE2 tab)")
+			failed, applied := ls.Last("rancher-plan-failed"), ls.Last("rancher-plan-applied")
+			if !applied.Time.IsZero() && applied.Time.After(failed.Time) {
+				// Rancher applied a plan again after the failure and that one
+				// has not failed: the window still holds the old error lines
+				add(SevInfo, "node", name, fmt.Sprintf("Rancher plan failed %d time(s)%s, then a later plan was applied%s without failing", n, ago(failed), ago(applied)), "journalctl -u rancher-system-agent for the earlier error")
+			} else {
+				add(SevCrit, "node", name, fmt.Sprintf("Rancher plan failed %d time(s)%s: node config may be half-applied", n, ago(failed)), "journalctl -u rancher-system-agent; compare config.yaml.d/50-rancher.yaml with the other nodes (RKE2 tab)")
+			}
 		}
 		if n := ls.ByName["rancher-plan-applied"]; n > 0 {
 			add(SevInfo, "node", name, fmt.Sprintf("Rancher applied a plan %d time(s)%s: config.yaml.d/50-rancher.yaml and the rke2 unit were rewritten from the Rancher cluster spec", n, ago(ls.Last("rancher-plan-applied"))), "expected after an upgrade or cluster edit in Rancher; otherwise check the RKE2 tab for drift from what the node ran before")
@@ -378,6 +394,7 @@ func Evaluate(in Input) []Finding {
 
 	// ---- API endpoint vs tls-san / serving certificate ----
 	evalEndpoint(in, add)
+	evalVIP(in, add) // an API VIP held by two nodes or by none (endpoint.go)
 
 	// ---- etcd ----
 	evalEtcd(in, add, addF)
@@ -398,6 +415,8 @@ func Evaluate(in Input) []Finding {
 		}
 		switch {
 		case troubled:
+		case st == "Init:ContainerCreating" && in.Now.Sub(p.CreationTimestamp.Time) <= thr.PendingPodAge:
+			// an init container being created is a pod starting up
 		case st == "CreateContainerConfigError" || st == "CreateContainerError" || strings.HasPrefix(st, "Init:") && st != "Init:Running":
 			add(SevWarn, "workload", ref, st, "kubectl describe pod")
 		case st == "Evicted":
@@ -408,7 +427,7 @@ func Evaluate(in Input) []Finding {
 			add(SevWarn, "workload", ref, "Failed: "+st, "")
 		case p.Status.Phase == corev1.PodUnknown:
 			add(SevWarn, "workload", ref, "Unknown phase", "node may be unreachable")
-		case st == "Terminating" && p.DeletionTimestamp != nil && in.Now.Sub(p.DeletionTimestamp.Time) > 10*time.Minute:
+		case st == "Terminating" && p.DeletionTimestamp != nil && in.Now.Sub(p.DeletionTimestamp.Time) > thr.StuckDeletion:
 			add(SevWarn, "workload", ref, "Terminating for "+strutil.HumanDur(in.Now.Sub(p.DeletionTimestamp.Time)), "stuck finalizer or unreachable node")
 		}
 		if !troubled && restarts >= thr.RestartWarn && !lastRestart.IsZero() && in.Now.Sub(lastRestart) < 24*time.Hour {
@@ -428,7 +447,18 @@ func Evaluate(in Input) []Finding {
 	for i := range s.Deployments {
 		d := &s.Deployments[i]
 		if d.Spec.Replicas != nil && *d.Spec.Replicas > 0 && d.Status.UnavailableReplicas > 0 {
-			add(SevWarn, "workload", d.Namespace+"/deploy/"+d.Name, fmt.Sprintf("%d/%d replicas available", d.Status.AvailableReplicas, *d.Spec.Replicas), "")
+			sev, hint := SevWarn, ""
+			// none left of a cluster service (CoreDNS, ingress, the CSI
+			// controller, Rancher's agent): what it serves is down for everyone
+			if d.Status.AvailableReplicas == 0 && d.Namespace != "default" && k8s.IsSystemNamespace(d.Namespace) && in.Now.Sub(d.CreationTimestamp.Time) > thr.PendingPodAge {
+				sev, hint = SevCrit, "no replica of a cluster service is available: kubectl -n "+d.Namespace+" describe deploy "+d.Name+"; the pods' findings say why"
+			}
+			msg := fmt.Sprintf("%d/%d replicas available", d.Status.AvailableReplicas, *d.Spec.Replicas)
+			if cause, h := replicaFailure(d); cause != "" {
+				msg += ": " + cause
+				hint = h
+			}
+			add(sev, "workload", d.Namespace+"/deploy/"+d.Name, msg, hint)
 		}
 	}
 	for i := range s.DaemonSets {
@@ -525,10 +555,29 @@ func Evaluate(in Input) []Finding {
 			add(SevWarn, "storage", "pvc/"+key, fmt.Sprintf("inodes %d%% used", u.InodesUsed*100/u.Inodes), "")
 		}
 	}
+	// WaitForFirstConsumer claims stay Pending until a pod uses them: an
+	// unused one is waiting by design (k3s local-path is such a class)
+	wffc := map[string]bool{}
+	for i := range s.StorageClasses {
+		if m := s.StorageClasses[i].VolumeBindingMode; m != nil && *m == storagev1.VolumeBindingWaitForFirstConsumer {
+			wffc[s.StorageClasses[i].Name] = true
+		}
+	}
+	claimUsed := map[string]bool{}
+	for i := range s.Pods {
+		for _, v := range s.Pods[i].Spec.Volumes {
+			if v.PersistentVolumeClaim != nil {
+				claimUsed[s.Pods[i].Namespace+"/"+v.PersistentVolumeClaim.ClaimName] = true
+			}
+		}
+	}
 	for i := range s.PVCs {
 		p := &s.PVCs[i]
 		switch p.Status.Phase {
 		case corev1.ClaimPending:
+			if sc := p.Spec.StorageClassName; sc != nil && wffc[*sc] && !claimUsed[p.Namespace+"/"+p.Name] {
+				continue
+			}
 			if in.Now.Sub(p.CreationTimestamp.Time) > thr.PendingPodAge {
 				add(SevWarn, "storage", p.Namespace+"/pvc/"+p.Name, "Pending", "no provisioner / storage class / capacity")
 			}
@@ -558,7 +607,9 @@ func Evaluate(in Input) []Finding {
 	}
 
 	// ---- addons / rancher ----
-	evalACE(in, add) // Authorized Cluster Endpoint on Rancher-managed clusters (ace.go)
+	evalACE(in, add)     // Authorized Cluster Endpoint on Rancher-managed clusters (ace.go)
+	evalControl(in, add) // webhooks, APIServices, stuck deletions, PDBs, CSRs, Service endpoints (control.go)
+	evalEvents(in, add)  // image GC, IPAM exhaustion, eviction storms, out-of-service hint (events.go)
 	if r := s.Rancher; r != nil && r.Managed {
 		if !r.ClusterAgentOK {
 			add(SevCrit, "addons", "rancher", "cattle-cluster-agent not ready ("+r.ClusterAgent+") - cluster disconnected from Rancher "+r.Server, "check agent logs, Rancher URL/CA")
@@ -627,9 +678,22 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 		// k3s without --cluster-init: no etcd, so no etcd findings; the
 		// datastore still needs a backup and is a single point of failure
 		add(SevInfo, "etcd", "datastore", "no etcd: k3s keeps the cluster state in "+ds, "back up /var/lib/rancher/k3s/server/db/ (or the external database); restart the server with --cluster-init to move to embedded etcd and add servers for HA")
+		if strings.Contains(ds, "mysql") || strings.Contains(ds, "postgres") {
+			// docs.k3s.io/known-issues: older kine schemas stop at a 32-bit revision
+			add(SevInfo, "etcd", "datastore", "an external SQL datastore created on a k3s release before May 2024 goes read-only when its revision reaches 2147483647 unless the kine schema was migrated", "set KINE_SCHEMA_MIGRATION=1 (or higher) in the k3s service environment file on every server and restart them (k3s known issues)")
+		}
 		return
 	}
-	if etcdNodes > 0 && etcdNodes%2 == 0 {
+	if kc := s.Kubeadm; kc != nil && kc.ExternalEtcd {
+		// the control-plane nodes run no etcd: nothing here to triage, and
+		// its backups are taken where it runs
+		add(SevInfo, "etcd", "datastore", "etcd is external (kubeadm-config etcd.external): khealth does not probe it from the nodes", "check and back up the external etcd cluster where it runs; set etcd.endpoint/ca_cert/client_cert/client_key in the config to probe it")
+		return
+	}
+	switch {
+	case etcdNodes == 2:
+		add(SevWarn, "etcd", "cluster", "2 etcd nodes: quorum needs both, so losing either one stops the cluster (less tolerant than a single node)", "add a third etcd node, or go back to one")
+	case etcdNodes > 0 && etcdNodes%2 == 0:
 		add(SevWarn, "etcd", "cluster", fmt.Sprintf("%d etcd nodes (even number gives no extra fault tolerance)", etcdNodes), "use 1, 3 or 5")
 	}
 
@@ -658,14 +722,14 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 			}
 		}
 		for _, a := range x.Alarms {
-			add(SevCrit, "etcd", "cluster", "alarm "+a.Type+" on member "+a.MemberID, "etcdctl alarm disarm after compaction/defrag")
+			add(SevCrit, "etcd", "cluster", "alarm "+a.Type+" on member "+a.MemberID, alarmHint(a.Type))
 		}
-		if len(x.Members) > 0 && etcdNodes > 0 && len(x.Members) != etcdNodes {
-			add(SevWarn, "etcd", "cluster", fmt.Sprintf("%d etcd members but %d etcd nodes in the cluster", len(x.Members), etcdNodes), "stale member? etcdctl member list")
+		if v := voters(x.Members); v > 0 && etcdNodes > 0 && v != etcdNodes {
+			add(SevWarn, "etcd", "cluster", fmt.Sprintf("%d voting etcd members but %d etcd nodes in the cluster", v, etcdNodes), "stale member? etcdctl member list")
 		}
 		for _, m := range x.Members {
 			if m.IsLearner {
-				add(SevInfo, "etcd", "cluster", "member "+m.Name+" is a learner", "")
+				add(SevInfo, "etcd", "cluster", "member "+strutil.FirstNonEmpty(m.Name, m.ID+" (unstarted)")+" is a learner", "")
 			}
 		}
 		vers := map[string]bool{}
@@ -732,28 +796,41 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 				add(SevInfo, "etcd", name, fmt.Sprintf("%.0f failed proposals since start", m.ProposalsFailed), "usually leader elections")
 			}
 			if m.LeaderChanges > 10 {
-				add(SevWarn, "etcd", name, fmt.Sprintf("%.0f leader changes since start", m.LeaderChanges), "network/disk latency between control-plane nodes")
+				// a counter since the member started: on a long-lived
+				// member it says little about now
+				add(SevInfo, "etcd", name, fmt.Sprintf("%.0f leader changes since this member started", m.LeaderChanges), "frequent elections point at network/disk latency between control-plane nodes; watch whether the count grows")
 			}
 			if m.PeerRTTAvgMs > 50 {
 				add(SevWarn, "etcd", name, fmt.Sprintf("peer RTT avg %.0fms", m.PeerRTTAvgMs), "control-plane nodes too far apart")
 			}
 		}
-		for _, a := range p.Alarms {
-			add(SevCrit, "etcd", name, "alarm "+a.Type+" on member "+a.MemberID, "etcdctl alarm disarm after compaction/defrag")
+		// the node's etcdctl output is carried forward while etcdctl is
+		// skipped there (the exec probe covers it): with a current exec
+		// probe it is stale, and its alarms and statuses would repeat or
+		// contradict the cluster-wide ones
+		execOK := in.EtcdExec != nil && in.EtcdExec.Err == nil
+		if !execOK {
+			for _, a := range p.Alarms {
+				add(SevCrit, "etcd", name, "alarm "+a.Type+" on member "+a.MemberID, alarmHint(a.Type))
+			}
 		}
 		if len(p.Members) > 0 && in.EtcdExec == nil {
 			memberCounts[len(p.Members)] = true
-			if len(p.Members) != etcdNodes && etcdNodes > 0 {
-				add(SevWarn, "etcd", name, fmt.Sprintf("%d etcd members but %d etcd nodes in the cluster", len(p.Members), etcdNodes), "stale member? etcdctl member list")
+			if v := voters(p.Members); v != etcdNodes && etcdNodes > 0 {
+				add(SevWarn, "etcd", name, fmt.Sprintf("%d voting etcd members but %d etcd nodes in the cluster", v, etcdNodes), "stale member? etcdctl member list")
 			}
 			for _, m := range p.Members {
 				if m.IsLearner {
-					add(SevInfo, "etcd", name, "member "+m.Name+" is a learner", "")
+					add(SevInfo, "etcd", name, "member "+strutil.FirstNonEmpty(m.Name, m.ID+" (unstarted)")+" is a learner", "")
 				}
 			}
 		}
 		vers := map[string]bool{}
-		for _, st := range p.Statuses {
+		statuses := p.Statuses
+		if execOK {
+			statuses = nil
+		}
+		for _, st := range statuses {
 			if st.Leader != "" {
 				leaders[st.Leader] = true
 			}
@@ -808,8 +885,20 @@ func evalEtcd(in Input, add func(Severity, string, string, string, string), addF
 	if len(s.RKE2Snapshots) > 0 {
 		backupMechanism = true
 	}
+	// a CronJob that takes etcd snapshots: "etcd" plus "snapshot"/"backup"
+	// in its name or command (an etcd-defrag job is not a backup), and not
+	// suspended
 	for i := range s.CronJobs {
-		if strings.Contains(strings.ToLower(s.CronJobs[i].Name), "etcd") {
+		c := &s.CronJobs[i]
+		if c.Spec.Suspend != nil && *c.Spec.Suspend {
+			continue
+		}
+		text := c.Name
+		for _, ct := range c.Spec.JobTemplate.Spec.Template.Spec.Containers {
+			text += " " + strings.Join(ct.Command, " ") + " " + strings.Join(ct.Args, " ")
+		}
+		text = strings.ToLower(text)
+		if strings.Contains(text, "etcd") && (strings.Contains(text, "snapshot") || strings.Contains(text, "backup")) {
 			backupMechanism = true
 		}
 	}
@@ -978,4 +1067,77 @@ func containerTrouble(p *corev1.Pod, now time.Time) []trouble {
 		check(cs, strutil.FirstNonEmpty(images[cs.Name], cs.Image), "container")
 	}
 	return out
+}
+
+// evalClocks: each node's clock against the other nodes. The offsets are
+// measured against the machine running khealth, so a skewed workstation
+// would otherwise flag every node; the nodes' own spread is what etcd
+// leases and certificate validity depend on. This machine takes part as
+// one more voter (offset 0): with two nodes it says which one drifted.
+func evalClocks(in Input, add func(Severity, string, string, string, string)) {
+	thr := in.Cfg.Thresholds.ClockSkewWarn
+	off := map[string]time.Duration{}
+	for name, ni := range in.Nodes {
+		if ni != nil && ni.Err == nil {
+			off[name] = ni.ClockOffset
+		}
+	}
+	names := strutil.SortedKeys(off)
+	far := func(d time.Duration) bool { return d > thr || d < -thr }
+	for _, n := range names {
+		apart, voters := 0, 1
+		if far(off[n]) { // this machine
+			apart++
+		}
+		for _, o := range names {
+			if o != n {
+				voters++
+				if far(off[n] - off[o]) {
+					apart++
+				}
+			}
+		}
+		if apart*2 > voters {
+			msg := fmt.Sprintf("clock offset %s vs this machine and the other nodes", off[n])
+			if len(names) == 1 {
+				msg = fmt.Sprintf("clock offset %s vs this machine", off[n])
+			}
+			add(SevWarn, "node", n, msg, "certificates and etcd need synchronized clocks: check chrony/timesyncd on this node")
+		}
+	}
+	// this machine against the nodes: off from most of them, it is the odd one
+	if len(names) < 2 {
+		return
+	}
+	apart := 0
+	ds := make([]time.Duration, 0, len(names))
+	for _, n := range names {
+		ds = append(ds, off[n])
+		if far(off[n]) {
+			apart++
+		}
+	}
+	sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
+	if apart*2 > len(names) {
+		add(SevInfo, "cluster", "clock", fmt.Sprintf("the nodes' clocks agree but differ from this machine by %s: this machine's clock is likely off", ds[len(ds)/2]), "the cluster is not affected; fix time sync where khealth runs (\"ago\" times shown here are off by that much)")
+	}
+}
+
+// alarmHint is the recovery for an etcd alarm type.
+func alarmHint(typ string) string {
+	if typ == "CORRUPT" {
+		return "a member's data diverged: etcdctl endpoint hashkv --cluster finds the odd member; remove it (etcdctl member remove <id>), clear its data dir and rejoin it, then disarm - disarming first hides the corruption"
+	}
+	return "NOSPACE: compact and defrag (D on the etcd tab), raise quota-backend-bytes if the data really grew, then etcdctl alarm disarm"
+}
+
+// voters counts the members that vote (learners do not).
+func voters(ms []etcd.Member) int {
+	n := 0
+	for _, m := range ms {
+		if !m.IsLearner {
+			n++
+		}
+	}
+	return n
 }

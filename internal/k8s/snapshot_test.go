@@ -305,7 +305,7 @@ func TestFetchKubeletProxyDenied(t *testing.T) {
 		t.Errorf("denied proxies: cfg=%q usage=%q", s.KubeletCfgErr, s.PVCUsageErr)
 	}
 	got := c.DeniedList()
-	if strings.Join(got, ",") != "appvaults.protect.trident.netapp.io,cephclusters.ceph.rook.io,clusters.provisioning.cattle.io,kubeadm-config,nodes/proxy configz,nodes/proxy stats,plans.upgrade.cattle.io,tridentbackends.trident.netapp.io,volumeattachments,volumes.longhorn.io,volumesnapshotclasses.snapshot.storage.k8s.io" {
+	if strings.Join(got, ",") != "apiserver /metrics,apiservices,appvaults.protect.trident.netapp.io,cephclusters.ceph.rook.io,certificates.cert-manager.io,certificatesigningrequests,clusters.provisioning.cattle.io,endpointslices,kubeadm-config,nodes/proxy configz,nodes/proxy stats,plans.upgrade.cattle.io,poddisruptionbudgets,tridentbackends.trident.netapp.io,volumeattachments,volumes.longhorn.io,volumesnapshotclasses.snapshot.storage.k8s.io,webhookconfigurations" {
 		t.Errorf("denied list: %v", got)
 	}
 	hits := f.hitCount("/api/v1/nodes/cp-1/proxy/configz") + f.hitCount("/api/v1/nodes/w-1/proxy/configz")

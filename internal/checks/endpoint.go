@@ -2,6 +2,7 @@ package checks
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
@@ -144,3 +145,72 @@ func SANKey(dist string) string { return distro.For(dist).SANKey }
 // ReissueHint is how the apiserver serving certificate gets regenerated
 // after the configured SANs change.
 func ReissueHint(dist string) string { return distro.For(dist).Reissue }
+
+// evalVIP: an API address that is no node's own InternalIP (the kubeconfig
+// server, rke2/k3s server:) is a VIP or a load balancer. Held by two nodes
+// at once is split-brain ARP (keepalived priorities, a duplicate
+// virtual_router_id, kube-vip without its lease): clients flip between
+// nodes. Held by none while kube-vip or keepalived runs is a VIP that
+// nothing announces.
+func evalVIP(in Input, add func(Severity, string, string, string, string)) {
+	if in.Snap == nil {
+		return
+	}
+	nodeIP := map[string]bool{}
+	for i := range in.Snap.Nodes {
+		for _, a := range in.Snap.Nodes[i].Status.Addresses {
+			nodeIP[a.Address] = true
+		}
+	}
+	vips := map[string]string{} // address -> where it is used
+	if h := APIHost(in.APIServer); net.ParseIP(h) != nil && !nodeIP[h] && !RancherProxied(in.APIServer) {
+		vips[h] = "the kubeconfig server"
+	}
+	for _, name := range strutil.SortedKeys(in.Nodes) {
+		ni := in.Nodes[name]
+		if ni == nil || ni.Err != nil {
+			continue
+		}
+		if h := strutil.URLHost(ni.Settings["server"]); net.ParseIP(h) != nil && !nodeIP[h] {
+			if _, ok := vips[h]; !ok {
+				vips[h] = "server: on " + name
+			}
+		}
+	}
+	if len(vips) == 0 {
+		return
+	}
+	manager := ""
+	for i := range in.Snap.Pods {
+		if strings.HasPrefix(in.Snap.Pods[i].Name, "kube-vip") {
+			manager = "kube-vip"
+		}
+	}
+	probed := 0
+	for _, ni := range in.Nodes {
+		if ni == nil || ni.Err != nil || len(ni.Addrs) == 0 {
+			continue
+		}
+		probed++
+		if s := ni.Service("keepalived"); s != nil && s.Active == "active" {
+			manager = "keepalived"
+		}
+	}
+	if probed == 0 {
+		return
+	}
+	for _, vip := range strutil.SortedKeys(vips) {
+		var holders []string
+		for _, name := range strutil.SortedKeys(in.Nodes) {
+			if ni := in.Nodes[name]; ni != nil && ni.Err == nil && len(ni.Addrs) > 0 && ni.HasAddr(vip) {
+				holders = append(holders, name)
+			}
+		}
+		switch {
+		case len(holders) > 1:
+			add(SevCrit, "cluster", "vip/"+vip, fmt.Sprintf("API address %s (%s) is configured on %d nodes at once: %s - split-brain ARP, clients and agents land on either node", vip, vips[vip], len(holders), strings.Join(holders, ", ")), "keepalived: one MASTER per virtual_router_id, unique router ids on the segment, check VRRP between the nodes (firewall: protocol 112); kube-vip: one leader (the plndr-cp-lock Lease) - remove the stray address with ip addr del "+vip+"/32 dev <if> on the wrong node")
+		case len(holders) == 0 && manager != "":
+			add(SevWarn, "cluster", "vip/"+vip, fmt.Sprintf("API address %s (%s) is held by no node although %s runs: the VIP is not announced, so whatever uses it fails over to nothing", vip, vips[vip], manager), "check "+manager+" (systemctl status keepalived / the kube-vip pod logs and its Lease); an external load balancer instead: ignore")
+		}
+	}
+}

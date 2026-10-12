@@ -99,8 +99,10 @@ user|rancher|1000|/bin/bash|set|19900|1|60|7|35|
 user|etcd|998|/sbin/nologin|none|19800|0|99999|7||
 user|ops|1001|/bin/bash|locked|19950|1|60|7||20100
 faillock_deny=3
+faillock_deny_pam=
+faillock_unlock=0
 faillock|root|0
-faillock|rancher|3
+faillock|rancher|3|42
 ci_user=rancher
 ci_default=rocky
 sudo|rancher|nopasswd=yes|keys=1
@@ -217,6 +219,9 @@ func TestParsePreflight(t *testing.T) {
 	if p.Faillock["rancher"] != 3 || p.FaillockDeny != 3 {
 		t.Errorf("faillock: %v deny=%d", p.Faillock, p.FaillockDeny)
 	}
+	if p.FaillockAge["rancher"] != 42 || p.FaillockAge["root"] != -1 || p.FaillockUnlock != 0 {
+		t.Errorf("faillock age/unlock: %v unlock=%d", p.FaillockAge, p.FaillockUnlock)
+	}
 	if len(p.Proxy) != 2 || p.Proxy[0].Key != "HTTP_PROXY" || !strings.Contains(p.Proxy[0].Value, "<masked>") || p.Proxy[1].Key != "NO_PROXY" {
 		t.Errorf("proxy: %+v", p.Proxy)
 	}
@@ -329,5 +334,19 @@ func TestScriptIncludesPreflight(t *testing.T) {
 	if !strings.Contains(light, `if [ "0" = 1 ]; then
 sec FSTABSWAP`) {
 		t.Errorf("light script should skip the preflight config tier")
+	}
+}
+
+// The Longhorn device list runs every refresh: a light probe's list (here:
+// the volume moved away, nothing left) must win over the carried config tier.
+func TestLonghornDevsEveryRefresh(t *testing.T) {
+	prev := Parse("n1", "h", "===SWAPS\n===PFUNITS\n===LHDEV\nlhdev=pvc-a\niscsi=iqn.2019-10.io.longhorn:pvc-a|LOGGED_IN\n===MOUNTOPTS\n===CSI\ndriver=driver.longhorn.io|\niscsid=socket\n===ACCOUNTS\ntoday=20000\n===END\n", time.Now())
+	if len(prev.Preflight.CSI.LonghornDevs) != 1 || !prev.Preflight.CSI.ISCSID {
+		t.Fatalf("LHDEV / socket-activated iscsid: %+v", prev.Preflight.CSI)
+	}
+	light := Parse("n1", "h", "===SWAPS\n===PFUNITS\n===LHDEV\n===END\n", time.Now())
+	light.Preflight.mergeConfig(&prev.Preflight)
+	if c := light.Preflight.CSI; len(c.LonghornDevs) != 0 || len(c.ISCSISessions) != 0 || len(c.Drivers) != 1 {
+		t.Errorf("fresh device list lost or config tier not carried: %+v", c)
 	}
 }

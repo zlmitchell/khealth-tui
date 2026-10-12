@@ -23,6 +23,7 @@ type etcdRuntime struct {
 	start   string // start it again
 	restart string // bounce it in place
 	logs    string // read the local member's own log
+	ctl     string // how "etcdctl" in the steps is run on this runtime (none is on the host's PATH)
 }
 
 const kubeadmManifest = "/etc/kubernetes/manifests/etcd.yaml"
@@ -69,18 +70,24 @@ func runtimeOf(kind, dataDir string) etcdRuntime {
 		if dataDir == "" {
 			dataDir = "/var/lib/rancher/" + kind + "/server/db/etcd"
 		}
-		logs := "crictl logs --tail 200 $(crictl ps -a -q --name etcd | head -1)"
+		// rke2's crictl is not on the PATH and needs its config
+		logs := "export CRI_CONFIG_FILE=/var/lib/rancher/rke2/agent/etc/crictl.yaml PATH=$PATH:/var/lib/rancher/rke2/bin; crictl logs --tail 200 $(crictl ps -a -q --name etcd | head -1)"
+		tls := "/var/lib/rancher/" + kind + "/server/tls/etcd/"
+		certs := "--cacert " + tls + "server-ca.crt --cert " + tls + "server-client.crt --key " + tls + "server-client.key"
+		ctl := "kubectl -n kube-system exec etcd-<node> -- etcdctl " + certs + "   (API down: crictl exec $(crictl ps -q --name etcd) etcdctl ... with the crictl setup of the log step)"
 		if kind == "k3s" {
 			logs = "journalctl -u k3s -n 500 --no-pager | grep -iE 'etcd|raft'" // in-process etcd
+			ctl = "k3s ships no etcdctl: install it on the server and run etcdctl --endpoints https://127.0.0.1:2379 " + certs
 		}
 		return etcdRuntime{kind: kind, svc: svc, dataDir: dataDir, static: kind == "rke2",
-			stop: "systemctl stop " + svc, start: "systemctl start " + svc, restart: "systemctl restart " + svc, logs: logs}
+			stop: "systemctl stop " + svc, start: "systemctl start " + svc, restart: "systemctl restart " + svc, logs: logs, ctl: ctl}
 	case "systemd":
 		if dataDir == "" {
 			dataDir = "/var/lib/etcd"
 		}
 		return etcdRuntime{kind: kind, svc: "etcd", dataDir: dataDir,
-			stop: "systemctl stop etcd", start: "systemctl start etcd", restart: "systemctl restart etcd", logs: "journalctl -u etcd -n 200 --no-pager"}
+			stop: "systemctl stop etcd", start: "systemctl start etcd", restart: "systemctl restart etcd", logs: "journalctl -u etcd -n 200 --no-pager",
+			ctl: "etcdctl with the endpoint and certificates of the etcd unit's environment (ETCDCTL_* / ETCD_* in /etc/etcd.env or the unit's EnvironmentFile)"}
 	default: // kubeadm and anything else with a static pod
 		if dataDir == "" {
 			dataDir = "/var/lib/etcd"
@@ -89,7 +96,8 @@ func runtimeOf(kind, dataDir string) etcdRuntime {
 			stop:    "mv " + kubeadmManifest + " " + kubeadmParked + "   (kubelet stops the etcd pod within ~20s; confirm with crictl ps --name etcd)",
 			start:   "mv " + kubeadmParked + " " + kubeadmManifest,
 			restart: "crictl stop $(crictl ps -q --name etcd)   (kubelet recreates the static pod)",
-			logs:    "crictl logs --tail 200 $(crictl ps -a -q --name etcd | head -1)   (or kubectl -n kube-system logs etcd-<node> --previous)"}
+			logs:    "crictl logs --tail 200 $(crictl ps -a -q --name etcd | head -1)   (or kubectl -n kube-system logs etcd-<node> --previous)",
+			ctl:     "kubectl -n kube-system exec etcd-<node> -- etcdctl --cacert /etc/kubernetes/pki/etcd/ca.crt --cert /etc/kubernetes/pki/etcd/server.crt --key /etc/kubernetes/pki/etcd/server.key   (API down: crictl exec $(crictl ps -q --name etcd) etcdctl ...)"}
 	}
 }
 

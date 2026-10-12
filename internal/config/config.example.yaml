@@ -94,6 +94,7 @@ thresholds:
   load_per_cpu_warn: 2.0
   restart_warn: 5                 # pod restarts (within 24h) that raise a warning
   pending_pod_age: 5m
+  stuck_deletion: 10m             # pods, namespaces, PVCs and PVs still terminating after this long are reported
   cert_expiry_warn: 720h          # 30 days
   clock_skew_warn: 5s
   etcd_db_warn_pct: 80            # db size as % of quota-backend-bytes

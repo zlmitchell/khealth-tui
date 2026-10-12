@@ -118,11 +118,32 @@ sec UPTIME; cat /proc/uptime
 sec LOAD; cat /proc/loadavg
 sec NPROC; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo
 sec STAT1; head -1 /proc/stat
+# disk counters (reads, ms reading, writes, ms writing, ms busy) per whole
+# device, diffed like the CPU: %util and await of the disks etcd and
+# containerd sit on
+diskstat() { cut -d' ' -f1 /proc/uptime; awk '$3 ~ /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|dm-[0-9]+)$/ {print $3, $4, $7, $8, $11, $13}' /proc/diskstats 2>/dev/null; }
+sec DISK1; diskstat; for d in /sys/block/dm-*; do [ -f "$d/dm/name" ] && echo "dmname ${d##*/} $(cat "$d/dm/name")"; done
 # CPU utilization is the delta between this and the previous probe's
 # counters (Info.CPUFromPrev): no sleep on the node. Only the first contact
 # has nothing to diff against and samples over one second here.
-if [ "__CPUSAMPLE__" = 1 ]; then sleep 1; sec STAT2; head -1 /proc/stat; fi
+if [ "__CPUSAMPLE__" = 1 ]; then sleep 1; sec STAT2; head -1 /proc/stat; sec DISK2; diskstat; fi
 sec MEM; cat /proc/meminfo
+# disk filesystems mounted read-only (an ext4 errors=remount-ro or an XFS
+# shutdown leaves the node Ready while every write fails) and the conntrack
+# table fill: both plain reads of /proc, cheap enough for every refresh
+sec ROMOUNTS; awk '$4 ~ /(^|,)ro(,|$)/ && $3 ~ /^(ext[234]|xfs|btrfs)$/ && $2 !~ /^\/var\/lib\/kubelet\/(pods|plugins)\// {print $2"|"$3}' /proc/mounts 2>/dev/null
+# the underlay NIC's error / drop / carrier-change counters (diffed between
+# probes), bond slaves that are down, ARP entries against gc_thresh3
+sec NIC
+nd=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+if [ -n "$nd" ] && [ -d /sys/class/net/$nd ]; then
+  echo "dev=$nd"
+  for f in rx_errors tx_errors rx_crc_errors rx_missed_errors; do echo "$f=$(cat /sys/class/net/$nd/statistics/$f 2>/dev/null)"; done
+  echo "carrier_changes=$(cat /sys/class/net/$nd/carrier_changes 2>/dev/null)"
+fi
+for b in /proc/net/bonding/*; do [ -f "$b" ] && awk -v b="${b##*/}" '/^Slave Interface:/{s=$3} /^MII Status:/ && s!=""{print "bondslave=" b "|" s "|" $3; s=""}' "$b"; done
+echo "neigh=$(ip -4 neigh 2>/dev/null | grep -vc FAILED)"; echo "gc_thresh3=$(cat /proc/sys/net/ipv4/neigh/default/gc_thresh3 2>/dev/null)"
+sec CONNTRACK; cat /proc/sys/net/netfilter/nf_conntrack_count /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null | tr '\n' ' '
 # df blocks in statfs on a hung network mount (NFS server gone, RWX share
 # manager down): a stalled df is retried without network filesystems and
 # the hung mounts are named in STALEMOUNTS (checked one by one, in parallel,
@@ -151,9 +172,9 @@ units() {
     /^$/{if(id!="" && l=="loaded") print id"|"l"|"a"|"ss"|"n"|"t"|"r"|"u; id="";l="";a="";ss="";n="";t="";r="";u=""}
     END{if(id!="" && l=="loaded") print id"|"l"|"a"|"ss"|"n"|"t"|"r"|"u}'
 }
-UNITS_OUT=$(units kubelet containerd rke2-server rke2-agent k3s k3s-agent etcd docker crio rancher-system-agent chronyd chrony ntpd ntp systemd-timesyncd firewalld ufw nftables iptables apparmor fapolicyd auditd unattended-upgrades dnf-automatic.timer usbguard sssd cloud-init-local cloud-init cloud-config cloud-final)
+UNITS_OUT=$(units kubelet containerd rke2-server rke2-agent k3s k3s-agent etcd docker crio rancher-system-agent chronyd chrony ntpd ntp systemd-timesyncd firewalld ufw nftables iptables apparmor fapolicyd auditd unattended-upgrades dnf-automatic.timer usbguard sssd cloud-init-local cloud-init cloud-config cloud-final keepalived)
 sec SVC
-echo "$UNITS_OUT" | awk -F'|' '$1=="kubelet"||$1=="containerd"||$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="etcd"||$1=="docker"||$1=="crio"||$1=="rancher-system-agent"||$1=="chronyd"||$1=="chrony"||$1=="ntpd"||$1=="ntp"||$1=="systemd-timesyncd"||$1=="firewalld"||$1=="ufw"||$1=="nftables"||$1=="iptables"||$1=="apparmor"{print $1, $2, $3, $4}'
+echo "$UNITS_OUT" | awk -F'|' '$1=="kubelet"||$1=="containerd"||$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="etcd"||$1=="docker"||$1=="crio"||$1=="rancher-system-agent"||$1=="chronyd"||$1=="chrony"||$1=="ntpd"||$1=="ntp"||$1=="systemd-timesyncd"||$1=="firewalld"||$1=="ufw"||$1=="nftables"||$1=="iptables"||$1=="apparmor"||$1=="keepalived"{print $1, $2, $3, $4}'
 sec UNITS
 echo "$UNITS_OUT" | awk -F'|' '$1=="rke2-server"||$1=="rke2-agent"||$1=="k3s"||$1=="k3s-agent"||$1=="kubelet"||$1=="containerd"||$1=="rancher-system-agent"||$1=="etcd"||$1=="cloud-init-local"||$1=="cloud-init"||$1=="cloud-config"||$1=="cloud-final"{print $1"|"$3"|"$4"|"$5"|"$6"|"$7"|"}'
 sec ADDRS
@@ -189,7 +210,7 @@ done
 if [ "__CONFIG__" = 1 ]; then
 sec CERTS
 if command -v openssl >/dev/null 2>&1; then
-  for f in /var/lib/rancher/rke2/server/tls/*.crt /var/lib/rancher/rke2/server/tls/etcd/*.crt /var/lib/rancher/rke2/agent/*.crt /var/lib/rancher/k3s/server/tls/*.crt /var/lib/rancher/k3s/agent/*.crt /etc/kubernetes/pki/*.crt /etc/kubernetes/pki/etcd/*.crt /var/lib/kubelet/pki/kubelet.crt /var/lib/kubelet/pki/kubelet-client-current.pem /etc/ssl/etcd/ssl/*.pem; do
+  for f in "$RKE2_DD"/server/tls/*.crt "$RKE2_DD"/server/tls/etcd/*.crt "$RKE2_DD"/agent/*.crt "$K3S_DD"/server/tls/*.crt "$K3S_DD"/agent/*.crt /etc/kubernetes/pki/*.crt /etc/kubernetes/pki/etcd/*.crt /var/lib/kubelet/pki/kubelet.crt /var/lib/kubelet/pki/kubelet-client-current.pem /var/lib/kubelet/pki/kubelet-server-current.pem /etc/ssl/etcd/ssl/*.pem; do
     [ -f "$f" ] || continue
     case "$f" in *-key.pem) continue;; esac
     e=$(openssl x509 -enddate -noout -in "$f" 2>/dev/null | sed 's/^notAfter=//')
@@ -333,6 +354,25 @@ echo "system-agent=${sa:-not-found inactive dead }"
 [ -f /var/lib/rancher/agent/rancher2_connection_info.json ] && echo "connection-info=yes"
 [ -d /var/lib/rancher/agent/applied ] && echo "applied-plans=$(ls /var/lib/rancher/agent/applied 2>/dev/null | wc -l)"
 if [ "__CONFIG__" = 1 ]; then
+sec CGROUP; stat -fc %T /sys/fs/cgroup 2>/dev/null
+sec IPAM
+# host-local IPAM (flannel/canal): one file per allocated pod IP; files
+# far beyond the running pods are leaked allocations
+for d in /var/lib/cni/networks/*/; do [ -d "$d" ] && echo "$(basename "$d")|$(ls "$d" 2>/dev/null | grep -vcE '^(last_reserved_ip|lock)')"; done
+sec RESOLV
+# the nameservers of /etc/resolv.conf and of systemd-resolved's real list:
+# a loopback stub (127.0.0.53) handed to pods makes CoreDNS forward to itself
+grep -s '^nameserver' /etc/resolv.conf | awk '{print "etc="$2}'
+grep -s '^nameserver' /run/systemd/resolve/resolv.conf | awk '{print "resolved="$2}'
+sec OFFLOAD
+# VXLAN checksum offload on the overlay (a kernel/vmxnet3 bug corrupts it)
+# and the underlay's driver
+for d in flannel.1 vxlan.calico vxlan0; do
+  [ -d /sys/class/net/$d ] || continue
+  echo "$d=$(ethtool -k $d 2>/dev/null | awk '/tx-checksum-ip-generic:/{print $2}')"
+done
+dd=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+[ -n "$dd" ] && echo "driver=$(basename "$(readlink /sys/class/net/$dd/device/driver 2>/dev/null)" 2>/dev/null)"
 sec CNI
 for d in /var/lib/rancher/rke2/agent/etc/cni/net.d /var/lib/rancher/k3s/agent/etc/cni/net.d /etc/cni/net.d; do
   [ -d "$d" ] || continue

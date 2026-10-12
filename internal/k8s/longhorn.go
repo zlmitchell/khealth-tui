@@ -159,6 +159,7 @@ type LonghornDisk struct {
 // LonghornInstanceManager runs the engine and replica processes on a node.
 type LonghornInstanceManager struct {
 	Name, Node, Type, State, Image string
+	DataEngine                     string // v1, v2 (SPDK); "" on releases without v2
 	Engines, Replicas              int
 }
 
@@ -457,7 +458,12 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 	sort.Slice(li.Volumes, func(i, j int) bool { return li.Volumes[i].Name < li.Volumes[j].Name })
 
 	// instance managers, by node
+	// the node's state is its v1 aio/engine instance manager's: a v2 (SPDK)
+	// one in error on a node without hugepages, or an old-image one left
+	// from an upgrade, does not stop the v1 volumes; one running v1
+	// manager is enough
 	imState := map[string]string{}
+	imV1 := map[string]bool{}
 	if ims != nil {
 		for _, it := range ims.Items {
 			o := it.Object
@@ -466,6 +472,7 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 			im.Type, _, _ = unstructured.NestedString(o, "spec", "type")
 			im.Image, _, _ = unstructured.NestedString(o, "spec", "image")
 			im.State, _, _ = unstructured.NestedString(o, "status", "currentState")
+			im.DataEngine, _, _ = unstructured.NestedString(o, "spec", "dataEngine")
 			if m, _, _ := unstructured.NestedMap(o, "status", "instanceEngines"); m != nil {
 				im.Engines = len(m)
 			}
@@ -473,7 +480,14 @@ func (c *Client) longhornInfo(ctx context.Context) *LonghornInfo {
 				im.Replicas = len(m)
 			}
 			li.InstanceManagers = append(li.InstanceManagers, im)
-			if im.Type == "aio" || im.Type == "engine" || imState[im.Node] == "" {
+			v1 := im.DataEngine == "" || im.DataEngine == "v1"
+			switch {
+			case v1 && (im.Type == "aio" || im.Type == "engine"):
+				if !imV1[im.Node] || im.State == "running" {
+					imState[im.Node] = im.State
+				}
+				imV1[im.Node] = true
+			case !imV1[im.Node] && imState[im.Node] != "running":
 				imState[im.Node] = im.State
 			}
 		}
