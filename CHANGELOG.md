@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/zlmitchell/khealth-tui/compare/v1.3.5...v1.4.0) (2026-10-12)
+
+
+### Features
+
+* Check correctness review and ~30 new health checks, each tested live ([#8](https://github.com/zlmitchell/khealth-tui/issues/8)) ([3773479](https://github.com/zlmitchell/khealth-tui/commit/37734790b43a45ff2c013b86928181c27ca2bcf6))
+
 ## [1.3.5](https://github.com/zlmitchell/khealth-tui/compare/v1.3.4...v1.3.5) (2026-10-07)
 
 
