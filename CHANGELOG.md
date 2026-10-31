@@ -1,3 +1,11 @@
+## [1.4.1](https://github.com/zlmitchell/khealth-tui/compare/v1.4.0...v1.4.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **deps:** excelize past GO-2026-6688/6684 and Go 1.26.10 for govulncheck ([6ccf01d](https://github.com/zlmitchell/khealth-tui/commit/6ccf01dc7c62e720b7ed985e0cf39a9a011c76a3))
+* false STIG/CIS FAILs found hardening a 3-node RKE2 cluster ([bcd8b92](https://github.com/zlmitchell/khealth-tui/commit/bcd8b92465c27d45164abc698e700d9e65406f04))
+
 # [1.4.0](https://github.com/zlmitchell/khealth-tui/compare/v1.3.5...v1.4.0) (2026-10-12)
 
 
