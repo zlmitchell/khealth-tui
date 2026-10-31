@@ -389,6 +389,8 @@ func TestRKE2STIGRows(t *testing.T) {
 			pod("app", "web-2", "registry.example.com/web:1.3"),
 			pod("app", "db", "docker.io/library/postgres:16", corev1.EnvVar{Name: "POSTGRES_PASSWORD", Value: "hunter2"}),
 			pod("default", "debug", "busybox:latest"),
+			// RKE2's own helm-install Jobs: a switch named like a credential is not one
+			pod("kube-system", "helm-install-rke2-canal-x", "rancher/klipper-helm:v0.9.4", corev1.EnvVar{Name: "AUTH_PASS_CREDENTIALS", Value: "false"}),
 		},
 		KubeletConfigs: map[string]map[string]any{"cp-1": {"authentication": map[string]any{"anonymous": map[string]any{"enabled": false}}, "authorization": map[string]any{"mode": "Webhook"}, "readOnlyPort": float64(0), "protectKernelDefaults": true, "streamingConnectionIdleTimeout": "5m0s"}},
 	}
@@ -431,6 +433,18 @@ func TestRKE2STIGRows(t *testing.T) {
 			t.Errorf("%s detail: %+v (want %q)", id, r, sub)
 		}
 	}
+	if r := find(rs, "V-254567"); r == nil || strings.Contains(r.Detail, "AUTH_PASS_CREDENTIALS") {
+		t.Errorf("V-254567 flags a boolean switch: %+v", r)
+	}
+	// CIS 4.2.10 "not set to false": unset passes (RKE2 leaves it unset), an explicit false fails
+	if r := find(rs, "CIS-4.2.10"); r == nil || r.Status != Pass {
+		t.Errorf("CIS-4.2.10 with rotateCertificates unset: %+v, want Pass", r)
+	}
+	snap.KubeletConfigs["cp-1"]["rotateCertificates"] = false
+	if r := find(Evaluate(Input{Snap: snap, Nodes: nodes}), "CIS-4.2.10"); r == nil || r.Status != Fail {
+		t.Errorf("CIS-4.2.10 with rotateCertificates=false: %+v, want Fail", r)
+	}
+	delete(snap.KubeletConfigs["cp-1"], "rotateCertificates")
 	// the STIG applies to rke2/k3s only (an upstream cluster with upstream nodes)
 	snap.Distribution = "kubeadm"
 	nodes["cp-1"].Dist = "kubeadm"

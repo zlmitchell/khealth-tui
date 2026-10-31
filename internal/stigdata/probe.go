@@ -110,11 +110,12 @@ func Derive() Derived {
 				id := CheckID(r.VID, i)
 				switch c.Template {
 				case "file_permissions", "file_owner", "file_groupowner", "file_existence":
-					for _, fp := range c.List("FILEPATH") {
+					for j, fp := range c.List("FILEPATH") {
 						if !safeShellPath.MatchString(fp) {
 							continue
 						}
-						if scan, ok := fileScan(id, c, fp); ok {
+						if scan, ok := FileScan(c, j); ok {
+							scan.ID = id
 							scans = append(scans, scan)
 						} else {
 							stat[fp] = true
@@ -153,18 +154,26 @@ func Derive() Derived {
 	return out
 }
 
-// fileScan turns a recursive (or regex-in-directory) file check into a find
-// expression that prints only violators. Returns false when a plain stat of
-// the path is enough.
-func fileScan(id string, c Check, fp string) (FindScan, bool) {
+// FileScan turns the i-th FILEPATH of a recursive or regex-in-directory file
+// check into a find expression that prints only violators (ID left empty).
+// Returns false when a plain stat of the path is enough.
+//
+// CAC semantics: with FILE_REGEX the targets are the regular files in the
+// directory whose names match (never the directory itself); with RECURSIVE
+// and no FILE_REGEX the targets are the directory and its subdirectories.
+func FileScan(c Check, i int) (FindScan, bool) {
+	fps := c.List("FILEPATH")
+	if i < 0 || i >= len(fps) {
+		return FindScan{}, false
+	}
 	recursive := c.Bool("RECURSIVE")
-	isDir := c.Bool("IS_DIRECTORY")
-	regex := c.Str("FILE_REGEX")
+	regex := c.FileRegex(i)
 	if !recursive && regex == "" {
 		return FindScan{}, false
 	}
-	scan := FindScan{ID: id, Dirs: []string{strings.TrimRight(fp, "/")}, Type: "f"}
-	if isDir {
+	dir := strings.TrimRight(fps[i], "/")
+	scan := FindScan{Dirs: []string{dir}, Type: "f"}
+	if regex == "" && c.Bool("IS_DIRECTORY") {
 		scan.Type = "d"
 	}
 	var expr []string
@@ -172,9 +181,11 @@ func fileScan(id string, c Check, fp string) (FindScan, bool) {
 		expr = append(expr, "-maxdepth 1")
 	}
 	expr = append(expr, "-type "+scan.Type)
-	if regex != "" && regex != ".*" && regex != "^.*$" {
-		// CAC regexes are Python-style over the file name; POSIX extended is close enough
-		expr = append(expr, "-regextype posix-extended -regex '"+strings.ReplaceAll(fp, "'", "")+"("+strings.ReplaceAll(regex, "'", "")+")'")
+	if re := strings.TrimSuffix(strings.TrimPrefix(regex, "^"), "$"); re != "" && re != ".*" {
+		// CAC regexes are Python-style over the file name, anchored with ^...$;
+		// find -regex matches the whole path, so anchor on "<dir>/" instead.
+		// POSIX extended is close enough for the expressions the tables use.
+		expr = append(expr, "-regextype posix-extended -regex '"+strings.ReplaceAll(dir, "'", "")+"/("+strings.ReplaceAll(re, "'", "")+")'")
 	}
 	switch c.Template {
 	case "file_permissions":

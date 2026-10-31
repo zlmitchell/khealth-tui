@@ -220,7 +220,17 @@ func evalServiceEnabled(info *nodeinfo.Info, c stigdata.Check, _ string) (Status
 	if !guardApplies(c) {
 		return NA, ""
 	}
-	return evalUnitEnabled(info, c.Str("SERVICENAME")+".service")
+	name := c.Str("SERVICENAME")
+	st, msg := evalUnitEnabled(info, name+".service")
+	if st == Pass {
+		return st, msg
+	}
+	// a socket-activated service (pcscd --auto-exit) is idle until its socket starts it: the socket
+	// enabled and active is what the STIG checks (V-258125: systemctl is-active pcscd.socket)
+	if sst, _ := evalUnitEnabled(info, name+".socket"); sst == Pass {
+		return Pass, name + ".socket enabled and active (socket-activated)"
+	}
+	return st, msg
 }
 
 func evalServiceDisabled(info *nodeinfo.Info, c stigdata.Check, _ string) (Status, string) {
@@ -411,13 +421,22 @@ func fileCheck(info *nodeinfo.Info, c stigdata.Check, id string, pred func(p nod
 	if !info.STIGProbed {
 		return Manual, "node probe predates the OS STIG facts"
 	}
-	scanned := c.Bool("RECURSIVE") || c.Str("FILE_REGEX") != ""
-	if viol := info.STIGViol[id]; scanned && len(viol) > 0 {
-		return Fail, strutil.TruncList(viol, 5)
+	// A path with FILE_REGEX (or RECURSIVE) targets what the probe's find scan
+	// matched inside it, never the directory's own mode: stat'ing the
+	// directory against a file mode such as 0600 would demand an
+	// untraversable directory.
+	scanned := func(i int) bool { return c.Bool("RECURSIVE") || c.FileRegex(i) != "" }
+	fps := c.List("FILEPATH")
+	if viol := info.STIGViol[id]; len(viol) > 0 {
+		for i := range fps {
+			if scanned(i) {
+				return Fail, strutil.TruncList(viol, 5)
+			}
+		}
 	}
 	var probs []string
-	for _, fp := range c.List("FILEPATH") {
-		if scanned {
+	for i, fp := range fps {
+		if scanned(i) {
 			continue // covered by the find scan (no violators)
 		}
 		p, ok := info.STIGStat[strings.TrimRight(fp, "/")]
@@ -887,8 +906,17 @@ func evalSystemdDropin(info *nodeinfo.Info, c stigdata.Check, _ string) (Status,
 		return Fail, param + " not set in " + master + " or " + dropin
 	case compareOp("equals", got, want):
 		return Pass, ""
+	case dropinValueMatches(got, want):
+		return Pass, ""
 	}
 	return Fail, param + "=" + got + " (want " + want + ")"
+}
+
+// dropinValueMatches: the template's VALUE is a regular expression in CaC's OVAL ("none|default" for
+// NetworkManager's dns mode), matched against the whole value
+func dropinValueMatches(got, want string) bool {
+	re, err := regexp.Compile(`^(?:` + want + `)$`)
+	return err == nil && re.MatchString(got)
 }
 
 func evalDconf(info *nodeinfo.Info, c stigdata.Check, _ string) (Status, string) {

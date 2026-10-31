@@ -84,6 +84,9 @@ func (e *evaluator) byID(id string) *Result {
 
 var envSecretName = regexp.MustCompile(`(?i)(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL)`)
 
+// envFlagValue: a switch or a count, not a credential (RKE2's helm-install Jobs: AUTH_PASS_CREDENTIALS=false)
+var envFlagValue = regexp.MustCompile(`(?i)^(true|false|yes|no|on|off|enabled?|disabled?|[0-9]+)$`)
+
 func (e *evaluator) rke2STIGRules() {
 	s := e.in.Snap
 	if s.Distribution != "rke2" && s.Distribution != "k3s" {
@@ -201,7 +204,7 @@ func (e *evaluator) rke2STIGRules() {
 	checkContainers := func(ns, kind, name, owner string, cs []corev1.Container) {
 		for _, c := range cs {
 			for _, env := range c.Env {
-				if env.ValueFrom == nil && env.Value != "" && envSecretName.MatchString(env.Name) {
+				if env.ValueFrom == nil && env.Value != "" && envSecretName.MatchString(env.Name) && !envFlagValue.MatchString(env.Value) {
 					key := ns + "/" + kind + "/" + name
 					if !seen[key] {
 						seen[key] = true

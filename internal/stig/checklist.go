@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -371,16 +372,20 @@ func checkTargets(c stigdata.Check) []Target {
 		default:
 			cmd = "chgrp " + c.Str("GID_OR_NAME")
 		}
-		scoped := ""
-		if c.Bool("RECURSIVE") {
-			cmd += " -R"
-		}
-		if re := c.Str("FILE_REGEX"); re != "" {
-			scoped = " (files matching " + re + ")"
-		}
 		var out []Target
-		for _, fp := range c.List("FILEPATH") {
-			out = append(out, Target{Kind: TargetFile, Name: fp, Change: cmd + scoped})
+		for i, fp := range c.List("FILEPATH") {
+			change := cmd
+			// FILE_REGEX / RECURSIVE: fix only what the scan matches (the files
+			// inside, or the subdirectories), never chmod the directory to a
+			// file mode or chmod -R a tree that mixes files and directories.
+			if scan, ok := stigdata.FileScan(c, i); ok {
+				fix := cmd
+				if c.Template == "file_permissions" {
+					fix = "chmod " + stripModeBits(c.Str("FILEMODE"))
+				}
+				change = "find " + scan.Dirs[0] + " -xdev " + scan.Expr + " -exec " + fix + " {} +"
+			}
+			out = append(out, Target{Kind: TargetFile, Name: fp, Change: change})
 		}
 		return out
 	case "file_existence":
@@ -547,4 +552,37 @@ func (e *evaluator) finishTargets() {
 			}
 		}
 	}
+}
+
+// stripModeBits renders the symbolic chmod that removes every bit outside an
+// allowed octal mode ("or stricter" semantics), e.g. 0600 ->
+// "u-xs,g-rwxs,o-rwxt" and 0755 -> "g-w,o-w". Unparseable modes come back
+// unchanged.
+func stripModeBits(mode string) string {
+	m, err := strconv.ParseInt(mode, 8, 32)
+	if err != nil {
+		return mode
+	}
+	extra := 07777 &^ m
+	var parts []string
+	for _, w := range []struct {
+		who     string
+		shift   uint
+		special int64
+		sym     string
+	}{{"u", 6, 04000, "s"}, {"g", 3, 02000, "s"}, {"o", 0, 01000, "t"}} {
+		var b strings.Builder
+		for j, r := range "rwx" {
+			if extra&(04>>j<<w.shift) != 0 {
+				b.WriteRune(r)
+			}
+		}
+		if extra&w.special != 0 {
+			b.WriteString(w.sym)
+		}
+		if b.Len() > 0 {
+			parts = append(parts, w.who+"-"+b.String())
+		}
+	}
+	return strings.Join(parts, ",")
 }

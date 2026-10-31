@@ -92,9 +92,16 @@ func (e *evaluator) cisKubeletRules() {
 		}
 		return Fail, "tlsCipherSuites not set"
 	})
-	e.perNode("CIS-4.2.10", "kubelet client certificate rotation enabled", "II", g, fix, nodes, func(n string) (Status, string) {
-		if b, _ := cfg(n)["rotateCertificates"].(bool); b {
+	// CIS 4.2.10 is "--rotate-certificates is not set to false": its audit passes when the setting is
+	// absent. configz drops a false bool, so absent and false look alike there; RKE2 leaves it unset because
+	// its supervisor issues and renews the kubelet's client certificate itself
+	e.perNode("CIS-4.2.10", "kubelet client certificate rotation not disabled", "II", g, fix, nodes, func(n string) (Status, string) {
+		v, set := cfg(n)["rotateCertificates"]
+		if b, _ := v.(bool); b {
 			return Pass, ""
+		}
+		if !set {
+			return Pass, "rotateCertificates not set (the benchmark's audit: not set to false); on RKE2 the supervisor renews the kubelet client certificate"
 		}
 		return Fail, "rotateCertificates=false"
 	})

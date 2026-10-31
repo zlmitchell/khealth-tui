@@ -92,6 +92,21 @@ func (c Check) List(key string) []string {
 	return nil
 }
 
+// FileRegex returns the FILE_REGEX for the i-th FILEPATH. ComplianceAsCode
+// preprocesses it into a list parallel to FILEPATH; a single string applies to
+// every path. "" means the path itself is the target; non-empty means the
+// regular files inside the (directory) path whose names match.
+func (c Check) FileRegex(i int) string {
+	l := c.List("FILE_REGEX")
+	switch {
+	case len(l) == 1:
+		return l[0]
+	case i >= 0 && i < len(l):
+		return l[i]
+	}
+	return ""
+}
+
 // Value returns the effective value for a template that takes either a
 // literal (valueKey) or an XCCDF variable (varKey) resolved by the generator.
 func (c Check) Value(valueKey, varKey string) string {
