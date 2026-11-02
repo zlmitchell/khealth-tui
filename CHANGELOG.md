@@ -1,3 +1,10 @@
+## [1.4.2](https://github.com/zlmitchell/khealth-tui/compare/v1.4.1...v1.4.2) (2026-11-02)
+
+
+### Bug Fixes
+
+* false Ubuntu 24.04 STIG FAILs found hardening a 3-node kubeadm cluster ([2fd3c8e](https://github.com/zlmitchell/khealth-tui/commit/2fd3c8e2a325c3db833d7ccd663342e4ab93452c))
+
 ## [1.4.1](https://github.com/zlmitchell/khealth-tui/compare/v1.4.0...v1.4.1) (2026-10-31)
 
 
