@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -43,11 +44,14 @@ type Runner struct {
 	knownMu    sync.Mutex // knownKeys/knownTypes are written by recordNewHostKey from parallel dials
 	notes      []string
 
-	mu      sync.Mutex
-	clients map[string]*ssh.Client
-	bastion *ssh.Client
-	sem     chan struct{}
-	become  map[string]becomeMethod // per host: how to run as root (see become.go)
+	mu       sync.Mutex
+	clients  map[string]*ssh.Client
+	dialing  map[string]*sync.Mutex // per addr: serializes the first dial (see client)
+	dials    atomic.Int64           // TCP connections opened to nodes (tests, Dials)
+	dialFail map[string]dialFailure // per addr: the last failed dial (see client)
+	bastion  *ssh.Client
+	sem      chan struct{}
+	become   map[string]becomeMethod // per host: how to run as root (see become.go)
 
 	// hostKeys is written from inside the handshake, which bastionClient
 	// runs with mu held, so it has its own lock.
@@ -268,6 +272,10 @@ func readKnownKeys(path string) (map[string]bool, []string) {
 	return keys, types
 }
 
+// Dials is the number of SSH connections this runner has opened to nodes
+// (the bastion not counted).
+func (r *Runner) Dials() int64 { return r.dials.Load() }
+
 // Notes describes the auth methods that were set up.
 func (r *Runner) Notes() []string { return r.notes }
 
@@ -449,16 +457,55 @@ func (r *Runner) explainDial(err error) error {
 	return fmt.Errorf("%sssh: authentication refused for user %s (offered: %s): set --ssh-user / --ssh-key (or ssh.user / ssh.key in the config, --ask-pass for a password); khealth user@host remembers them per cluster", prefix, user, tried)
 }
 
+type dialFailure struct {
+	err error
+	at  time.Time
+}
+
+// dialFailMemo is how long a failed dial answers for the host.
+var dialFailMemo = 5 * time.Second
+
+// client returns the cached connection to host, dialing it once. Concurrent
+// first calls (the node and etcd probes start together) wait for the one
+// dial instead of each opening a TCP connection: every script to a host runs
+// as a session on one connection, which keeps khealth under per-source SSH
+// rate limits such as ufw's `limit 22/tcp` (6 new connections per 30 s).
 func (r *Runner) client(host string) (*ssh.Client, error) {
 	addr := r.addr(host)
 	r.mu.Lock()
+	if r.dialing == nil {
+		r.dialing = map[string]*sync.Mutex{}
+	}
+	dm := r.dialing[addr]
+	if dm == nil {
+		dm = &sync.Mutex{}
+		r.dialing[addr] = dm
+	}
+	r.mu.Unlock()
+	dm.Lock()
+	defer dm.Unlock()
+	r.mu.Lock()
 	c, ok := r.clients[addr]
+	failed, failedOK := r.dialFail[addr]
 	r.mu.Unlock()
 	if ok {
 		return c, nil
 	}
+	if failedOK && time.Since(failed.at) < dialFailMemo {
+		// the callers that queued behind a failed dial share its error
+		// instead of each knocking again (a rate-limited port re-arms its
+		// window on every blocked attempt)
+		return nil, failed.err
+	}
+	r.dials.Add(1)
 	c, err := r.dial(addr, r.cfg.User)
 	if err != nil {
+		r.mu.Lock()
+		if r.dialFail == nil {
+			r.dialFail = map[string]dialFailure{}
+		}
+		r.dialFail[addr] = dialFailure{err: err, at: time.Now()}
+		r.mu.Unlock()
 		return nil, err
 	}
 	r.mu.Lock()

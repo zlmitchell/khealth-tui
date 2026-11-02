@@ -187,6 +187,29 @@ func FileScan(c Check, i int) (FindScan, bool) {
 		// POSIX extended is close enough for the expressions the tables use.
 		expr = append(expr, "-regextype posix-extended -regex '"+strings.ReplaceAll(dir, "'", "")+"/("+strings.ReplaceAll(re, "'", "")+")'")
 	}
+	// EXCLUDED_FILES are name globs the CAC check skips (wtmp/btmp/lastlog
+	// under /var/log, written 0660/0664 by login accounting by design)
+	for _, g := range c.ExcludedFiles() {
+		if globRe.MatchString(g) {
+			expr = append(expr, "! -name '"+g+"'")
+		}
+	}
+	// owner alternatives ("adm|root"): a violator matches none of them
+	owners := func(key, byID, byName string) bool {
+		n := 0
+		for _, w := range c.Owners(key) {
+			switch {
+			case IsID(w):
+				expr = append(expr, "! "+byID+" "+w)
+			case wordRe.MatchString(w):
+				expr = append(expr, "! "+byName+" "+w)
+			default:
+				continue
+			}
+			n++
+		}
+		return n > 0
+	}
 	switch c.Template {
 	case "file_permissions":
 		mode, err := strconv.ParseInt(c.Str("FILEMODE"), 8, 32)
@@ -196,16 +219,12 @@ func FileScan(c Check, i int) (FindScan, bool) {
 		// any bit set outside the allowed mode is a violation
 		expr = append(expr, fmt.Sprintf("-perm /%04o", 07777&^mode))
 	case "file_owner":
-		if c.Bool("OWNER_REPRESENTED_WITH_UID") {
-			expr = append(expr, "! -uid "+shellWord(c.Str("UID_OR_NAME")))
-		} else {
-			expr = append(expr, "! -user "+shellWord(c.Str("UID_OR_NAME")))
+		if !owners("UID_OR_NAME", "-uid", "-user") {
+			return FindScan{}, false
 		}
 	case "file_groupowner":
-		if c.Bool("GROUP_REPRESENTED_WITH_GID") {
-			expr = append(expr, "! -gid "+shellWord(c.Str("GID_OR_NAME")))
-		} else {
-			expr = append(expr, "! -group "+shellWord(c.Str("GID_OR_NAME")))
+		if !owners("GID_OR_NAME", "-gid", "-group") {
+			return FindScan{}, false
 		}
 	default:
 		return FindScan{}, false
@@ -214,14 +233,10 @@ func FileScan(c Check, i int) (FindScan, bool) {
 	return scan, true
 }
 
-var wordRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-
-func shellWord(s string) string {
-	if wordRe.MatchString(s) {
-		return s
-	}
-	return "root"
-}
+var (
+	wordRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	globRe = regexp.MustCompile(`^[A-Za-z0-9_.*?\[\]-]+$`)
+)
 
 // ProbeScript renders the data-derived probe sections. `mask` and `sec` are
 // defined by the surrounding node script.

@@ -118,7 +118,14 @@ func Run(ctx context.Context, cfg config.Config, o Options) (*Result, error) {
 		res.Targets, res.Offline = Targets(cfg, snap)
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		base := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, Config: true, Journal: o.Heavy, Images: o.Heavy, PVs: o.Heavy, OSStig: o.Scan, CPUSample: true}
+		// The OS STIG facts are not part of the node probe: they are collected
+		// after it in the scan stages (nodeinfo.STIGStages), as the TUI's
+		// Shift+S does, each stage with its own timeout and the filesystem
+		// sweep with the long one. In one script they all shared the node
+		// probe's deadline, and a slow first (cold cache) sweep cut the
+		// output short: the stages after the cut were scored from missing
+		// facts, or the node and with it the OS benchmark dropped out.
+		base := nodeinfo.Options{LogLines: cfg.Logs.Lines, LogSince: cfg.Logs.Since, Config: true, Journal: o.Heavy, Images: o.Heavy, PVs: o.Heavy, CPUSample: true}
 		for _, t := range res.Targets {
 			wg.Add(1)
 			go func(t Target) {
@@ -127,11 +134,18 @@ func Run(ctx context.Context, cfg config.Config, o Options) (*Result, error) {
 				defer cancel()
 				r := runner.Run(c, t.Host, nodeinfo.Script(withNetTargets(base, snap, t.Name)))
 				raw("node", t, r)
-				if r.Err != nil && !strings.Contains(r.Stdout, "===END") {
-					fmt.Fprintf(log, "node probe %s: %v %s\n", t.Name, r.Err, r.Stderr)
-				}
 				info := nodeinfo.Parse(t.Name, t.Host, r.Stdout, r.Started)
 				info.HostKey = r.HostKey
+				if r.Err != nil && !strings.Contains(r.Stdout, "===END") {
+					fmt.Fprintf(log, "node probe %s: %v %s\n", t.Name, r.Err, r.Stderr)
+					// as the TUI does: the node's facts are incomplete, so the
+					// checks report the collection failure instead of
+					// evaluating what came back
+					info.Err = probeErr(r)
+				}
+				if o.Scan {
+					scanSTIG(ctx, runner, cfg.SSH.Timeout, t, info, r.Stdout == "" && r.Err != nil, raw, log)
+				}
 				ls := info.ClassifyLogs(in.Now)
 				mu.Lock()
 				in.Nodes[t.Name] = info
@@ -167,6 +181,46 @@ func Run(ctx context.Context, cfg config.Config, o Options) (*Result, error) {
 	res.Input = in
 	res.Findings = checks.Evaluate(in)
 	return res, nil
+}
+
+func probeErr(r sshrun.Result) error {
+	msg := r.Err.Error()
+	if s := strings.TrimSpace(r.Stderr); s != "" {
+		msg += ": " + strutil.FirstLine(s)
+	}
+	return fmt.Errorf("%s", msg)
+}
+
+// scanSTIG runs the OS STIG collection stages on one node, one after the
+// other on the node's one SSH connection, and adopts the facts when every
+// stage answered. Otherwise info.STIGErr says which stage failed, so the OS
+// STIG rules show the node as not scanned rather than scoring partial
+// facts or leaving the node out. unreachable skips the stages (the node
+// probe could not connect): knocking again only re-arms a rate limit.
+func scanSTIG(ctx context.Context, runner *sshrun.Runner, timeout time.Duration, t Target, info *nodeinfo.Info, unreachable bool, raw func(string, Target, sshrun.Result), log io.Writer) {
+	if unreachable {
+		info.STIGErr = "node unreachable: " + info.Err.Error()
+		fmt.Fprintf(log, "OS STIG %s: not scanned (%s)\n", t.Name, info.STIGErr)
+		return
+	}
+	facts := &nodeinfo.Info{Node: t.Name, Host: t.Host}
+	for _, st := range nodeinfo.STIGStages() {
+		d := 3 * timeout
+		if st.Slow {
+			d = 6 * timeout
+		}
+		c, cancel := context.WithTimeout(ctx, d)
+		r := runner.Run(c, t.Host, nodeinfo.STIGStageScript(st.Name))
+		cancel()
+		raw("stig:"+st.Name, t, r)
+		if r.Err != nil && !strings.Contains(r.Stdout, "===END") {
+			info.STIGErr = st.Name + " stage: " + probeErr(r).Error()
+			fmt.Fprintf(log, "OS STIG %s: not scanned (%s)\n", t.Name, info.STIGErr)
+			return
+		}
+		nodeinfo.ParseSTIGStage(facts, r.Stdout)
+	}
+	info.AdoptSTIG(facts, time.Now())
 }
 
 // withNetTargets adds the CNI probe targets of a node (one pod on every

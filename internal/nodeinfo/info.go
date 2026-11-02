@@ -124,6 +124,10 @@ type Info struct {
 	Lsblk          []string              // NAME TYPE MOUNTPOINT
 	STIGProbed     bool                  // OS STIG facts present (collected by this or a previous probe)
 	STIGCollected  time.Time             // when the OS STIG facts were collected
+	// STIGErr: the OS STIG collection was asked for and did not complete on
+	// this node (the stage that failed and why). The OS STIG rules report
+	// the node as not scanned instead of scoring it from partial facts.
+	STIGErr string
 
 	// every refresh: disk filesystems mounted read-only, conntrack table fill
 	ROMounts       []ROMount

@@ -92,6 +92,52 @@ func (c Check) List(key string) []string {
 	return nil
 }
 
+// Owners returns the accepted owners of a file_owner / file_groupowner check
+// (key UID_OR_NAME or GID_OR_NAME). ComplianceAsCode writes alternatives as a
+// regex alternation ("adm|root", "syslog|root") and its OWNER/GROUP
+// _REPRESENTED_WITH_ID flag does not reliably say whether the value is a
+// number ("syslog" comes with GROUP_REPRESENTED_WITH_GID: true), so each
+// alternative is classified by its own form: all digits is an id, anything
+// else a name.
+func (c Check) Owners(key string) []string {
+	var out []string
+	for _, w := range strings.Split(c.Str(key), "|") {
+		if w = strings.TrimSpace(strings.Trim(strings.TrimSpace(w), "^$()")); w != "" {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// IsID reports whether an owner alternative (see Owners) is a numeric uid/gid.
+func IsID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// OwnerMatches reports whether a file's owner (name and numeric id) is one of
+// the accepted alternatives.
+func OwnerMatches(want []string, name, id string) bool {
+	for _, w := range want {
+		if IsID(w) && w == id || !IsID(w) && w == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ExcludedFiles returns the EXCLUDED_FILES of a file template: shell globs
+// over the file name (wtmp, btmp, lastlog under /var/log) that a recursive
+// or FILE_REGEX scan skips.
+func (c Check) ExcludedFiles() []string { return c.List("EXCLUDED_FILES") }
+
 // FileRegex returns the FILE_REGEX for the i-th FILEPATH. ComplianceAsCode
 // preprocesses it into a list parallel to FILEPATH; a single string applies to
 // every path. "" means the path itself is the target; non-empty means the

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -723,5 +724,58 @@ func TestAuthRefusedMessage(t *testing.T) {
 	}
 	if strings.Contains(msg, "handshake failed") {
 		t.Errorf("library wording left in: %q", msg)
+	}
+}
+
+// Scripts started together on a host (the node and etcd probes, the scan
+// stages) share one SSH connection: a burst of dials trips per-source rate
+// limits such as ufw's `limit 22/tcp` (6 per 30 s).
+func TestConcurrentRunsShareOneDial(t *testing.T) {
+	srv := sshtest.New(t, hostHandler{uid: "0"}.handle)
+	cfg := testCfg(srv)
+	cfg.Concurrency = 6
+	r := newRunner(t, cfg)
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if res := r.Run(context.Background(), srv.Addr, "echo hi\n"); res.Err != nil {
+				t.Errorf("run: %v", res.Err)
+			}
+		}()
+	}
+	wg.Wait()
+	if srv.Dials() != 1 || r.Dials() != 1 {
+		t.Errorf("6 concurrent runs opened %d connections (runner counted %d), want 1", srv.Dials(), r.Dials())
+	}
+}
+
+// Runs queued behind a failed dial get its error instead of each dialing
+// again (every blocked attempt re-arms a rate limit's window).
+func TestFailedDialNotRepeatedInABurst(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	srv := sshtest.New(t, nil)
+	cfg := testCfg(srv)
+	cfg.Concurrency = 4
+	r := newRunner(t, cfg)
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if res := r.Run(context.Background(), addr, "x\n"); res.Err == nil {
+				t.Errorf("run to a closed port succeeded")
+			}
+		}()
+	}
+	wg.Wait()
+	if r.Dials() != 1 {
+		t.Errorf("4 runs to an unreachable host dialed %d times, want 1", r.Dials())
 	}
 }

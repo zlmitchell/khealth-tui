@@ -181,12 +181,15 @@ func init() {
 			}
 			return failIf(bad, "audit logs not group-owned by "+group)
 		},
-		"directory_permissions_var_log_audit": auditDir(func(f []string) string {
-			if m, ok := modeBits(f[1]); ok && m&^0o700 != 0 {
-				return "mode " + f[1]
-			}
-			return ""
-		}),
+		"directory_permissions_var_log_audit": func(i *nodeinfo.Info) (Status, string) {
+			max := auditDirMaxMode(i)
+			return auditDir(func(f []string) string {
+				if m, ok := modeBits(f[1]); !ok || m&^max != 0 {
+					return fmt.Sprintf("mode %s (want %04o or less permissive)", f[1], max)
+				}
+				return ""
+			})(i)
+		},
 		"file_permissions_var_log_audit": func(i *nodeinfo.Info) (Status, string) {
 			return failIf(sweep(i, "AUDITLOGPERM"), "audit logs more permissive than 0600")
 		},
@@ -222,7 +225,24 @@ func auditWatchExec(paths ...string) namedEval {
 	}
 }
 
-// auditDir checks the AUDITDIR sweep line: path|mode|owner|group.
+// auditDirMaxMode is the most permissive mode the audit log directory may
+// have. The Ubuntu 22.04/24.04 STIG text says "0750 or less permissive"
+// whatever log_group is; the RHEL texts want 0700, or 0750 when auditd.conf
+// gives the logs a group other than root (RHEL 10; CAC uses the same rule).
+func auditDirMaxMode(i *nodeinfo.Info) int64 {
+	if isUbuntu(i) {
+		return 0o750
+	}
+	if g, ok := keyValue(i, "log_group", "/etc/audit/auditd.conf"); ok && g != "" && g != "root" && g != "0" {
+		return 0o750
+	}
+	return 0o700
+}
+
+// auditDir checks the AUDITDIR sweep line: path|mode|owner|group, the
+// directory of auditd.conf's log_file (default /var/log/audit). The sweep
+// prints AUDITDIRNONE when that directory does not exist; no line at all
+// means the sweep did not run to that point, which is not a finding.
 func auditDir(pred func(f []string) string) namedEval {
 	return func(i *nodeinfo.Info) (Status, string) {
 		for _, l := range sweep(i, "AUDITDIR") {
@@ -235,7 +255,10 @@ func auditDir(pred func(f []string) string) namedEval {
 			}
 			return Pass, ""
 		}
-		return Fail, "/var/log/audit not present"
+		if none := sweep(i, "AUDITDIRNONE"); len(none) > 0 {
+			return Fail, none[0] + " not present"
+		}
+		return Unknown, "audit log directory not collected (filesystem sweep incomplete)"
 	}
 }
 

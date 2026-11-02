@@ -130,6 +130,7 @@ func Evaluate(in Input) []Result {
 	e.cisRules()
 	if len(e.sshNodes()) == 0 {
 		e.add(Result{ID: "node", Title: "Node-level checks (sysctls, file permissions, rke2 profile, OS hardening)", Cat: "-", Group: "node", Status: Unknown, Detail: "no SSH data", Fix: "enable SSH collection"})
+		e.osRules() // nodes whose OS STIG scan was asked for and failed (STIGErr)
 	} else {
 		e.nodeRules()
 		e.cisNodeRules()
@@ -196,7 +197,7 @@ func (e *evaluator) perNode(id, title, cat, group, fix string, nodes []string, c
 		return
 	}
 	sort.Strings(nodes)
-	var fails, manual []string
+	var fails, manual, unknown []string
 	passes := 0
 	passDetail := "" // kept when every passing node reports the same evidence
 	per := make(map[string]Status, len(nodes))
@@ -215,13 +216,20 @@ func (e *evaluator) perNode(id, title, cat, group, fix string, nodes []string, c
 			fails = append(fails, n+": "+detail)
 		case Manual:
 			manual = append(manual, n+": "+detail)
+		case Unknown:
+			unknown = append(unknown, n+": "+detail)
 		}
 	}
 	r := Result{ID: id, Title: title, Cat: cat, Group: group, Fix: fix, PerNode: per}
 	switch {
 	case len(fails) > 0:
 		r.Status = Fail
-		r.Detail = strings.Join(fails, "; ")
+		r.Detail = strings.Join(append(fails, unknown...), "; ")
+	case len(unknown) > 0:
+		// a node that was not evaluated keeps the rule from passing: the
+		// others' PASS is not the cluster's
+		r.Status = Unknown
+		r.Detail = strings.Join(append(unknown, manual...), "; ")
 	case len(manual) > 0:
 		r.Status = Manual
 		r.Detail = strings.Join(manual, "; ")

@@ -361,19 +361,63 @@ func (e *evaluator) osRules() {
 	// The whole OS group waits for the on-demand collection (Shift+S on
 	// the Security tab): with even a couple of rows from the regular probe the
 	// sub-tab draws a score and a table that read as a finished scan.
-	var nodes []string
-	for _, n := range e.sshNodes() {
-		if ni(n).STIGProbed {
+	// A node whose collection was asked for and failed (STIGErr) is listed
+	// too, as not scanned on every rule of its benchmark: leaving it out
+	// would show a score for the nodes that answered as if it were the
+	// cluster's, or drop the whole OS benchmark when none answered.
+	var nodes, unscanned []string
+	for _, n := range strutil.SortedKeys(e.in.Nodes) {
+		switch info := ni(n); {
+		case info == nil:
+		case info.STIGProbed:
 			nodes = append(nodes, n)
+		case info.STIGErr != "":
+			unscanned = append(unscanned, n)
 		}
 	}
-	if len(nodes) == 0 {
+	if len(nodes) == 0 && len(unscanned) == 0 {
 		return
 	}
 
 	groups := map[*OSBenchmark][]string{}
 	for _, n := range nodes {
 		groups[OSBenchmarkFor(ni(n).OS)] = append(groups[OSBenchmarkFor(ni(n).OS)], n)
+	}
+	var lost []string // not scanned, OS unknown (the node probe did not answer either)
+	for _, n := range unscanned {
+		if b := OSBenchmarkFor(ni(n).OS); b != nil || ni(n).OS.ID != "" {
+			groups[b] = append(groups[b], n)
+		} else {
+			lost = append(lost, n)
+		}
+	}
+	if len(lost) > 0 {
+		// the OS is unknown: count the node against the one benchmark the
+		// others use, else report it on its own row
+		var only *OSBenchmark
+		known := 0
+		for b := range groups {
+			only = b
+			known++
+		}
+		if known == 1 && only != nil {
+			groups[only] = append(groups[only], lost...)
+		} else {
+			var why []string
+			for _, n := range lost {
+				why = append(why, n+": "+ni(n).STIGErr)
+			}
+			e.add(Result{ID: "OS-scan", Title: "OS STIG facts collected on every node", Cat: "-", Group: g, Status: Unknown, Detail: "not scanned: " + strings.Join(why, "; "), Fix: "check SSH to the node (reachability, rate limits such as ufw limit 22/tcp, timeouts) and scan again"})
+		}
+	}
+	// the evaluators run only for scanned nodes
+	notScanned := func(eval func(string) (Status, string)) func(string) (Status, string) {
+		return func(n string) (Status, string) {
+			if info := ni(n); !info.STIGProbed {
+				return Unknown, "not scanned (" + info.STIGErr + ")"
+			}
+			return eval(n)
+		}
 	}
 	var order []*OSBenchmark
 	for b := range groups {
@@ -389,7 +433,7 @@ func (e *evaluator) osRules() {
 		members := groups[b]
 		if b == nil {
 			for _, c := range osChecks {
-				e.perNode(c.id, c.title, c.cat, g, c.fix, members, func(n string) (Status, string) { return c.eval(ni(n)) })
+				e.perNode(c.id, c.title, c.cat, g, c.fix, members, notScanned(func(n string) (Status, string) { return c.eval(ni(n)) }))
 				if c.target != nil {
 					e.out[len(e.out)-1].Targets = []Target{*c.target}
 				}
@@ -405,7 +449,7 @@ func (e *evaluator) osRules() {
 					continue
 				}
 				start := len(e.out)
-				e.perNode(r.ID, c.title, r.Cat, g, c.fix, members, func(n string) (Status, string) { return c.eval(ni(n)) })
+				e.perNode(r.ID, c.title, r.Cat, g, c.fix, members, notScanned(func(n string) (Status, string) { return c.eval(ni(n)) }))
 				for i := start; i < len(e.out); i++ {
 					e.out[i].Ref = b.String()
 					if c.target != nil {
@@ -426,9 +470,9 @@ func (e *evaluator) osRules() {
 					targets = []Target{*oc.target}
 				}
 				fix = oc.fix + "\n\nSTIG: " + rule.Fix
-				e.perNode(rule.VID, rule.Title, rule.Cat, g, fix, members, func(n string) (Status, string) { return oc.eval(ni(n)) })
+				e.perNode(rule.VID, rule.Title, rule.Cat, g, fix, members, notScanned(func(n string) (Status, string) { return oc.eval(ni(n)) }))
 			} else if templated(rule) {
-				e.perNode(rule.VID, rule.Title, rule.Cat, g, fix, members, func(n string) (Status, string) { return evalTemplated(ni(n), rule) })
+				e.perNode(rule.VID, rule.Title, rule.Cat, g, fix, members, notScanned(func(n string) (Status, string) { return evalTemplated(ni(n), rule) }))
 			} else {
 				reason := "not automated by ComplianceAsCode"
 				if rule.Status != "unmapped" && len(rule.Checks) > 0 {

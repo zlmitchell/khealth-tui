@@ -474,24 +474,26 @@ func evalFilePermissions(info *nodeinfo.Info, c stigdata.Check, id string) (Stat
 }
 
 func evalFileOwner(info *nodeinfo.Info, c stigdata.Check, id string) (Status, string) {
-	want := c.Str("UID_OR_NAME")
-	byUID := c.Bool("OWNER_REPRESENTED_WITH_UID")
+	// UID_OR_NAME may be an alternation ("syslog|root") and its
+	// OWNER_REPRESENTED_WITH_UID flag is not reliable: see Check.Owners
+	want := c.Owners("UID_OR_NAME")
 	return fileCheck(info, c, id, func(p nodeinfo.Perm) string {
-		if byUID && p.UID == want || !byUID && p.User == want {
+		if stigdata.OwnerMatches(want, p.User, p.UID) {
 			return ""
 		}
-		return "owner " + p.User + " (want " + want + ")"
+		return "owner " + p.User + " (want " + strings.Join(want, " or ") + ")"
 	})
 }
 
 func evalFileGroupOwner(info *nodeinfo.Info, c stigdata.Check, id string) (Status, string) {
-	want := c.Str("GID_OR_NAME")
-	byGID := c.Bool("GROUP_REPRESENTED_WITH_GID")
+	// GID_OR_NAME "syslog" arrives with GROUP_REPRESENTED_WITH_GID: true and
+	// "adm|root" is an alternation: see Check.Owners
+	want := c.Owners("GID_OR_NAME")
 	return fileCheck(info, c, id, func(p nodeinfo.Perm) string {
-		if byGID && p.GID == want || !byGID && p.Group == want {
+		if stigdata.OwnerMatches(want, p.Group, p.GID) {
 			return ""
 		}
-		return "group " + p.Group + " (want " + want + ")"
+		return "group " + p.Group + " (want " + strings.Join(want, " or ") + ")"
 	})
 }
 

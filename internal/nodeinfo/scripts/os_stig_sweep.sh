@@ -11,6 +11,18 @@
 # (===NAME lines) and parsed by the Go side; keep names in sync with the
 # parser.
 sec STIGSWEEP
+# Audit log directory first: cheap, and it must not wait on the slow
+# filesystem pass below. The directory is the one of auditd.conf's log_file
+# (the STIG's own lookup), /var/log/audit when unset; a missing one prints
+# AUDITDIRNONE so "absent" is told apart from "not collected".
+ald=$(sed -n 's/^[[:space:]]*log_file[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p' /etc/audit/auditd.conf 2>/dev/null | tail -n 1)
+ald=${ald%/*}; [ -n "$ald" ] || ald=/var/log/audit
+if [ -d "$ald" ]; then
+  stat -c 'AUDITDIR|%n|%a|%U|%G' "$ald" 2>/dev/null
+  find "$ald" -maxdepth 1 -type f \( -perm /177 -printf 'AUDITLOGPERM|%p|%m\n' \) -o \( ! -user root -printf 'AUDITLOGOWNER|%p|%U\n' \) -o \( ! -group root -printf 'AUDITLOGGROUP|%p|%G\n' \) 2>/dev/null | head -10
+else
+  echo "AUDITDIRNONE|$ald"
+fi
 # Host filesystems only: overlay/nsfs mounts are running containers' root
 # filesystems (150+ on a busy node) and the image layer stores are not the
 # host either. One find pass prints numeric uid/gid, type and mode and awk
@@ -45,8 +57,4 @@ awk -F: '($3>=1000)&&($1!="nobody")&&($7 !~ /(nologin|false)$/){print $1":"$4":"
   grep -iHs 'path=' "$h"/.[!.]* 2>/dev/null | grep -v bash_history | grep -v '^[^:]*:[[:space:]]*#' | head -5 | sed "s#^#PATHLINE|$u|#"
   find "$h" -maxdepth 2 -mindepth 1 ! -name '.*' \( -perm /027 -printf "HOMEPERM|$u|%p|%m\n" \) -o \( ! -gid "$g" -printf "HOMEGROUP|$u|%p|%G\n" \) 2>/dev/null | head -10
 done
-if [ -d /var/log/audit ]; then
-  stat -c 'AUDITDIR|%n|%a|%U|%G' /var/log/audit 2>/dev/null
-  find /var/log/audit -maxdepth 1 -type f \( -perm /177 -printf 'AUDITLOGPERM|%p|%m\n' \) -o \( ! -user root -printf 'AUDITLOGOWNER|%p|%U\n' \) -o \( ! -group root -printf 'AUDITLOGGROUP|%p|%G\n' \) 2>/dev/null | head -10
-fi
 stat -c 'SSHKEY|%n|%a' /etc/ssh/ssh_host_*_key 2>/dev/null

@@ -368,9 +368,10 @@ func checkTargets(c stigdata.Check) []Target {
 		case "file_permissions":
 			cmd = "chmod " + c.Str("FILEMODE")
 		case "file_owner":
-			cmd = "chown " + c.Str("UID_OR_NAME")
+			cmd = "chown " + strutil.FirstNonEmpty(append(c.Owners("UID_OR_NAME"), "<owner>")...)
 		default:
-			cmd = "chgrp " + c.Str("GID_OR_NAME")
+			// the first CAC alternative is the STIG's own value ("adm" of "adm|root")
+			cmd = "chgrp " + strutil.FirstNonEmpty(append(c.Owners("GID_OR_NAME"), "<group>")...)
 		}
 		var out []Target
 		for i, fp := range c.List("FILEPATH") {
